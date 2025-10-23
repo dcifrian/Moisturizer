@@ -12,8 +12,16 @@ from typing import List, Optional, Dict, Tuple, Set
 import json
 import time
 from pathlib import Path
-import torch
-from torch.utils.data import Dataset
+
+# PyTorch imports - optional, only needed for Dataset class
+try:
+    import torch
+    from torch.utils.data import Dataset
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("Warning: PyTorch not available. SoilMoistureSequenceDataset will not work.")
+    print("         Data collection functionality will still work normally.")
 
 
 class MeteoGaliciaCollector:
@@ -274,7 +282,8 @@ class MeteoGaliciaCollector:
         df = pd.DataFrame(rows)
 
         if not df.empty:
-            df['date'] = pd.to_datetime(df['date'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
+            # Let pandas auto-detect the date format (API returns ISO format)
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
             df['value'] = pd.to_numeric(df['value'], errors='coerce')
 
         return df
@@ -526,10 +535,21 @@ class MeteoGaliciaCollector:
         }
 
 
-class SoilMoistureSequenceDataset(Dataset):
+# Only define Dataset class if PyTorch is available
+if TORCH_AVAILABLE:
+    _BaseDataset = Dataset
+else:
+    _BaseDataset = object
+
+
+class SoilMoistureSequenceDataset(_BaseDataset):
     """
     PyTorch Dataset for soil moisture prediction with temporal sequences
     Suitable for transformer models
+
+    Note: Requires PyTorch to be installed. If PyTorch is not available,
+    this class can still be instantiated but PyTorch-specific functionality
+    (tensors, DataLoader) will not work.
     """
 
     def __init__(
@@ -658,7 +678,7 @@ class SoilMoistureSequenceDataset(Dataset):
             target_station_id: int,
             start_date: pd.Timestamp,
             end_date: pd.Timestamp
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> 'Tuple[torch.Tensor, torch.Tensor, torch.Tensor]':
         """
         Build sequence tensor for a sample
 
@@ -740,7 +760,7 @@ class SoilMoistureSequenceDataset(Dataset):
     def __len__(self) -> int:
         return len(self.sample_index)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> 'Dict[str, torch.Tensor]':
         """
         Get a sample
 
