@@ -31,6 +31,52 @@ class MeteoGaliciaCollector:
     STATIONS_URL = "https://servizos.meteogalicia.gal/mgrss/observacion/listaEstacionsMeteo.action"
     SOIL_MOISTURE_PARAM = "HS_CV_AVG_-0.2m"
 
+    # All available sensors from MeteoGalicia API
+    ALL_SENSORS = [
+        'TO_AVG_1.5m',      # Dew point temperature at 1.5m
+        'TO_AVG_15m',       # Dew point temperature at 15m
+        'TS_AVG_-0.1m',     # Soil temperature at -0.1m
+        'TA_MAX_1.5m',      # Maximum air temperature at 1.5m
+        'TA_MAX_15m',       # Maximum air temperature at 15m
+        'TA_AVG_0.1m',      # Average air temperature at 0.1m
+        'TA_AVG_15m',       # Average air temperature at 15m
+        'TA_AVG_1.5m',      # Average air temperature at 1.5m
+        'TA_MIN_1.5m',      # Minimum air temperature at 1.5m
+        'TA_MIN_15m',       # Minimum air temperature at 15m
+        'HFRIO7_RECUENTO_1.5m',  # Cold hours count at 1.5m
+        'HFRIO7_RECUENTO_15m',   # Cold hours count at 15m
+        'HR_MAX_15m',       # Maximum relative humidity at 15m
+        'HR_MIN_15m',       # Minimum relative humidity at 15m
+        'HR_MAX_1.5m',      # Maximum relative humidity at 1.5m
+        'HR_MIN_1.5m',      # Minimum relative humidity at 1.5m
+        'HR_AVG_15m',       # Average relative humidity at 15m
+        'HR_AVG_1.5m',      # Average relative humidity at 1.5m
+        'BH_SUM_1.5m',      # Leaf wetness sum at 1.5m
+        'PP_SUM_1.5m',      # Precipitation sum at 1.5m
+        'ET0_SUM_1.5m',     # Reference evapotranspiration sum at 1.5m
+        'DV_CONDICION_10m', # Wind direction condition at 10m
+        'DV_CONDICION_2m',  # Wind direction condition at 2m
+        'DVP_MODA_10m',     # Wind direction mode at 10m
+        'DVP_MODA_2m',      # Wind direction mode at 2m
+        'VV_MAX_10m',       # Maximum wind speed at 10m
+        'VV_MAX_2m',        # Maximum wind speed at 2m
+        'VV_AVG_10m',       # Average wind speed at 10m
+        'VV_AVG_2m',        # Average wind speed at 2m
+        'BCN_AVG_1.5m',     # Average solar radiation balance at 1.5m
+        'BCN_MAX_1.5m',     # Maximum solar radiation balance at 1.5m
+        'HSOL_SUM_1.5m',    # Sunshine hours sum at 1.5m
+        'IUVX_MAX_1.5m',    # Maximum UV index at 1.5m
+        'INS_RATIO_1.5m',   # Insolation ratio at 1.5m
+        'IRD_SUM_1.5m',     # Direct solar radiation sum at 1.5m
+        'PR_AVG_1.5m',      # Average atmospheric pressure at 1.5m
+        'PRED_AVG_1.5m',    # Average reduced pressure at 1.5m
+        'HF_SUM_2m',        # Leaf wetness hours sum at 2m
+        'HS_CV_AVG_-0.2m',  # Soil moisture average at -0.2m (volumetric)
+        'VB_MAX_10m',       # Maximum wind gust at 10m
+        'VB_AVG_10m',       # Average wind gust at 10m
+        'VB_MIN_10m'        # Minimum wind gust at 10m
+    ]
+
     def __init__(self, cache_dir: str = "./meteogalicia_data"):
         self.session = requests.Session()
         self.cache_dir = Path(cache_dir)
@@ -148,11 +194,19 @@ class MeteoGaliciaCollector:
 
         stations_df['has_soil_moisture'] = has_soil_moisture
 
+        # Convert data types before saving
+        # Handle potential None values in coordinates
+        stations_df['utmx'] = pd.to_numeric(stations_df['utmx'], errors='coerce')
+        stations_df['utmy'] = pd.to_numeric(stations_df['utmy'], errors='coerce')
+        stations_df['altitude'] = pd.to_numeric(stations_df['altitude'], errors='coerce')
+        stations_df['latitude'] = pd.to_numeric(stations_df['latitude'], errors='coerce')
+        stations_df['longitude'] = pd.to_numeric(stations_df['longitude'], errors='coerce')
+
         # Save to cache
         stations_df.to_csv(self.stations_file, index=False)
         print(f"\n✓ Stations metadata saved to {self.stations_file}")
         print(f"  Total: {len(stations_df)}, With soil moisture: {sum(has_soil_moisture)}")
-        stations_df[['utmx', 'utmy']] = stations_df[['utmx', 'utmy']].astype(float)
+
         return stations_df
 
     def calculate_nearest_stations(
@@ -175,8 +229,19 @@ class MeteoGaliciaCollector:
 
         # Create coordinate matrix for distance calculation
         stations_df = stations_df.copy()
-        coords = stations_df[['utmx', 'utmy']].values
-        station_ids = stations_df['station_id'].values
+
+        # Filter out stations with invalid coordinates
+        valid_coords_mask = stations_df['utmx'].notna() & stations_df['utmy'].notna()
+        stations_with_coords = stations_df[valid_coords_mask].copy()
+
+        if len(stations_with_coords) == 0:
+            print("✗ No stations with valid coordinates found!")
+            return pd.DataFrame()
+
+        print(f"  Using {len(stations_with_coords)} stations with valid coordinates out of {len(stations_df)}")
+
+        coords = stations_with_coords[['utmx', 'utmy']].values
+        station_ids = stations_with_coords['station_id'].values
 
         nearest_data = []
 
@@ -197,7 +262,7 @@ class MeteoGaliciaCollector:
             for j, idx in enumerate(nearest_indices, 1):
                 row_data[f'nearest_{j}_id'] = station_ids[idx]
                 row_data[f'nearest_{j}_distance'] = distances[idx]
-                row_data[f'nearest_{j}_has_soil_moisture'] = stations_df.iloc[idx]['has_soil_moisture']
+                row_data[f'nearest_{j}_has_soil_moisture'] = stations_with_coords.iloc[idx]['has_soil_moisture']
 
             nearest_data.append(row_data)
 
@@ -1002,14 +1067,9 @@ if __name__ == "__main__":
     # Get all stations (not just those with soil moisture)
     all_station_ids = stations_df['station_id'].tolist()
 
-    # Parameters to collect
-    parameters = [
-        collector.SOIL_MOISTURE_PARAM,
-        'PP_SUM_1.5m',  # Precipitation
-        'TA_AVG_1.5m',  # Temperature
-        'HR_AVG_1.5m',  # Humidity
-        'VV_AVG_10m'  # Wind speed if you want it
-    ]
+    # Use ALL sensors from MeteoGalicia API
+    # This includes all 42 available parameters (temperature, humidity, wind, solar radiation, etc.)
+    parameters = collector.ALL_SENSORS
 
     # Collect 2 years of data
     end_date = datetime.now()
@@ -1040,21 +1100,19 @@ if __name__ == "__main__":
     if soil_moisture_stations:
         demo_station = soil_moisture_stations[0]
 
-        # Get sequence data (last 7 days)
-        seq_data = collector.get_sequence_data(
+        # Get live prediction data
+        live_data = collector.get_live_prediction_data(
             target_station_id=demo_station,
-            end_date=datetime.now(),
-            seq_length=7,
             n_nearest=4
         )
 
-        print(f"\nTarget station: {demo_station}")
-        print(f"Date range: {seq_data['date_range']}")
-        print(f"Sequence length: {seq_data['seq_length']}")
+        print(f"\nTarget station: {live_data['target_station_id']}")
+        print(f"Target coordinates: {live_data['target_coordinates']}")
+        print(f"Nearby stations: {len(live_data['nearby_stations'])}")
         print(f"\nTarget station data:")
-        print(seq_data['target_data'])
+        print(live_data['target_data'].head() if not live_data['target_data'].empty else "No data")
         print(f"\nNearby stations data:")
-        print(seq_data['nearby_data'])
+        print(live_data['nearby_data'].head() if not live_data['nearby_data'].empty else "No data")
 
     # Step 6: Create PyTorch Dataset
     print("\n" + "=" * 60)
