@@ -12,8 +12,7 @@ ENV/
 
 # Test data and cache directories
 meteogalicia_data/
-test_meteogalicia_data/
-test_fixed_data/
+test_*/
 
 # IDE
 .vscode/
