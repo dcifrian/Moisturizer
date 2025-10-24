@@ -215,17 +215,20 @@ class MeteoGaliciaCollector:
             n_nearest: int = 4
     ) -> pd.DataFrame:
         """
-        Calculate n nearest stations for each station using Euclidean distance on UTM coords
+        Calculate n nearest stations WITH SOIL MOISTURE for each station using Euclidean distance on UTM coords
+
+        This finds the nearest stations that have soil moisture data, which is essential for
+        predicting/imputing soil moisture at stations that don't have it.
 
         Args:
-            stations_df: DataFrame with station metadata including utmx, utmy
-            n_nearest: Number of nearest stations to find
+            stations_df: DataFrame with station metadata including utmx, utmy, has_soil_moisture
+            n_nearest: Number of nearest stations WITH SOIL MOISTURE to find
 
         Returns:
             DataFrame with columns: station_id, nearest_1_id, nearest_1_distance,
                                    nearest_2_id, nearest_2_distance, ...
         """
-        print(f"\nCalculating {n_nearest} nearest stations for each station...")
+        print(f"\nCalculating {n_nearest} nearest stations WITH SOIL MOISTURE for each station...")
 
         # Create coordinate matrix for distance calculation
         stations_df = stations_df.copy()
@@ -238,31 +241,58 @@ class MeteoGaliciaCollector:
             print("✗ No stations with valid coordinates found!")
             return pd.DataFrame()
 
-        print(f"  Using {len(stations_with_coords)} stations with valid coordinates out of {len(stations_df)}")
+        # Get stations with soil moisture (these are our candidates for nearest neighbors)
+        soil_moisture_stations = stations_with_coords[stations_with_coords['has_soil_moisture'] == True].copy()
 
-        coords = stations_with_coords[['utmx', 'utmy']].values
-        station_ids = stations_with_coords['station_id'].values
+        if len(soil_moisture_stations) == 0:
+            print("✗ No stations with soil moisture data found!")
+            return pd.DataFrame()
+
+        print(f"  Total stations with valid coordinates: {len(stations_with_coords)}")
+        print(f"  Stations with soil moisture data: {len(soil_moisture_stations)}")
+
+        # Get coordinates for all stations and for soil moisture stations only
+        all_coords = stations_with_coords[['utmx', 'utmy']].values
+        all_station_ids = stations_with_coords['station_id'].values
+
+        soil_coords = soil_moisture_stations[['utmx', 'utmy']].values
+        soil_station_ids = soil_moisture_stations['station_id'].values
 
         nearest_data = []
 
-        for i, station_id in enumerate(station_ids):
-            # Calculate distances to all other stations
+        for i, station_id in enumerate(all_station_ids):
+            # Calculate distances from this station to all stations WITH soil moisture
+            current_coords = all_coords[i]
             distances = np.sqrt(
-                (coords[:, 0] - coords[i, 0]) ** 2 +
-                (coords[:, 1] - coords[i, 1]) ** 2
+                (soil_coords[:, 0] - current_coords[0]) ** 2 +
+                (soil_coords[:, 1] - current_coords[1]) ** 2
             )
 
-            # Get indices of n+1 nearest (including itself at distance 0)
-            nearest_indices = np.argsort(distances)[:n_nearest + 1]
+            # Sort by distance and get N nearest
+            # If this station itself has soil moisture, it will be in the list with distance 0
+            sorted_indices = np.argsort(distances)
 
-            # Skip the first one (itself)
-            nearest_indices = nearest_indices[1:n_nearest + 1]
+            # Filter out the station itself (distance = 0) if it has soil moisture
+            filtered_indices = []
+            for idx in sorted_indices:
+                if soil_station_ids[idx] != station_id:
+                    filtered_indices.append(idx)
+                if len(filtered_indices) == n_nearest:
+                    break
 
             row_data = {'station_id': station_id}
-            for j, idx in enumerate(nearest_indices, 1):
-                row_data[f'nearest_{j}_id'] = station_ids[idx]
+
+            # If we found fewer than n_nearest stations, record what we found
+            for j, idx in enumerate(filtered_indices, 1):
+                row_data[f'nearest_{j}_id'] = soil_station_ids[idx]
                 row_data[f'nearest_{j}_distance'] = distances[idx]
-                row_data[f'nearest_{j}_has_soil_moisture'] = stations_with_coords.iloc[idx]['has_soil_moisture']
+                row_data[f'nearest_{j}_has_soil_moisture'] = True  # Always True by construction
+
+            # Fill remaining slots with NaN if we found fewer than n_nearest
+            for j in range(len(filtered_indices) + 1, n_nearest + 1):
+                row_data[f'nearest_{j}_id'] = np.nan
+                row_data[f'nearest_{j}_distance'] = np.nan
+                row_data[f'nearest_{j}_has_soil_moisture'] = False
 
             nearest_data.append(row_data)
 
