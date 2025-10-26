@@ -1076,9 +1076,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             'nearby_data': nearby_df
         }
 
-
-# Example usage
-if __name__ == "__main__":
+def buildDataset():
     collector = MeteoGaliciaCollector()
 
     # Step 1: Discover stations with soil moisture
@@ -1154,9 +1152,9 @@ if __name__ == "__main__":
     print("=" * 60)
 
     dataset = SoilMoistureSequenceDataset(
-        timeseries_file=str(collector.timeseries_file),
-        stations_file=str(collector.stations_file),
-        nearest_file=str(collector.nearest_file),
+        timeseries=str(collector.timeseries_file),
+        stations=str(collector.stations_file),
+        nearest=str(collector.nearest_file),
         seq_length=64,
         n_nearest=4
     )
@@ -1181,11 +1179,45 @@ if __name__ == "__main__":
         val_stations_ratio=0.15,
         test_stations_ratio=0.0
     )
+    return train_ds,val_ds,test_ds
 
-    # Example DataLoader usage
-    from torch.utils.data import DataLoader
+def loadDataset():
+    collector = MeteoGaliciaCollector() # Does nothing, just for the paths
+    print("\n" + "=" * 60)
+    print("STEP 1: Loading PyTorch Dataset from CSV")
+    print("=" * 60)
 
-    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+    dataset = SoilMoistureSequenceDataset(
+        timeseries=str(collector.timeseries_file),
+        stations=str(collector.stations_file),
+        nearest=str(collector.nearest_file),
+        seq_length=64,
+        n_nearest=4
+    )
 
-    print(f"\nDataLoader created with batch_size=32")
-    print(f"  Batches per epoch: {len(train_loader)}")
+    print(f"\nFeature names: {dataset.get_feature_names()}")
+
+    # Example sample
+    sample = dataset[0]
+    print(f"\nExample sample:")
+    print(f"  Features shape: {sample['features'].shape}")
+    print(f"  Target: {sample['target']}")
+    print(f"  Mask shape: {sample['mask'].shape}")
+    print(f"  Station ID: {sample['target_station_id']}")
+
+    # Train/val/test split
+    print("\n" + "=" * 60)
+    print("STEP 2: Creating train/val/test splits")
+    print("=" * 60)
+
+    train_ds, val_ds, test_ds = SoilMoistureSequenceDataset.train_val_test_split(
+        dataset,
+        val_stations_ratio=0.15,
+        test_stations_ratio=0.0
+    )
+    return train_ds, val_ds, test_ds
+
+# Example usage
+if __name__ == "__main__":
+    train_ds, val_ds, _ = loadDataset()
+
