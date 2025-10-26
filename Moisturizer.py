@@ -8,7 +8,7 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Tuple, Set
+from typing import List, Optional, Dict, Tuple, Set, Union
 import json
 import time
 from pathlib import Path
@@ -389,7 +389,8 @@ class MeteoGaliciaCollector:
             parameter_ids: List[str],
             start_date: datetime,
             end_date: datetime,
-            chunk_days: int = 30
+            chunk_days: int = 30,
+            force_refresh = False
     ) -> pd.DataFrame:
         """
         Build historical dataset by fetching data in chunks
@@ -407,7 +408,9 @@ class MeteoGaliciaCollector:
         """
         all_data = []
         current_date = start_date
-
+        if self.timeseries_file.exists() and not force_refresh:
+            print(f"Loading cached stations from {self.timeseries_file}")
+            return pd.read_csv(self.timeseries_file)
         print(f"\nFetching historical data from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}")
         print(f"Stations: {len(station_ids)}")
         print(f"Parameters: {parameter_ids}")
@@ -649,9 +652,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
     def __init__(
             self,
-            timeseries_file: str,
-            stations_file: str,
-            nearest_file: str,
+            timeseries: Union[str,pd.DataFrame],
+            stations: Union[str,pd.DataFrame],
+            nearest: Union[str,pd.DataFrame],
             seq_length: int,
             n_nearest: int = 4,
             target_stations: Optional[List[int]] = None,
@@ -663,9 +666,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         Initialize dataset
 
         Args:
-            timeseries_file: Path to raw_timeseries.csv
-            stations_file: Path to stations_metadata.csv
-            nearest_file: Path to nearest_stations.csv
+            timeseries: Path to raw_timeseries.csv
+            stations: Path to stations_metadata.csv
+            nearest: Path to nearest_stations.csv
             seq_length: Number of days in each sequence
             n_nearest: Number of nearest stations to include
             target_stations: List of station IDs to use (if None, use all with soil moisture)
@@ -681,10 +684,10 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
         # Load data
         print("Loading data files...")
-        self.timeseries_df = pd.read_csv(timeseries_file)
+        self.timeseries_df = timeseries if isinstance(timeseries,pd.DataFrame) else pd.read_csv(timeseries)
         self.timeseries_df['date'] = pd.to_datetime(self.timeseries_df['date'])
-        self.stations_df = pd.read_csv(stations_file)
-        self.nearest_df = pd.read_csv(nearest_file)
+        self.stations_df = stations if isinstance(stations,pd.DataFrame) else pd.read_csv(stations)
+        self.nearest_df = nearest if isinstance(nearest,pd.DataFrame) else pd.read_csv(nearest)
 
         # Determine target stations
         if target_stations is None:
@@ -904,7 +907,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
     def train_val_test_split(
             dataset: 'SoilMoistureSequenceDataset',
             val_stations_ratio: float = 0.15,
-            test_stations_ratio: float = 0.15,
+            test_stations_ratio: float = 0.0,
             random_seed: int = 42
     ) -> Tuple['SoilMoistureSequenceDataset', 'SoilMoistureSequenceDataset', 'SoilMoistureSequenceDataset']:
         """
@@ -955,31 +958,32 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             soil_moisture_param=dataset.soil_moisture_param,
             missing_value=dataset.missing_value
         )
-
-        val_dataset = SoilMoistureSequenceDataset(
-            timeseries_file=dataset.timeseries_df,
-            stations_file=dataset.stations_df,
-            nearest_file=dataset.nearest_df,
-            seq_length=dataset.seq_length,
-            n_nearest=dataset.n_nearest,
-            target_stations=val_stations,
-            feature_params=dataset.feature_params,
-            soil_moisture_param=dataset.soil_moisture_param,
-            missing_value=dataset.missing_value
-        )
-
-        test_dataset = SoilMoistureSequenceDataset(
-            timeseries_file=dataset.timeseries_df,
-            stations_file=dataset.stations_df,
-            nearest_file=dataset.nearest_df,
-            seq_length=dataset.seq_length,
-            n_nearest=dataset.n_nearest,
-            target_stations=test_stations,
-            feature_params=dataset.feature_params,
-            soil_moisture_param=dataset.soil_moisture_param,
-            missing_value=dataset.missing_value
-        )
-
+        val_dataset = None
+        if val_stations_ratio > 0:
+            val_dataset = SoilMoistureSequenceDataset(
+                timeseries_file=dataset.timeseries_df,
+                stations_file=dataset.stations_df,
+                nearest_file=dataset.nearest_df,
+                seq_length=dataset.seq_length,
+                n_nearest=dataset.n_nearest,
+                target_stations=val_stations,
+                feature_params=dataset.feature_params,
+                soil_moisture_param=dataset.soil_moisture_param,
+                missing_value=dataset.missing_value
+            )
+        test_dataset = None
+        if test_stations_ratio > 0:
+            test_dataset = SoilMoistureSequenceDataset(
+                timeseries_file=dataset.timeseries_df,
+                stations_file=dataset.stations_df,
+                nearest_file=dataset.nearest_df,
+                seq_length=dataset.seq_length,
+                n_nearest=dataset.n_nearest,
+                target_stations=test_stations,
+                feature_params=dataset.feature_params,
+                soil_moisture_param=dataset.soil_moisture_param,
+                missing_value=dataset.missing_value
+            )
         return train_dataset, val_dataset, test_dataset
 
     def get_sequence_data(
@@ -1153,7 +1157,7 @@ if __name__ == "__main__":
         timeseries_file=str(collector.timeseries_file),
         stations_file=str(collector.stations_file),
         nearest_file=str(collector.nearest_file),
-        seq_length=7,
+        seq_length=64,
         n_nearest=4
     )
 
@@ -1175,7 +1179,7 @@ if __name__ == "__main__":
     train_ds, val_ds, test_ds = SoilMoistureSequenceDataset.train_val_test_split(
         dataset,
         val_stations_ratio=0.15,
-        test_stations_ratio=0.15
+        test_stations_ratio=0.0
     )
 
     # Example DataLoader usage
