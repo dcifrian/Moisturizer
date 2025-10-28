@@ -948,9 +948,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
         # Create new datasets with filtered stations
         train_dataset = SoilMoistureSequenceDataset(
-            timeseries_file=dataset.timeseries_df,  # Pass dataframe directly
-            stations_file=dataset.stations_df,
-            nearest_file=dataset.nearest_df,
+            timeseries=dataset.timeseries_df,  # Pass dataframe directly
+            stations=dataset.stations_df,
+            nearest=dataset.nearest_df,
             seq_length=dataset.seq_length,
             n_nearest=dataset.n_nearest,
             target_stations=train_stations,
@@ -961,9 +961,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         val_dataset = None
         if val_stations_ratio > 0:
             val_dataset = SoilMoistureSequenceDataset(
-                timeseries_file=dataset.timeseries_df,
-                stations_file=dataset.stations_df,
-                nearest_file=dataset.nearest_df,
+                timeseries=dataset.timeseries_df,
+                stations=dataset.stations_df,
+                nearest=dataset.nearest_df,
                 seq_length=dataset.seq_length,
                 n_nearest=dataset.n_nearest,
                 target_stations=val_stations,
@@ -974,9 +974,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         test_dataset = None
         if test_stations_ratio > 0:
             test_dataset = SoilMoistureSequenceDataset(
-                timeseries_file=dataset.timeseries_df,
-                stations_file=dataset.stations_df,
-                nearest_file=dataset.nearest_df,
+                timeseries=dataset.timeseries_df,
+                stations=dataset.stations_df,
+                nearest=dataset.nearest_df,
                 seq_length=dataset.seq_length,
                 n_nearest=dataset.n_nearest,
                 target_stations=test_stations,
@@ -1196,10 +1196,11 @@ def loadDataset():
     )
 
     print(f"\nFeature names: {dataset.get_feature_names()}")
-
+    torch.set_printoptions(threshold=1000000)
     # Example sample
-    sample = dataset[0]
+    sample = dataset[10]
     print(f"\nExample sample:")
+    print(sample)
     print(f"  Features shape: {sample['features'].shape}")
     print(f"  Target: {sample['target']}")
     print(f"  Mask shape: {sample['mask'].shape}")
@@ -1220,4 +1221,28 @@ def loadDataset():
 # Example usage
 if __name__ == "__main__":
     train_ds, val_ds, _ = loadDataset()
-
+    from TROLOLO.TROLOLO_pyramid import TROLOLO
+    quantize = False
+    trololo = TROLOLO(image_size=64,
+                      img_channels=4,
+                      patch_size=4,
+                      kernel_size=6,
+                      num_layers=6,
+                      num_heads=48,
+                      embed_dim=192,
+                      mlp_dim=192,
+                      n_class_tokens=2,
+                      num_classes=10,
+                      mlp_rank=0.05,
+                      qkv_rank=0.05,
+                      attnproj_rank=0.05,
+                      sequence_pyramid=[(2, 4)],
+                      attn_rank_pyramid=[(0, 32), (1, 32)],
+                      rank_pyramid_begin=2,
+                      rank_pyramid_factor=1.0,
+                      head_constriction="ONE_CLASS_TOKEN",
+                      dropout=0.05,
+                      attention_dropout=0.01,
+                      quantize_bits= None if not quantize else 8
+                      )
+    trololo.training_loop(train_data=train_ds,val_data=val_ds,lr=4.1e-4,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=100,batch_size=1,transfer=0)
