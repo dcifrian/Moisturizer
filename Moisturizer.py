@@ -552,6 +552,77 @@ class MeteoGaliciaCollector:
             print("✗ No data to create ML dataset")
             return pd.DataFrame()
 
+    def analyze_parameter_coverage(
+            self,
+            ml_dataset_file: Optional[str] = None,
+            coverage_threshold: float = 0.25
+    ) -> Tuple[Dict[str, float], List[str]]:
+        """
+        Analyze parameter coverage in the ML-ready dataset and return parameters above threshold
+
+        Args:
+            ml_dataset_file: Path to ml_ready_dataset.csv (if None, uses default location)
+            coverage_threshold: Minimum fraction of stations that must have data (0.0 to 1.0)
+
+        Returns:
+            Tuple of (coverage_dict, filtered_params):
+            - coverage_dict: Dictionary mapping parameter_code to coverage percentage
+            - filtered_params: List of parameters that meet the coverage threshold
+        """
+        if ml_dataset_file is None:
+            ml_dataset_file = self.cache_dir / "ml_ready_dataset.csv"
+
+        print(f"\nAnalyzing parameter coverage in {ml_dataset_file}...")
+
+        # Load ML-ready dataset
+        ml_df = pd.read_csv(ml_dataset_file)
+
+        # Get all parameter columns (those starting with 'target_' or 'nearby')
+        param_columns = [col for col in ml_df.columns if col.startswith('target_') or col.startswith('nearby')]
+
+        # Extract unique parameter names
+        # For 'target_PARAM' or 'nearby1_PARAM', extract 'PARAM'
+        param_names = set()
+        for col in param_columns:
+            if col.startswith('target_'):
+                param_name = col.replace('target_', '')
+                param_names.add(param_name)
+            elif '_' in col:  # nearby1_PARAM format
+                parts = col.split('_', 1)
+                if len(parts) == 2:
+                    param_name = parts[1]
+                    # Skip distance and has_soil_moisture columns
+                    if param_name not in ['distance', 'has_soil_moisture', 'id']:
+                        param_names.add(param_name)
+
+        # Calculate coverage for each parameter
+        coverage = {}
+        total_rows = len(ml_df)
+
+        print(f"\nTotal stations in dataset: {total_rows}")
+        print(f"Coverage threshold: {coverage_threshold * 100:.0f}%")
+        print(f"\nParameter coverage:")
+        print("-" * 70)
+
+        for param in sorted(param_names):
+            # Count rows where this parameter has non-null data in target column
+            target_col = f'target_{param}'
+            if target_col in ml_df.columns:
+                non_null_count = ml_df[target_col].notna().sum()
+                coverage_pct = non_null_count / total_rows if total_rows > 0 else 0
+                coverage[param] = coverage_pct
+                status = "✓" if coverage_pct >= coverage_threshold else "✗"
+                print(f"{status} {param:25s}: {coverage_pct*100:5.1f}% ({non_null_count}/{total_rows} stations)")
+
+        # Filter parameters that meet threshold
+        filtered_params = [param for param, cov in coverage.items() if cov >= coverage_threshold]
+
+        print("-" * 70)
+        print(f"\nParameters passing {coverage_threshold*100:.0f}% threshold: {len(filtered_params)}/{len(param_names)}")
+        print(f"Filtered parameters: {sorted(filtered_params)}")
+
+        return coverage, filtered_params
+
     def get_live_prediction_data(
             self,
             target_station_id: int,
@@ -674,6 +745,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             target_stations: List of station IDs to use (if None, use all with soil moisture)
             feature_params: List of parameter codes to include as features
                            (if None, uses all except soil moisture for target station)
+                           Tip: Use analyze_parameter_coverage() to get filtered params
             soil_moisture_param: Parameter code for soil moisture (target variable)
             missing_value: Value to use for missing data
         """
@@ -878,12 +950,15 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             sample['end_date']
         )
 
+        # Convert pandas Timestamp to Unix timestamp (float) for PyTorch compatibility
+        end_date_unix = sample['end_date'].timestamp() if hasattr(sample['end_date'], 'timestamp') else float(sample['end_date'])
+
         return {
             'features': features,
             'target': target,
             'mask': mask,
             'target_station_id': sample['target_station'],
-            'end_date': sample['end_date']
+            'end_date': end_date_unix  # Unix timestamp as float
         }
 
     def get_feature_names(self) -> List[str]:
