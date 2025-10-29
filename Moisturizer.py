@@ -719,6 +719,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
     Note: Requires PyTorch to be installed. If PyTorch is not available,
     this class can still be instantiated but PyTorch-specific functionality
     (tensors, DataLoader) will not work.
+
+    For optimal performance, use precompute_and_save() to precompute all sequences
+    and save to disk, then load with precomputed_path parameter.
     """
 
     def __init__(
@@ -731,15 +734,18 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             target_stations: Optional[List[int]] = None,
             feature_params: Optional[List[str]] = None,
             soil_moisture_param: str = "HS_CV_AVG_-0.2m",
-            missing_value: float = -1000.0
+            missing_value: float = -1000.0,
+            precomputed_path: Optional[str] = None,
+            normalize: bool = True,
+            norm_stats_path: Optional[str] = None
     ):
         """
         Initialize dataset
 
         Args:
-            timeseries: Path to raw_timeseries.csv
-            stations: Path to stations_metadata.csv
-            nearest: Path to nearest_stations.csv
+            timeseries: Path to raw_timeseries.csv or DataFrame
+            stations: Path to stations_metadata.csv or DataFrame
+            nearest: Path to nearest_stations.csv or DataFrame
             seq_length: Number of days in each sequence
             n_nearest: Number of nearest stations to include
             target_stations: List of station IDs to use (if None, use all with soil moisture)
@@ -748,11 +754,20 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                            Tip: Use analyze_parameter_coverage() to get filtered params
             soil_moisture_param: Parameter code for soil moisture (target variable)
             missing_value: Value to use for missing data
+            precomputed_path: Path to precomputed .npz file (for fast loading)
+            normalize: Whether to normalize features to [-1, 1] range
+            norm_stats_path: Path to normalization stats .npz file (if None, computed automatically)
         """
         self.seq_length = seq_length
         self.n_nearest = n_nearest
         self.soil_moisture_param = soil_moisture_param
         self.missing_value = missing_value
+        self.normalize = normalize
+        self.precomputed_path = precomputed_path
+
+        # Precomputed data (loaded on demand)
+        self.precomputed_data = None
+        self.norm_stats = None
 
         # Load data
         print("Loading data files...")
@@ -777,14 +792,37 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         else:
             self.feature_params = feature_params
 
-        # Build index of valid samples
-        self._build_sample_index()
+        # Load precomputed data if available
+        if precomputed_path and os.path.exists(precomputed_path):
+            print(f"Loading precomputed sequences from {precomputed_path}...")
+            self.precomputed_data = np.load(precomputed_path)
+            self.sample_index = self.precomputed_data['sample_index'].tolist()
+            print(f"  Loaded {len(self.sample_index)} precomputed samples")
+        else:
+            # Build index of valid samples
+            self._build_sample_index()
+
+        # Load or compute normalization statistics
+        if normalize:
+            if norm_stats_path and os.path.exists(norm_stats_path):
+                print(f"Loading normalization statistics from {norm_stats_path}...")
+                self.norm_stats = np.load(norm_stats_path)
+            elif precomputed_path and os.path.exists(precomputed_path):
+                # Compute from precomputed data
+                print("Computing normalization statistics from precomputed data...")
+                self._compute_norm_stats_from_precomputed()
+            else:
+                print("Warning: normalize=True but no precomputed data available.")
+                print("  Normalization will be computed on-the-fly (slow).")
+                self.normalize = False
 
         print(f"Dataset initialized:")
         print(f"  Sequence length: {seq_length}")
         print(f"  Target stations: {len(self.target_stations)}")
         print(f"  Feature parameters: {len(self.feature_params)}")
         print(f"  Valid samples: {len(self.sample_index)}")
+        print(f"  Using precomputed: {precomputed_path is not None and os.path.exists(precomputed_path)}")
+        print(f"  Normalization: {normalize}")
 
     def _build_sample_index(self):
         """Build index of valid samples (target_station, end_date) pairs"""
@@ -927,6 +965,179 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             torch.from_numpy(mask)
         )
 
+    def _compute_norm_stats_from_precomputed(self):
+        """Compute normalization statistics from precomputed data"""
+        print("Computing min/max for each feature (excluding invalid values)...")
+
+        n_features = self.precomputed_data['features'].shape[2]
+        feature_mins = np.full(n_features, np.inf, dtype=np.float32)
+        feature_maxs = np.full(n_features, -np.inf, dtype=np.float32)
+
+        # Invalid markers to exclude
+        invalid_markers = [-9999.0, self.missing_value]
+
+        # Process in batches to save memory
+        batch_size = 1000
+        for i in range(0, len(self.precomputed_data['features']), batch_size):
+            end_i = min(i + batch_size, len(self.precomputed_data['features']))
+            features_batch = self.precomputed_data['features'][i:end_i]
+            masks_batch = self.precomputed_data['masks'][i:end_i]
+
+            for feat_idx in range(n_features):
+                feat_data = features_batch[:, :, feat_idx]
+                feat_mask = masks_batch[:, :, feat_idx]
+
+                # Get valid data (masked and not invalid marker)
+                valid_mask = feat_mask > 0
+                for marker in invalid_markers:
+                    valid_mask &= (feat_data != marker)
+
+                valid_data = feat_data[valid_mask]
+
+                if len(valid_data) > 0:
+                    feature_mins[feat_idx] = min(feature_mins[feat_idx], valid_data.min())
+                    feature_maxs[feat_idx] = max(feature_maxs[feat_idx], valid_data.max())
+
+        # Compute for target as well
+        targets = self.precomputed_data['targets']
+        valid_targets = targets.copy()
+        for marker in invalid_markers:
+            valid_targets = valid_targets[valid_targets != marker]
+
+        target_min = valid_targets.min() if len(valid_targets) > 0 else 0.0
+        target_max = valid_targets.max() if len(valid_targets) > 0 else 1.0
+
+        self.norm_stats = {
+            'feature_mins': feature_mins,
+            'feature_maxs': feature_maxs,
+            'target_min': target_min,
+            'target_max': target_max
+        }
+
+        print(f"  Feature min range: [{feature_mins.min():.2f}, {feature_mins.max():.2f}]")
+        print(f"  Feature max range: [{feature_maxs.min():.2f}, {feature_maxs.max():.2f}]")
+        print(f"  Target range: [{target_min:.2f}, {target_max:.2f}]")
+
+    def _apply_normalization(self, features, target, mask):
+        """
+        Normalize features and target to [-1, 1] range
+        Invalid markers (-9999, missing_value) are changed to -2
+        """
+        invalid_markers = [-9999.0, self.missing_value]
+        normalized_invalid_marker = -2.0
+
+        # Normalize features
+        for feat_idx in range(features.shape[1]):
+            feat_min = self.norm_stats['feature_mins'][feat_idx]
+            feat_max = self.norm_stats['feature_maxs'][feat_idx]
+
+            # Handle invalid markers
+            invalid_mask = np.zeros(features.shape[0], dtype=bool)
+            for marker in invalid_markers:
+                invalid_mask |= (features[:, feat_idx] == marker)
+
+            # Normalize valid values to [-1, 1]
+            if feat_max > feat_min:
+                features[:, feat_idx] = 2.0 * (features[:, feat_idx] - feat_min) / (feat_max - feat_min) - 1.0
+
+            # Set invalid markers to -2
+            features[invalid_mask, feat_idx] = normalized_invalid_marker
+
+        # Normalize target
+        target_min = self.norm_stats['target_min']
+        target_max = self.norm_stats['target_max']
+
+        # Check if target is invalid
+        target_invalid = False
+        for marker in invalid_markers:
+            if np.any(target == marker):
+                target_invalid = True
+                break
+
+        if target_invalid:
+            target[:] = normalized_invalid_marker
+        elif target_max > target_min:
+            target[:] = 2.0 * (target - target_min) / (target_max - target_min) - 1.0
+
+        return features, target
+
+    def precompute_and_save(self, output_path: str, norm_stats_path: Optional[str] = None):
+        """
+        Precompute all sequences and save to disk for fast loading
+
+        Args:
+            output_path: Path to save precomputed sequences (.npz file)
+            norm_stats_path: Path to save normalization statistics (optional)
+        """
+        print(f"Precomputing {len(self.sample_index)} sequences...")
+        print("This may take a while but only needs to be done once.")
+
+        # Determine feature dimensions from first sample
+        sample0 = self.sample_index[0]
+        features0, target0, mask0 = self._build_sequence_tensor(
+            sample0['target_station'],
+            sample0['start_date'],
+            sample0['end_date']
+        )
+
+        seq_length, n_features = features0.shape
+
+        # Preallocate arrays
+        all_features = np.zeros((len(self.sample_index), seq_length, n_features), dtype=np.float32)
+        all_targets = np.zeros((len(self.sample_index), 1), dtype=np.float32)
+        all_masks = np.zeros((len(self.sample_index), seq_length, n_features), dtype=np.float32)
+
+        # Store first sample
+        all_features[0] = features0.numpy()
+        all_targets[0] = target0.numpy()
+        all_masks[0] = mask0.numpy()
+
+        # Precompute all samples
+        total = len(self.sample_index)
+        for idx in range(1, total):
+            if idx % 1000 == 0 or idx == total - 1:
+                print(f"  Progress: {idx}/{total} ({100*idx/total:.1f}%)")
+
+            sample = self.sample_index[idx]
+            features, target, mask = self._build_sequence_tensor(
+                sample['target_station'],
+                sample['start_date'],
+                sample['end_date']
+            )
+            all_features[idx] = features.numpy()
+            all_targets[idx] = target.numpy()
+            all_masks[idx] = mask.numpy()
+
+        # Save to disk
+        print(f"Saving to {output_path}...")
+        np.savez_compressed(
+            output_path,
+            features=all_features,
+            targets=all_targets,
+            masks=all_masks,
+            sample_index=np.array(self.sample_index, dtype=object)
+        )
+
+        print(f"  Saved {len(self.sample_index)} sequences")
+        print(f"  Shape: features={all_features.shape}, targets={all_targets.shape}")
+
+        # Compute and save normalization statistics
+        if norm_stats_path:
+            print(f"Computing normalization statistics...")
+            self.precomputed_data = np.load(output_path)
+            self._compute_norm_stats_from_precomputed()
+
+            print(f"Saving normalization stats to {norm_stats_path}...")
+            np.savez(
+                norm_stats_path,
+                feature_mins=self.norm_stats['feature_mins'],
+                feature_maxs=self.norm_stats['feature_maxs'],
+                target_min=self.norm_stats['target_min'],
+                target_max=self.norm_stats['target_max']
+            )
+
+        print("Done!")
+
     def __len__(self) -> int:
         return len(self.sample_index)
 
@@ -944,19 +1155,38 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         """
         sample = self.sample_index[idx]
 
-        features, target, mask = self._build_sequence_tensor(
-            sample['target_station'],
-            sample['start_date'],
-            sample['end_date']
-        )
+        # Load from precomputed data if available
+        if self.precomputed_data is not None:
+            features = self.precomputed_data['features'][idx].copy()
+            target = self.precomputed_data['targets'][idx].copy()
+            mask = self.precomputed_data['masks'][idx].copy()
+        else:
+            # Build on-the-fly (slow)
+            features_tensor, target_tensor, mask_tensor = self._build_sequence_tensor(
+                sample['target_station'],
+                sample['start_date'],
+                sample['end_date']
+            )
+            features = features_tensor.numpy()
+            target = target_tensor.numpy()
+            mask = mask_tensor.numpy()
+
+        # Apply normalization if enabled
+        if self.normalize and self.norm_stats is not None:
+            features, target = self._apply_normalization(features, target, mask)
+
+        # Convert to tensors
+        features_tensor = torch.from_numpy(features)
+        target_tensor = torch.from_numpy(target)
+        mask_tensor = torch.from_numpy(mask)
 
         # Convert pandas Timestamp to Unix timestamp (float) for PyTorch compatibility
         end_date_unix = sample['end_date'].timestamp() if hasattr(sample['end_date'], 'timestamp') else float(sample['end_date'])
 
         return {
-            'features': features,
-            'target': target,
-            'mask': mask,
+            'features': features_tensor,
+            'target': target_tensor,
+            'mask': mask_tensor,
             'target_station_id': sample['target_station'],
             'end_date': end_date_unix  # Unix timestamp as float
         }
@@ -1266,10 +1496,15 @@ def buildDataset():
     )
     return train_ds,val_ds,test_ds
 
-def loadDataset():
-    collector = MeteoGaliciaCollector() # Does nothing, just for the paths
-    print("\n" + "=" * 60)
-    print("STEP 1: Loading PyTorch Dataset from CSV")
+def precomputeDataset():
+    """Precompute dataset sequences and save to disk for fast loading"""
+    collector = MeteoGaliciaCollector()
+
+    print("=" * 60)
+    print("PRECOMPUTING DATASET SEQUENCES")
+    print("=" * 60)
+    print("This will take a while but only needs to be done once.")
+    print("Subsequent loads will be MUCH faster!")
     print("=" * 60)
 
     # Get filtered parameters
@@ -1281,13 +1516,72 @@ def loadDataset():
 
     print(f"\nUsing {len(filtered_params)} filtered parameters...")
 
+    # Create dataset without precomputed data
     dataset = SoilMoistureSequenceDataset(
         timeseries=str(collector.timeseries_file),
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),
         seq_length=64,
         n_nearest=4,
-        feature_params=filtered_params
+        feature_params=filtered_params,
+        normalize=False  # Don't normalize yet, we'll compute stats during precomputation
+    )
+
+    # Precompute and save
+    precomputed_path = collector.data_dir / "precomputed_sequences.npz"
+    norm_stats_path = collector.data_dir / "normalization_stats.npz"
+
+    dataset.precompute_and_save(
+        output_path=str(precomputed_path),
+        norm_stats_path=str(norm_stats_path)
+    )
+
+    print(f"\n✓ Precomputed sequences saved to: {precomputed_path}")
+    print(f"✓ Normalization stats saved to: {norm_stats_path}")
+    print(f"\nYou can now use loadDataset() for fast loading!")
+
+def loadDataset(use_precomputed=True, normalize=True):
+    """
+    Load PyTorch Dataset
+
+    Args:
+        use_precomputed: If True, load from precomputed file (much faster)
+        normalize: If True, normalize data to [-1, 1] range
+    """
+    collector = MeteoGaliciaCollector() # Does nothing, just for the paths
+    print("\n" + "=" * 60)
+    print("STEP 1: Loading PyTorch Dataset")
+    print("=" * 60)
+
+    # Get filtered parameters
+    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=0.25)
+
+    if not filtered_params:
+        print("\n✗ No parameters passed the threshold!")
+        return
+
+    print(f"\nUsing {len(filtered_params)} filtered parameters...")
+
+    # Check for precomputed data
+    precomputed_path = collector.data_dir / "precomputed_sequences.npz"
+    norm_stats_path = collector.data_dir / "normalization_stats.npz"
+
+    if use_precomputed and not precomputed_path.exists():
+        print(f"\n⚠ Precomputed data not found at {precomputed_path}")
+        print("  Run precomputeDataset() first for much faster loading!")
+        print("  Falling back to on-the-fly sequence building (SLOW)...")
+        use_precomputed = False
+
+    dataset = SoilMoistureSequenceDataset(
+        timeseries=str(collector.timeseries_file),
+        stations=str(collector.stations_file),
+        nearest=str(collector.nearest_file),
+        seq_length=64,
+        n_nearest=4,
+        feature_params=filtered_params,
+        precomputed_path=str(precomputed_path) if use_precomputed else None,
+        normalize=normalize,
+        norm_stats_path=str(norm_stats_path) if normalize else None
     )
 
     print(f"\nFeature names: {dataset.get_feature_names()}")
@@ -1315,7 +1609,24 @@ def loadDataset():
 
 # Example usage
 if __name__ == "__main__":
-    train_ds, val_ds, _ = loadDataset()
+    # Check if precomputed data exists
+    collector = MeteoGaliciaCollector()
+    precomputed_path = collector.data_dir / "precomputed_sequences.npz"
+
+    if not precomputed_path.exists():
+        print("\n" + "=" * 60)
+        print("FIRST TIME SETUP: Precomputing dataset sequences")
+        print("=" * 60)
+        print("This will take ~30-60 minutes but only needs to be done once!")
+        print("Subsequent runs will be MUCH faster (10,000+ samples/sec)")
+        print("=" * 60)
+        input("Press Enter to start precomputation (or Ctrl+C to cancel)...")
+        precomputeDataset()
+        print("\n" + "=" * 60)
+        print("✓ Precomputation complete! Starting training...")
+        print("=" * 60)
+
+    train_ds, val_ds, _ = loadDataset(use_precomputed=True, normalize=True)
     torch._dynamo.config.disable = True
     from TROLOLO.TROLOLO_pyramid import TROLOLO
     quantize = False
