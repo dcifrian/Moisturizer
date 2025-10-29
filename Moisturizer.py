@@ -854,7 +854,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
         Returns:
             features: [seq_length, total_features] tensor
-            target: scalar tensor (soil moisture at end_date)
+            target: tensor (soil moisture at end_date)
             mask: [seq_length, total_features] tensor (1 for valid, 0 for missing)
         """
         date_range = pd.date_range(start=start_date, end=end_date, freq='D')
@@ -923,7 +923,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
         return (
             torch.from_numpy(features),
-            torch.tensor(target, dtype=torch.float32),
+            torch.tensor(target, dtype=torch.float32).unsqueeze(0),
             torch.from_numpy(mask)
         )
 
@@ -1226,12 +1226,22 @@ def buildDataset():
     print("STEP 6: Creating PyTorch Dataset")
     print("=" * 60)
 
+    # Get filtered parameters
+    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=0.25)
+
+    if not filtered_params:
+        print("\n✗ No parameters passed the threshold!")
+        return
+
+    print(f"\nUsing {len(filtered_params)} filtered parameters...")
+
     dataset = SoilMoistureSequenceDataset(
         timeseries=str(collector.timeseries_file),
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),
         seq_length=64,
-        n_nearest=4
+        n_nearest=4,
+        feature_params=filtered_params
     )
 
     print(f"\nFeature names: {dataset.get_feature_names()}")
@@ -1262,12 +1272,22 @@ def loadDataset():
     print("STEP 1: Loading PyTorch Dataset from CSV")
     print("=" * 60)
 
+    # Get filtered parameters
+    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=0.25)
+
+    if not filtered_params:
+        print("\n✗ No parameters passed the threshold!")
+        return
+
+    print(f"\nUsing {len(filtered_params)} filtered parameters...")
+
     dataset = SoilMoistureSequenceDataset(
         timeseries=str(collector.timeseries_file),
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),
         seq_length=64,
-        n_nearest=4
+        n_nearest=4,
+        feature_params=filtered_params
     )
 
     print(f"\nFeature names: {dataset.get_feature_names()}")
@@ -1296,18 +1316,16 @@ def loadDataset():
 # Example usage
 if __name__ == "__main__":
     train_ds, val_ds, _ = loadDataset()
+    torch._dynamo.config.disable = True
     from TROLOLO.TROLOLO_pyramid import TROLOLO
     quantize = False
-    trololo = TROLOLO(image_size=64,
-                      img_channels=4,
-                      patch_size=4,
-                      kernel_size=6,
+    trololo = TROLOLO(seq_length=64,
                       num_layers=6,
                       num_heads=48,
                       embed_dim=192,
                       mlp_dim=192,
                       n_class_tokens=2,
-                      num_classes=10,
+                      num_classes=1,
                       mlp_rank=0.05,
                       qkv_rank=0.05,
                       attnproj_rank=0.05,
@@ -1320,4 +1338,4 @@ if __name__ == "__main__":
                       attention_dropout=0.01,
                       quantize_bits= None if not quantize else 8
                       )
-    trololo.training_loop(train_data=train_ds,val_data=val_ds,lr=4.1e-4,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=100,batch_size=1,transfer=0)
+    trololo.training_loop(train_data=train_ds,val_data=val_ds,lr=4.1e-4,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=100,batch_size=4,transfer=0)
