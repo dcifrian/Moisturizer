@@ -556,7 +556,8 @@ class MeteoGaliciaCollector:
     def analyze_parameter_coverage(
             self,
             ml_dataset_file: Optional[str] = None,
-            coverage_threshold: float = 0.25
+            coverage_threshold: float = 0.25,
+            soil_moisture_param: str = "HS_CV_AVG_-0.2m"
     ) -> Tuple[Dict[str, float], List[str]]:
         """
         Analyze parameter coverage in the ML-ready dataset and return parameters above threshold
@@ -564,11 +565,12 @@ class MeteoGaliciaCollector:
         Args:
             ml_dataset_file: Path to ml_ready_dataset.csv (if None, uses default location)
             coverage_threshold: Minimum fraction of stations that must have data (0.0 to 1.0)
+            soil_moisture_param: Soil moisture parameter to exclude (it's the target, not a feature!)
 
         Returns:
             Tuple of (coverage_dict, filtered_params):
             - coverage_dict: Dictionary mapping parameter_code to coverage percentage
-            - filtered_params: List of parameters that meet the coverage threshold
+            - filtered_params: List of parameters that meet the coverage threshold (excluding soil moisture)
         """
         if ml_dataset_file is None:
             ml_dataset_file = self.data_dir / "ml_ready_dataset.csv"
@@ -615,11 +617,16 @@ class MeteoGaliciaCollector:
                 status = "✓" if coverage_pct >= coverage_threshold else "✗"
                 print(f"{status} {param:25s}: {coverage_pct*100:5.1f}% ({non_null_count}/{total_rows} stations)")
 
-        # Filter parameters that meet threshold
-        filtered_params = [param for param, cov in coverage.items() if cov >= coverage_threshold]
+        # Filter parameters that meet threshold (excluding soil moisture - it's the target!)
+        filtered_params = [
+            param for param, cov in coverage.items()
+            if cov >= coverage_threshold and param != soil_moisture_param
+        ]
 
         print("-" * 70)
         print(f"\nParameters passing {coverage_threshold*100:.0f}% threshold: {len(filtered_params)}/{len(param_names)}")
+        if soil_moisture_param in coverage:
+            print(f"  (Excluded {soil_moisture_param} - it's the target variable)")
         print(f"Filtered parameters: {sorted(filtered_params)}")
 
         return coverage, filtered_params
