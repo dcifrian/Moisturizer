@@ -796,7 +796,20 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         if precomputed_path and os.path.exists(precomputed_path):
             print(f"Loading precomputed sequences from {precomputed_path}...")
             self.precomputed_data = np.load(precomputed_path)
-            self.sample_index = self.precomputed_data['sample_index'].tolist()
+
+            # Reconstruct sample_index from components (avoid pickle)
+            target_stations = self.precomputed_data['target_stations']
+            end_dates = self.precomputed_data['end_dates']
+            start_dates = self.precomputed_data['start_dates']
+
+            self.sample_index = []
+            for i in range(len(target_stations)):
+                self.sample_index.append({
+                    'target_station': int(target_stations[i]),
+                    'end_date': pd.Timestamp.fromtimestamp(end_dates[i]),
+                    'start_date': pd.Timestamp.fromtimestamp(start_dates[i])
+                })
+
             print(f"  Loaded {len(self.sample_index)} precomputed samples")
         else:
             # Build index of valid samples
@@ -1110,12 +1123,20 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
         # Save to disk
         print(f"Saving to {output_path}...")
+
+        # Extract sample_index components to avoid pickle requirement
+        target_stations = np.array([s['target_station'] for s in self.sample_index], dtype=np.int32)
+        end_dates = np.array([s['end_date'].timestamp() for s in self.sample_index], dtype=np.float64)
+        start_dates = np.array([s['start_date'].timestamp() for s in self.sample_index], dtype=np.float64)
+
         np.savez_compressed(
             output_path,
             features=all_features,
             targets=all_targets,
             masks=all_masks,
-            sample_index=np.array(self.sample_index, dtype=object)
+            target_stations=target_stations,
+            end_dates=end_dates,
+            start_dates=start_dates
         )
 
         print(f"  Saved {len(self.sample_index)} sequences")
