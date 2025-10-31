@@ -4,6 +4,7 @@ Collects historical and live data from MeteoGalicia API for ML model training
 with focus on soil moisture prediction from nearby stations
 """
 
+import os
 import requests
 import pandas as pd
 import numpy as np
@@ -792,10 +793,17 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         else:
             self.feature_params = feature_params
 
+        # Track if data is already normalized in precomputed file
+        self.is_prenormalized = False
+
         # Load precomputed data if available
         if precomputed_path and os.path.exists(precomputed_path):
             print(f"Loading precomputed sequences from {precomputed_path}...")
             self.precomputed_data = np.load(precomputed_path)
+
+            # Check if data is already normalized
+            if 'is_normalized' in self.precomputed_data:
+                self.is_prenormalized = bool(self.precomputed_data['is_normalized'][0])
 
             # Reconstruct sample_index from components (avoid pickle)
             target_stations = self.precomputed_data['target_stations']
@@ -811,12 +819,14 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 })
 
             print(f"  Loaded {len(self.sample_index)} precomputed samples")
+            if self.is_prenormalized:
+                print(f"  Data is pre-normalized (fast path enabled!)")
         else:
             # Build index of valid samples
             self._build_sample_index()
 
-        # Load or compute normalization statistics
-        if normalize:
+        # Load normalization statistics (only needed for reference or if not pre-normalized)
+        if normalize and not self.is_prenormalized:
             if norm_stats_path and os.path.exists(norm_stats_path):
                 print(f"Loading normalization statistics from {norm_stats_path}...")
                 self.norm_stats = np.load(norm_stats_path)
@@ -828,6 +838,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 print("Warning: normalize=True but no precomputed data available.")
                 print("  Normalization will be computed on-the-fly (slow).")
                 self.normalize = False
+        elif self.is_prenormalized:
+            # Data is already normalized, skip normalization in __getitem__
+            self.normalize = False  # Don't normalize again
 
         print(f"Dataset initialized:")
         print(f"  Sequence length: {seq_length}")
@@ -835,7 +848,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         print(f"  Feature parameters: {len(self.feature_params)}")
         print(f"  Valid samples: {len(self.sample_index)}")
         print(f"  Using precomputed: {precomputed_path is not None and os.path.exists(precomputed_path)}")
-        print(f"  Normalization: {normalize}")
+        print(f"  Pre-normalized: {self.is_prenormalized}")
+        print(f"  Runtime normalization: {self.normalize}")
 
     def _build_sample_index(self):
         """Build index of valid samples (target_station, end_date) pairs"""
@@ -1074,13 +1088,14 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
         return features, target
 
-    def precompute_and_save(self, output_path: str, norm_stats_path: Optional[str] = None):
+    def precompute_and_save(self, output_path: str, norm_stats_path: Optional[str] = None, normalize: bool = True):
         """
         Precompute all sequences and save to disk for fast loading
 
         Args:
             output_path: Path to save precomputed sequences (.npz file)
             norm_stats_path: Path to save normalization statistics (optional)
+            normalize: If True, normalize data before saving (recommended for speed)
         """
         print(f"Precomputing {len(self.sample_index)} sequences...")
         print("This may take a while but only needs to be done once.")
@@ -1121,6 +1136,43 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             all_targets[idx] = target.numpy()
             all_masks[idx] = mask.numpy()
 
+        # Compute and apply normalization if requested
+        is_normalized = False
+        if normalize:
+            print(f"Computing normalization statistics...")
+            # Temporarily store in precomputed_data for computing stats
+            self.precomputed_data = {
+                'features': all_features,
+                'targets': all_targets,
+                'masks': all_masks
+            }
+            self._compute_norm_stats_from_precomputed()
+
+            print(f"Normalizing all data...")
+            # Normalize all samples in-place
+            for idx in range(len(self.sample_index)):
+                if idx % 1000 == 0 or idx == total - 1:
+                    print(f"  Normalizing: {idx}/{total} ({100*idx/total:.1f}%)")
+
+                all_features[idx], all_targets[idx] = self._apply_normalization(
+                    all_features[idx],
+                    all_targets[idx],
+                    all_masks[idx]
+                )
+
+            is_normalized = True
+
+            # Save normalization statistics
+            if norm_stats_path:
+                print(f"Saving normalization stats to {norm_stats_path}...")
+                np.savez(
+                    norm_stats_path,
+                    feature_mins=self.norm_stats['feature_mins'],
+                    feature_maxs=self.norm_stats['feature_maxs'],
+                    target_min=self.norm_stats['target_min'],
+                    target_max=self.norm_stats['target_max']
+                )
+
         # Save to disk
         print(f"Saving to {output_path}...")
 
@@ -1136,26 +1188,13 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             masks=all_masks,
             target_stations=target_stations,
             end_dates=end_dates,
-            start_dates=start_dates
+            start_dates=start_dates,
+            is_normalized=np.array([is_normalized], dtype=bool)
         )
 
         print(f"  Saved {len(self.sample_index)} sequences")
         print(f"  Shape: features={all_features.shape}, targets={all_targets.shape}")
-
-        # Compute and save normalization statistics
-        if norm_stats_path:
-            print(f"Computing normalization statistics...")
-            self.precomputed_data = np.load(output_path)
-            self._compute_norm_stats_from_precomputed()
-
-            print(f"Saving normalization stats to {norm_stats_path}...")
-            np.savez(
-                norm_stats_path,
-                feature_mins=self.norm_stats['feature_mins'],
-                feature_maxs=self.norm_stats['feature_maxs'],
-                target_min=self.norm_stats['target_min'],
-                target_max=self.norm_stats['target_max']
-            )
+        print(f"  Data is {'normalized' if is_normalized else 'not normalized'}")
 
         print("Done!")
 
@@ -1164,7 +1203,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
     def __getitem__(self, idx: int) -> 'Dict[str, torch.Tensor]':
         """
-        Get a sample
+        Get a sample - optimized for minimal overhead
 
         Returns:
             Dictionary with:
@@ -1174,34 +1213,36 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 - target_station_id: int
                 - end_date: timestamp
         """
-        sample = self.sample_index[idx]
-
-        # Load from precomputed data if available
+        # Load from precomputed data if available (fast path)
         if self.precomputed_data is not None:
-            features = self.precomputed_data['features'][idx].copy()
-            target = self.precomputed_data['targets'][idx].copy()
-            mask = self.precomputed_data['masks'][idx].copy()
+            # Direct numpy array access - no copy needed if data is read-only
+            # PyTorch will handle memory efficiently
+            features = self.precomputed_data['features'][idx]
+            target = self.precomputed_data['targets'][idx]
+            mask = self.precomputed_data['masks'][idx]
+
+            # Apply normalization if needed (only if not pre-normalized)
+            if self.normalize and self.norm_stats is not None:
+                # Need to copy here since we're modifying
+                features = features.copy()
+                target = target.copy()
+                features, target = self._apply_normalization(features, target, mask)
+
+            # Convert to tensors (torch.from_numpy shares memory if possible)
+            features_tensor = torch.from_numpy(features)
+            target_tensor = torch.from_numpy(target)
+            mask_tensor = torch.from_numpy(mask)
+
         else:
-            # Build on-the-fly (slow)
+            # Build on-the-fly (slow fallback)
             features_tensor, target_tensor, mask_tensor = self._build_sequence_tensor(
-                sample['target_station'],
-                sample['start_date'],
-                sample['end_date']
+                self.sample_index[idx]['target_station'],
+                self.sample_index[idx]['start_date'],
+                self.sample_index[idx]['end_date']
             )
-            features = features_tensor.numpy()
-            target = target_tensor.numpy()
-            mask = mask_tensor.numpy()
 
-        # Apply normalization if enabled
-        if self.normalize and self.norm_stats is not None:
-            features, target = self._apply_normalization(features, target, mask)
-
-        # Convert to tensors
-        features_tensor = torch.from_numpy(features)
-        target_tensor = torch.from_numpy(target)
-        mask_tensor = torch.from_numpy(mask)
-
-        # Convert pandas Timestamp to Unix timestamp (float) for PyTorch compatibility
+        # Get end date (lightweight operation at end)
+        sample = self.sample_index[idx]
         end_date_unix = sample['end_date'].timestamp() if hasattr(sample['end_date'], 'timestamp') else float(sample['end_date'])
 
         return {
@@ -1209,7 +1250,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             'target': target_tensor,
             'mask': mask_tensor,
             'target_station_id': sample['target_station'],
-            'end_date': end_date_unix  # Unix timestamp as float
+            'end_date': end_date_unix
         }
 
     def get_feature_names(self) -> List[str]:
@@ -1280,6 +1321,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         split_dataset.soil_moisture_param = self.soil_moisture_param
         split_dataset.missing_value = self.missing_value
         split_dataset.normalize = self.normalize
+        split_dataset.is_prenormalized = self.is_prenormalized
         split_dataset.precomputed_path = None  # Don't need path anymore
 
         # Copy dataframes (lightweight references)
@@ -1298,6 +1340,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             'end_dates': self.precomputed_data['end_dates'][indices],
             'start_dates': self.precomputed_data['start_dates'][indices]
         }
+        # Preserve is_normalized flag if present
+        if 'is_normalized' in self.precomputed_data:
+            split_dataset.precomputed_data['is_normalized'] = self.precomputed_data['is_normalized']
 
         # Filter sample_index
         split_dataset.sample_index = [self.sample_index[i] for i in indices]
