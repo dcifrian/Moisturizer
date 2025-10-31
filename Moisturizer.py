@@ -803,6 +803,16 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         # Track if data is already normalized in precomputed file
         self.is_prenormalized = False
 
+        # Check if soil moisture is in feature_params (data leakage!)
+        self.soil_in_features = self.soil_moisture_param in self.feature_params if feature_params else False
+        if self.soil_in_features:
+            print(f"⚠ WARNING: Soil moisture ({self.soil_moisture_param}) found in feature_params!")
+            print(f"  This will be filtered out from target station features to prevent data leakage.")
+            print(f"  Nearby stations will still have soil moisture as context.")
+            self.soil_feature_idx = self.feature_params.index(self.soil_moisture_param)
+        else:
+            self.soil_feature_idx = None
+
         # Load precomputed data if available
         if precomputed_path and os.path.exists(precomputed_path):
             print(f"Loading precomputed sequences from {precomputed_path}...")
@@ -1228,8 +1238,21 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             target = self.precomputed_data['targets'][idx]
             mask = self.precomputed_data['masks'][idx]
 
+            # Remove soil moisture from target station features if present (data leakage prevention)
+            if self.soil_in_features and self.soil_feature_idx is not None:
+                # Need to copy since we're modifying
+                features = features.copy()
+                mask = mask.copy()
+
+                # Remove soil moisture column from target station features
+                # Target features are at indices [0:len(feature_params)]
+                # We remove the column at soil_feature_idx
+                indices_to_keep = [i for i in range(features.shape[1]) if i != self.soil_feature_idx]
+                features = features[:, indices_to_keep]
+                mask = mask[:, indices_to_keep]
+
             # Apply normalization if needed (only if not pre-normalized)
-            if self.normalize and self.norm_stats is not None:
+            elif self.normalize and self.norm_stats is not None:
                 # Need to copy here since we're modifying
                 features = features.copy()
                 target = target.copy()
@@ -1329,6 +1352,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         split_dataset.missing_value = self.missing_value
         split_dataset.normalize = self.normalize
         split_dataset.is_prenormalized = self.is_prenormalized
+        split_dataset.soil_in_features = self.soil_in_features
+        split_dataset.soil_feature_idx = self.soil_feature_idx
         split_dataset.precomputed_path = None  # Don't need path anymore
 
         # Copy dataframes (lightweight references)
