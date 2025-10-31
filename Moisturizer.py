@@ -77,14 +77,14 @@ class MeteoGaliciaCollector:
         'VB_MIN_10m'        # Minimum wind gust at 10m
     ]
 
-    def __init__(self, cache_dir: str = "./meteogalicia_data"):
+    def __init__(self, data_dir: str = "./meteogalicia_data"):
         self.session = requests.Session()
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(exist_ok=True)
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(exist_ok=True)
 
-        self.stations_file = self.cache_dir / "stations_metadata.csv"
-        self.nearest_file = self.cache_dir / "nearest_stations.csv"
-        self.timeseries_file = self.cache_dir / "raw_timeseries.csv"
+        self.stations_file = self.data_dir / "stations_metadata.csv"
+        self.nearest_file = self.data_dir / "nearest_stations.csv"
+        self.timeseries_file = self.data_dir / "raw_timeseries.csv"
 
     def get_all_stations(self) -> pd.DataFrame:
         """
@@ -540,7 +540,7 @@ class MeteoGaliciaCollector:
             ml_df = pd.concat(ml_rows, ignore_index=True)
 
             if output_file is None:
-                output_file = self.cache_dir / "ml_ready_dataset.csv"
+                output_file = self.data_dir / "ml_ready_dataset.csv"
 
             ml_df.to_csv(output_file, index=False)
             print(f"✓ ML-ready dataset saved to {output_file}")
@@ -570,7 +570,7 @@ class MeteoGaliciaCollector:
             - filtered_params: List of parameters that meet the coverage threshold
         """
         if ml_dataset_file is None:
-            ml_dataset_file = self.cache_dir / "ml_ready_dataset.csv"
+            ml_dataset_file = self.data_dir / "ml_ready_dataset.csv"
 
         print(f"\nAnalyzing parameter coverage in {ml_dataset_file}...")
 
@@ -1229,6 +1229,84 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
         return feature_names
 
+    def _split_precomputed(
+            self,
+            train_stations: List[int],
+            val_stations: List[int],
+            test_stations: List[int]
+    ) -> Tuple['SoilMoistureSequenceDataset', 'SoilMoistureSequenceDataset', 'SoilMoistureSequenceDataset']:
+        """
+        Efficiently split precomputed data by filtering arrays
+
+        This is MUCH faster than creating new datasets because we just filter
+        the precomputed arrays instead of rebuilding from DataFrames.
+        """
+        # Get indices for each split
+        train_indices = [i for i, s in enumerate(self.sample_index) if s['target_station'] in train_stations]
+        val_indices = [i for i, s in enumerate(self.sample_index) if s['target_station'] in val_stations]
+        test_indices = [i for i, s in enumerate(self.sample_index) if s['target_station'] in test_stations]
+
+        print(f"  Train: {len(train_indices)} samples")
+        print(f"  Val: {len(val_indices)} samples")
+        print(f"  Test: {len(test_indices)} samples")
+
+        # Create train dataset
+        train_dataset = self._create_split_dataset(train_stations, train_indices)
+
+        # Create val dataset
+        val_dataset = None
+        if len(val_stations) > 0:
+            val_dataset = self._create_split_dataset(val_stations, val_indices)
+
+        # Create test dataset
+        test_dataset = None
+        if len(test_stations) > 0:
+            test_dataset = self._create_split_dataset(test_stations, test_indices)
+
+        return train_dataset, val_dataset, test_dataset
+
+    def _create_split_dataset(
+            self,
+            target_stations: List[int],
+            indices: List[int]
+    ) -> 'SoilMoistureSequenceDataset':
+        """Create a dataset from filtered precomputed data"""
+        # Create new dataset instance
+        split_dataset = SoilMoistureSequenceDataset.__new__(SoilMoistureSequenceDataset)
+
+        # Copy basic attributes
+        split_dataset.seq_length = self.seq_length
+        split_dataset.n_nearest = self.n_nearest
+        split_dataset.soil_moisture_param = self.soil_moisture_param
+        split_dataset.missing_value = self.missing_value
+        split_dataset.normalize = self.normalize
+        split_dataset.precomputed_path = None  # Don't need path anymore
+
+        # Copy dataframes (lightweight references)
+        split_dataset.timeseries_df = self.timeseries_df
+        split_dataset.stations_df = self.stations_df
+        split_dataset.nearest_df = self.nearest_df
+        split_dataset.target_stations = target_stations
+        split_dataset.feature_params = self.feature_params
+
+        # Filter precomputed data by indices
+        split_dataset.precomputed_data = {
+            'features': self.precomputed_data['features'][indices],
+            'targets': self.precomputed_data['targets'][indices],
+            'masks': self.precomputed_data['masks'][indices],
+            'target_stations': self.precomputed_data['target_stations'][indices],
+            'end_dates': self.precomputed_data['end_dates'][indices],
+            'start_dates': self.precomputed_data['start_dates'][indices]
+        }
+
+        # Filter sample_index
+        split_dataset.sample_index = [self.sample_index[i] for i in indices]
+
+        # Copy normalization stats (shared across all splits)
+        split_dataset.norm_stats = self.norm_stats
+
+        return split_dataset
+
     @staticmethod
     def train_val_test_split(
             dataset: 'SoilMoistureSequenceDataset',
@@ -1272,45 +1350,54 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         print(f"  Val: {len(val_stations)} stations")
         print(f"  Test: {len(test_stations)} stations")
 
-        # Create new datasets with filtered stations
-        train_dataset = SoilMoistureSequenceDataset(
-            timeseries=dataset.timeseries_df,  # Pass dataframe directly
-            stations=dataset.stations_df,
-            nearest=dataset.nearest_df,
-            seq_length=dataset.seq_length,
-            n_nearest=dataset.n_nearest,
-            target_stations=train_stations,
-            feature_params=dataset.feature_params,
-            soil_moisture_param=dataset.soil_moisture_param,
-            missing_value=dataset.missing_value
-        )
-        val_dataset = None
-        if val_stations_ratio > 0:
-            val_dataset = SoilMoistureSequenceDataset(
+        # If we have precomputed data, split it efficiently
+        if dataset.precomputed_data is not None:
+            print("Splitting precomputed data (fast)...")
+            return dataset._split_precomputed(train_stations, val_stations, test_stations)
+        else:
+            # Fallback to creating new datasets (slow)
+            print("Warning: No precomputed data, splitting will be slow...")
+            train_dataset = SoilMoistureSequenceDataset(
                 timeseries=dataset.timeseries_df,
                 stations=dataset.stations_df,
                 nearest=dataset.nearest_df,
                 seq_length=dataset.seq_length,
                 n_nearest=dataset.n_nearest,
-                target_stations=val_stations,
+                target_stations=train_stations,
                 feature_params=dataset.feature_params,
                 soil_moisture_param=dataset.soil_moisture_param,
-                missing_value=dataset.missing_value
+                missing_value=dataset.missing_value,
+                normalize=dataset.normalize
             )
-        test_dataset = None
-        if test_stations_ratio > 0:
-            test_dataset = SoilMoistureSequenceDataset(
-                timeseries=dataset.timeseries_df,
-                stations=dataset.stations_df,
-                nearest=dataset.nearest_df,
-                seq_length=dataset.seq_length,
-                n_nearest=dataset.n_nearest,
-                target_stations=test_stations,
-                feature_params=dataset.feature_params,
-                soil_moisture_param=dataset.soil_moisture_param,
-                missing_value=dataset.missing_value
-            )
-        return train_dataset, val_dataset, test_dataset
+            val_dataset = None
+            if val_stations_ratio > 0:
+                val_dataset = SoilMoistureSequenceDataset(
+                    timeseries=dataset.timeseries_df,
+                    stations=dataset.stations_df,
+                    nearest=dataset.nearest_df,
+                    seq_length=dataset.seq_length,
+                    n_nearest=dataset.n_nearest,
+                    target_stations=val_stations,
+                    feature_params=dataset.feature_params,
+                    soil_moisture_param=dataset.soil_moisture_param,
+                    missing_value=dataset.missing_value,
+                    normalize=dataset.normalize
+                )
+            test_dataset = None
+            if test_stations_ratio > 0:
+                test_dataset = SoilMoistureSequenceDataset(
+                    timeseries=dataset.timeseries_df,
+                    stations=dataset.stations_df,
+                    nearest=dataset.nearest_df,
+                    seq_length=dataset.seq_length,
+                    n_nearest=dataset.n_nearest,
+                    target_stations=test_stations,
+                    feature_params=dataset.feature_params,
+                    soil_moisture_param=dataset.soil_moisture_param,
+                    missing_value=dataset.missing_value,
+                    normalize=dataset.normalize
+                )
+            return train_dataset, val_dataset, test_dataset
 
     def get_sequence_data(
             self,
