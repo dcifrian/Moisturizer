@@ -557,7 +557,7 @@ class MeteoGaliciaCollector:
             self,
             ml_dataset_file: Optional[str] = None,
             coverage_threshold: float = 0.25,
-            soil_moisture_param: str = "HS_CV_AVG_-0.2m"
+            soil_moisture_param: str = "fdsdsfsfdsfdfds"
     ) -> Tuple[Dict[str, float], List[str]]:
         """
         Analyze parameter coverage in the ML-ready dataset and return parameters above threshold
@@ -1812,7 +1812,33 @@ if __name__ == "__main__":
         print("=" * 60)
 
     train_ds, val_ds, _ = loadDataset(use_precomputed=True, normalize=True)
-    torch._dynamo.config.disable = True
+
+    # After loading dataset, check one sample:
+    sample = train_ds[0]
+    features = sample['features']  # [64, total_features]
+    target = sample['target']  # [1]
+
+    print(f"\n=== Data Leakage Check ===")
+    print(f"Feature shape: {features.shape}")
+    print(f"Target value: {target.item():.4f}")
+
+    # Check if target value appears anywhere in features
+    # (it shouldn't if there's no leakage!)
+    features_np = features.numpy()
+    matches = (np.abs(features_np - target.item()) < 0.001).sum()
+    print(f"Features matching target value: {matches}")
+
+    if matches > 0:
+        print("⚠️  LEAKAGE DETECTED: Target value found in features!")
+    else:
+        print("✓ No obvious leakage detected")
+
+    # Check last timestep specifically (most likely leak point)
+    last_timestep = features_np[-1, :]
+    last_matches = (np.abs(last_timestep - target.item()) < 0.001).sum()
+    print(f"Last timestep matches: {last_matches}")
+
+    #torch._dynamo.config.disable = True
     from TROLOLO.TROLOLO_pyramid import TROLOLO
     quantize = False
     trololo = TROLOLO(seq_length=64,
@@ -1825,7 +1851,7 @@ if __name__ == "__main__":
                       mlp_rank=0.05,
                       qkv_rank=0.05,
                       attnproj_rank=0.05,
-                      sequence_pyramid=[(2, 4)],
+                      sequence_pyramid=[],
                       attn_rank_pyramid=[(0, 32), (1, 32)],
                       rank_pyramid_begin=2,
                       rank_pyramid_factor=1.0,
@@ -1834,4 +1860,4 @@ if __name__ == "__main__":
                       attention_dropout=0.01,
                       quantize_bits= None if not quantize else 8
                       )
-    trololo.training_loop(train_data=train_ds,val_data=val_ds,lr=4.1e-4,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=100,batch_size=4,transfer=0)
+    trololo.training_loop(train_data=train_ds,val_data=val_ds,lr=4.1e-4,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=10000,batch_size=512,transfer=0)

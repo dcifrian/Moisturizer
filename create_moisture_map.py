@@ -38,35 +38,32 @@ def load_model(model_path, device='cuda'):
     # Load checkpoint
     checkpoint = torch.load(model_path, map_location=device)
 
-    # You'll need to recreate the model with same architecture
-    # Adjust these parameters to match your trained model!
-    model = TROLOLO(
-        seq_length=64,
-        num_layers=6,
-        num_heads=48,
-        embed_dim=192,
-        mlp_dim=192,
-        n_class_tokens=2,
-        num_classes=1,
-        mlp_rank=0.05,
-        qkv_rank=0.05,
-        attnproj_rank=0.05,
-        sequence_pyramid=[],  # Empty if you removed shenanigans!
-        attn_rank_pyramid=[(0, 32), (1, 32)],
-        rank_pyramid_begin=2,
-        rank_pyramid_factor=1.0,
-        head_constriction="ONE_CLASS_TOKEN",
-        dropout=0.0,  # No dropout for inference
-        attention_dropout=0.0,
-        quantize_bits=None
-    )
+    trololo = TROLOLO(seq_length=64,
+                      num_layers=6,
+                      num_heads=48,
+                      embed_dim=192,
+                      mlp_dim=192,
+                      n_class_tokens=2,
+                      num_classes=1,
+                      mlp_rank=0.05,
+                      qkv_rank=0.05,
+                      attnproj_rank=0.05,
+                      sequence_pyramid=[],
+                      attn_rank_pyramid=[(0, 32), (1, 32)],
+                      rank_pyramid_begin=2,
+                      rank_pyramid_factor=1.0,
+                      head_constriction="ONE_CLASS_TOKEN",
+                      dropout=0.0,
+                      attention_dropout=0.0,
+                      quantize_bits=None
+                      )
 
-    model.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
-    model.to(device)
-    model.eval()
+    trololo.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
+    trololo.to(device)
+    trololo.eval()
 
     print(f"✓ Model loaded successfully")
-    return model
+    return trololo
 
 
 def predict_for_station(model, dataset, station_id, end_date, device='cuda'):
@@ -96,11 +93,13 @@ def predict_for_station(model, dataset, station_id, end_date, device='cuda'):
     sample_idx = matching_samples[0]
     sample = dataset[sample_idx]
 
-    # Run inference
-    with torch.no_grad():
-        features = sample['features'].unsqueeze(0).to(device)  # [1, seq_len, features]
-        prediction = model(features)
-        pred_value = prediction.cpu().item()
+    x_gpu = torch.zeros([1, model.embed_dim - 2, model.seq_length - model.n_class_tokens], dtype=torch.float16, device="cuda")
+    with (torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16)):
+            data = sample["features"]
+            X_batch = data
+            x_gpu[:1, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
+            x = x_gpu[:1, :, :]
+            pred_value = model(x).cpu().item()
 
     return pred_value
 
@@ -345,8 +344,8 @@ def create_visualization(results_df, target_date, output_file):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Create Galicia soil moisture map')
-    parser.add_argument('--model', type=str, required=True, help='Path to trained model checkpoint')
-    parser.add_argument('--date', type=str, default=None, help='Target date (YYYY-MM-DD), default: most recent')
+    parser.add_argument('--model', type=str, default="trololo.weight", help='Path to trained model checkpoint')
+    parser.add_argument('--date', type=str, default="2025-10-25", help='Target date (YYYY-MM-DD), default: most recent')
     parser.add_argument('--output', type=str, default='galicia_moisture_map.png', help='Output file path')
     parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'], help='Device to use')
 
