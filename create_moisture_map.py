@@ -131,6 +131,157 @@ def get_real_soil_moisture(collector, station_id, date):
     return None
 
 
+def build_sequence_for_any_station(
+    station_id,
+    end_date,
+    timeseries_df,
+    nearest_df,
+    feature_params,
+    norm_stats,
+    seq_length=64,
+    n_nearest=4,
+    missing_value=-1000.0
+):
+    """
+    Build a sequence for ANY station (even without soil moisture sensor)
+
+    This allows us to predict for stations without sensors by using their
+    weather data + nearby stations with sensors as context.
+    """
+    import numpy as np
+
+    start_date = end_date - timedelta(days=seq_length - 1)
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+
+    # Get nearest stations for this station
+    nearest_info = nearest_df[nearest_df['station_id'] == station_id]
+    if nearest_info.empty:
+        return None
+
+    nearest_info = nearest_info.iloc[0]
+
+    # Find n nearest stations WITH soil moisture
+    nearby_stations = []
+    for i in range(1, 50):  # Check up to 50 nearest
+        if f'nearest_{i}_id' not in nearest_info:
+            break
+        if nearest_info.get(f'nearest_{i}_has_soil_moisture', False):
+            nearby_stations.append({
+                'station_id': int(nearest_info[f'nearest_{i}_id']),
+                'distance': nearest_info[f'nearest_{i}_distance']
+            })
+            if len(nearby_stations) == n_nearest:
+                break
+
+    if len(nearby_stations) < n_nearest:
+        print(f"  Warning: Station {station_id} only has {len(nearby_stations)}/{n_nearest} nearby stations with soil moisture")
+        return None
+
+    # Calculate feature dimensions
+    target_features_per_timestep = len(feature_params)
+    nearby_features_per_timestep = (len(feature_params) + 1 + 1)  # features + soil moisture + distance
+    total_features = target_features_per_timestep + (nearby_features_per_timestep * n_nearest)
+
+    # Initialize arrays
+    features = np.full((seq_length, total_features), missing_value, dtype=np.float32)
+    mask = np.zeros((seq_length, total_features), dtype=np.float32)
+
+    # Fill target station features (this station, even if no soil moisture sensor)
+    for t, date in enumerate(date_range):
+        target_data = timeseries_df[
+            (timeseries_df['station_id'] == station_id) &
+            (timeseries_df['date'] == date)
+        ]
+
+        for f_idx, param in enumerate(feature_params):
+            param_data = target_data[target_data['parameter_code'] == param]
+            if not param_data.empty:
+                features[t, f_idx] = param_data.iloc[0]['value']
+                mask[t, f_idx] = 1.0
+
+        # Fill nearby stations features (these have soil moisture - context!)
+        for n_idx, nearby in enumerate(nearby_stations):
+            nearby_data = timeseries_df[
+                (timeseries_df['station_id'] == nearby['station_id']) &
+                (timeseries_df['date'] == date)
+            ]
+
+            nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
+
+            # Distance (constant across time)
+            features[t, nearby_offset] = nearby['distance']
+            mask[t, nearby_offset] = 1.0
+
+            # Features
+            for f_idx, param in enumerate(feature_params):
+                param_data = nearby_data[nearby_data['parameter_code'] == param]
+                feat_idx = nearby_offset + 1 + f_idx
+                if not param_data.empty:
+                    features[t, feat_idx] = param_data.iloc[0]['value']
+                    mask[t, feat_idx] = 1.0
+
+            # Soil moisture for nearby station (the key context!)
+            soil_data = nearby_data[nearby_data['parameter_code'] == 'HS_CV_AVG_-0.2m']
+            soil_idx = nearby_offset + 1 + len(feature_params)
+            if not soil_data.empty:
+                features[t, soil_idx] = soil_data.iloc[0]['value']
+                mask[t, soil_idx] = 1.0
+
+    # Apply normalization
+    features_normalized = apply_normalization_to_features(features, mask, norm_stats, missing_value)
+
+    return features_normalized, mask
+
+
+def apply_normalization_to_features(features, mask, norm_stats, missing_value=-1000.0):
+    """Apply normalization to features (same as in Dataset)"""
+    import numpy as np
+
+    feature_mins = norm_stats['feature_mins']
+    feature_maxs = norm_stats['feature_maxs']
+
+    invalid_markers = [-9999.0, missing_value]
+    normalized_invalid_marker = -2.0
+
+    features_norm = features.copy()
+
+    # Normalize each feature column
+    for feat_idx in range(features.shape[1]):
+        if feat_idx < len(feature_mins):  # Target station features
+            feat_min = feature_mins[feat_idx]
+            feat_max = feature_maxs[feat_idx]
+
+            # Handle invalid markers
+            invalid_mask = np.zeros(features.shape[0], dtype=bool)
+            for marker in invalid_markers:
+                invalid_mask |= (features[:, feat_idx] == marker)
+
+            # Normalize valid values to [-1, 1]
+            if feat_max > feat_min:
+                features_norm[:, feat_idx] = 2.0 * (features[:, feat_idx] - feat_min) / (feat_max - feat_min) - 1.0
+
+            # Set invalid markers to -2
+            features_norm[invalid_mask, feat_idx] = normalized_invalid_marker
+
+    return features_norm
+
+
+def get_real_soil_moisture(collector, station_id, date):
+    """Get actual soil moisture from timeseries data if available"""
+    timeseries_df = pd.read_csv(collector.timeseries_file)
+    timeseries_df['date'] = pd.to_datetime(timeseries_df['date'])
+
+    data = timeseries_df[
+        (timeseries_df['station_id'] == station_id) &
+        (timeseries_df['date'] == date) &
+        (timeseries_df['parameter_code'] == 'HS_CV_AVG_-0.2m')
+    ]
+
+    if not data.empty:
+        return data.iloc[0]['value']
+    return None
+
+
 def create_moisture_map(
     model_path,
     target_date=None,
@@ -191,11 +342,23 @@ def create_moisture_map(
         norm_stats_path=str(collector.data_dir / "normalization_stats.npz")
     )
 
+    # Load timeseries and nearest data for on-the-fly predictions
+    print("\nLoading timeseries data for predictions...")
+    timeseries_df = pd.read_csv(collector.timeseries_file)
+    timeseries_df['date'] = pd.to_datetime(timeseries_df['date'])
+    nearest_df = pd.read_csv(collector.nearest_file)
+
+    # Load normalization stats
+    norm_stats = np.load(str(collector.data_dir / "normalization_stats.npz"))
+
     # Get moisture values for all stations
     print("\nGathering soil moisture data...")
     results = []
 
-    for _, station in stations_df.iterrows():
+    for idx, station in stations_df.iterrows():
+        if idx % 20 == 0:
+            print(f"  Processing station {idx+1}/{len(stations_df)}...")
+
         station_id = station['station_id']
         lat = station['latitude']
         lon = station['longitude']
@@ -214,14 +377,36 @@ def create_moisture_map(
                     'name': station.get('name', f'Station {station_id}')
                 })
         else:
-            # Predict using model
+            # Build sequence on-the-fly and predict
             try:
-                pred_normalized = predict_for_station(model, dataset, station_id, target_date, device)
-                if pred_normalized is not None:
+                sequence_data = build_sequence_for_any_station(
+                    station_id=station_id,
+                    end_date=target_date,
+                    timeseries_df=timeseries_df,
+                    nearest_df=nearest_df,
+                    feature_params=filtered_params,
+                    norm_stats=norm_stats,
+                    seq_length=64,
+                    n_nearest=4
+                )
+
+                if sequence_data is not None:
+                    features_norm, mask = sequence_data
+
+                    # Run inference with your TROLOLO model
+                    x_gpu = torch.zeros([1, model.embed_dim - 2, model.seq_length - model.n_class_tokens], dtype=torch.float16, device=device)
+                    with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
+                        X_batch = torch.from_numpy(features_norm).unsqueeze(0)  # [1, 64, features]
+                        x_gpu[:1, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
+                        x = x_gpu[:1, :, :]
+                        pred_normalized = model(x).cpu().item()
+
+                    # Denormalize prediction
                     pred_denorm = denormalize_soil_moisture(
                         pred_normalized,
                         str(collector.data_dir / "normalization_stats.npz")
                     )
+
                     results.append({
                         'station_id': station_id,
                         'latitude': lat,
@@ -230,8 +415,11 @@ def create_moisture_map(
                         'type': 'predicted',
                         'name': station.get('name', f'Station {station_id}')
                     })
+
             except Exception as e:
                 print(f"  Warning: Could not predict for station {station_id}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
 
     results_df = pd.DataFrame(results)
