@@ -240,28 +240,36 @@ def apply_normalization_to_features(features, mask, norm_stats, missing_value=-1
     feature_mins = norm_stats['feature_mins']
     feature_maxs = norm_stats['feature_maxs']
 
+    # Verify dimensions match
+    if features.shape[1] != len(feature_mins):
+        raise ValueError(
+            f"Feature dimension mismatch! "
+            f"Built sequence has {features.shape[1]} features, "
+            f"but normalization stats have {len(feature_mins)} features. "
+            f"This means the on-the-fly sequence structure doesn't match training data structure."
+        )
+
     invalid_markers = [-9999.0, missing_value]
     normalized_invalid_marker = -2.0
 
     features_norm = features.copy()
 
-    # Normalize each feature column
+    # Normalize ALL feature columns (target station + nearby stations)
     for feat_idx in range(features.shape[1]):
-        if feat_idx < len(feature_mins):  # Target station features
-            feat_min = feature_mins[feat_idx]
-            feat_max = feature_maxs[feat_idx]
+        feat_min = feature_mins[feat_idx]
+        feat_max = feature_maxs[feat_idx]
 
-            # Handle invalid markers
-            invalid_mask = np.zeros(features.shape[0], dtype=bool)
-            for marker in invalid_markers:
-                invalid_mask |= (features[:, feat_idx] == marker)
+        # Handle invalid markers
+        invalid_mask = np.zeros(features.shape[0], dtype=bool)
+        for marker in invalid_markers:
+            invalid_mask |= (features[:, feat_idx] == marker)
 
-            # Normalize valid values to [-1, 1]
-            if feat_max > feat_min:
-                features_norm[:, feat_idx] = 2.0 * (features[:, feat_idx] - feat_min) / (feat_max - feat_min) - 1.0
+        # Normalize valid values to [-1, 1]
+        if feat_max > feat_min:
+            features_norm[:, feat_idx] = 2.0 * (features[:, feat_idx] - feat_min) / (feat_max - feat_min) - 1.0
 
-            # Set invalid markers to -2
-            features_norm[invalid_mask, feat_idx] = normalized_invalid_marker
+        # Set invalid markers to -2
+        features_norm[invalid_mask, feat_idx] = normalized_invalid_marker
 
     return features_norm
 
@@ -354,6 +362,7 @@ def create_moisture_map(
     # Get moisture values for all stations
     print("\nGathering soil moisture data...")
     results = []
+    first_prediction_done = False
 
     for idx, station in stations_df.iterrows():
         if idx % 20 == 0:
@@ -393,6 +402,15 @@ def create_moisture_map(
                 if sequence_data is not None:
                     features_norm, mask = sequence_data
 
+                    # Debug output for first prediction
+                    if not first_prediction_done:
+                        print(f"\n  DEBUG: First prediction (Station {station_id}):")
+                        print(f"    Feature shape: {features_norm.shape}")
+                        print(f"    Feature range: [{features_norm.min():.3f}, {features_norm.max():.3f}]")
+                        print(f"    Feature mean: {features_norm.mean():.3f}")
+                        print(f"    Normalization stats range: [{norm_stats['feature_mins'].min():.3f}, {norm_stats['feature_maxs'].max():.3f}]")
+                        print(f"    Target range in stats: [{norm_stats['target_min']:.3f}, {norm_stats['target_max']:.3f}]")
+
                     # Run inference with your TROLOLO model
                     x_gpu = torch.zeros([1, model.embed_dim - 2, model.seq_length - model.n_class_tokens], dtype=torch.float16, device=device)
                     with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
@@ -406,6 +424,12 @@ def create_moisture_map(
                         pred_normalized,
                         str(collector.data_dir / "normalization_stats.npz")
                     )
+
+                    # Debug output for first prediction
+                    if not first_prediction_done:
+                        print(f"    Prediction (normalized): {pred_normalized:.6f}")
+                        print(f"    Prediction (denormalized): {pred_denorm:.6f}")
+                        first_prediction_done = True
 
                     results.append({
                         'station_id': station_id,
