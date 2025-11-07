@@ -804,9 +804,15 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             self.dense_date_to_idx = {date: idx for idx, date in enumerate(self.dense_arrays['dates'])}
             print(f"  Loaded dense arrays: {self.dense_arrays['features'].shape}")
             print(f"  Memory: ~{self.dense_arrays['features'].nbytes / 1e6:.1f} MB")
-            self.timeseries_index = None  # Don't need dict lookup if we have dense arrays
+
+            # Still build timeseries index as fallback for edge cases
+            print("  Building fallback index for edge cases...")
+            self.timeseries_index = {
+                (int(row.station_id), row.date, row.parameter_code): float(row.value)
+                for row in self.timeseries_df.itertuples(index=False)
+            }
         else:
-            # Fall back to dict lookup index
+            # Use dict lookup index
             print("Creating fast lookup index for timeseries...")
             # Use itertuples() - 10x faster than iterrows()
             self.timeseries_index = {
