@@ -18,15 +18,20 @@ def build_dense_feature_array(
     timeseries_df: pd.DataFrame,
     stations_df: pd.DataFrame,
     feature_params: List[str],
+    soil_moisture_param: str = "HS_CV_AVG_-0.2m",
     missing_value: float = -1000.0
 ) -> Tuple[np.ndarray, np.ndarray, List[int], pd.DatetimeIndex]:
     """
     Build dense feature array for all stations × all dates × all parameters
 
+    IMPORTANT: Includes soil moisture in the array! This is needed for nearby stations.
+    (Target stations will exclude it during sequence building to prevent leakage)
+
     Args:
         timeseries_df: Raw timeseries data
         stations_df: Station metadata
-        feature_params: List of parameter codes to include
+        feature_params: List of parameter codes to include (WITHOUT soil moisture)
+        soil_moisture_param: Soil moisture parameter to add separately
         missing_value: Value for missing data
 
     Returns:
@@ -44,14 +49,17 @@ def build_dense_feature_array(
     date_index = pd.DatetimeIndex(all_dates)
     station_ids = sorted(stations_df['station_id'].unique())
 
+    # Build combined parameter list: features + soil moisture
+    all_params = feature_params + [soil_moisture_param]
+
     num_stations = len(station_ids)
     num_dates = len(date_index)
-    num_features = len(feature_params)
+    num_features = len(all_params)
 
     print(f"\nArray dimensions:")
     print(f"  Stations: {num_stations}")
     print(f"  Dates: {num_dates}")
-    print(f"  Features: {num_features}")
+    print(f"  Features: {len(feature_params)} weather params + 1 soil moisture = {num_features} total")
     print(f"  Total elements: {num_stations * num_dates * num_features:,}")
     print(f"  Memory: ~{num_stations * num_dates * num_features * 4 / 1e6:.1f} MB")
 
@@ -62,11 +70,11 @@ def build_dense_feature_array(
     # Create mapping for fast indexing
     station_to_idx = {sid: idx for idx, sid in enumerate(station_ids)}
     date_to_idx = {date: idx for idx, date in enumerate(date_index)}
-    param_to_idx = {param: idx for idx, param in enumerate(feature_params)}
+    param_to_idx = {param: idx for idx, param in enumerate(all_params)}
 
     print("\nFilling array with data...")
     # Fill the array - vectorized operation on grouped data
-    for param_idx, param in enumerate(feature_params):
+    for param_idx, param in enumerate(all_params):
         if param_idx % 10 == 0:
             print(f"  Processing parameter {param_idx+1}/{num_features}...")
 
@@ -96,7 +104,7 @@ def save_dense_arrays(
     mask_array: np.ndarray,
     station_ids: List[int],
     date_index: pd.DatetimeIndex,
-    feature_params: List[str]
+    all_params: List[str]
 ):
     """Save dense arrays to disk"""
     print(f"\nSaving dense arrays to {output_path}...")
@@ -107,7 +115,7 @@ def save_dense_arrays(
         masks=mask_array,
         station_ids=np.array(station_ids, dtype=np.int32),
         dates=date_index.values.astype('datetime64[ns]').astype(np.int64),  # Unix timestamps
-        feature_params=np.array(feature_params, dtype='U50')  # Unicode strings
+        feature_params=np.array(all_params, dtype='U50')  # Unicode strings (includes soil moisture!)
     )
 
     print(f"✓ Saved!")
@@ -133,23 +141,25 @@ def main():
 
     print(f"\n✓ Selected {len(filtered_params)} parameters")
 
-    # Build dense arrays
+    # Build dense arrays (includes soil moisture for nearby stations!)
     features_array, mask_array, station_ids, date_index = build_dense_feature_array(
         timeseries_df=timeseries_df,
         stations_df=stations_df,
         feature_params=filtered_params,
+        soil_moisture_param="HS_CV_AVG_-0.2m",
         missing_value=-1000.0
     )
 
-    # Save
+    # Save (all_params = filtered_params + soil moisture)
     output_path = collector.data_dir / "dense_features.npz"
+    all_params = filtered_params + ["HS_CV_AVG_-0.2m"]
     save_dense_arrays(
         output_path=str(output_path),
         features_array=features_array,
         mask_array=mask_array,
         station_ids=station_ids,
         date_index=date_index,
-        feature_params=filtered_params
+        all_params=all_params
     )
 
     print("\n" + "=" * 70)

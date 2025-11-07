@@ -745,7 +745,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             missing_value: float = -1000.0,
             precomputed_path: Optional[str] = None,
             normalize: bool = True,
-            norm_stats_path: Optional[str] = None
+            norm_stats_path: Optional[str] = None,
+            dense_array_path: Optional[str] = None
     ):
         """
         Initialize dataset
@@ -765,6 +766,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             precomputed_path: Path to precomputed .npz file (for fast loading)
             normalize: Whether to normalize features to [-1, 1] range
             norm_stats_path: Path to normalization stats .npz file (if None, computed automatically)
+            dense_array_path: Path to dense_features.npz (FASTEST - recommended for generation)
         """
         self.seq_length = seq_length
         self.n_nearest = n_nearest
@@ -776,6 +778,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         # Precomputed data (loaded on demand)
         self.precomputed_data = None
         self.norm_stats = None
+        self.dense_arrays = None
+        self.dense_array_path = dense_array_path
 
         # Load data
         print("Loading data files...")
@@ -784,15 +788,32 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         self.stations_df = stations if isinstance(stations,pd.DataFrame) else pd.read_csv(stations)
         self.nearest_df = nearest if isinstance(nearest,pd.DataFrame) else pd.read_csv(nearest)
 
-        # Create fast lookup index for timeseries data (MASSIVE speedup!)
-        # This trades memory for speed: O(1) dict lookup vs O(n) pandas filter
-        print("Creating fast lookup index for timeseries...")
-        # Use itertuples() - 10x faster than iterrows()
-        self.timeseries_index = {
-            (int(row.station_id), row.date, row.parameter_code): float(row.value)
-            for row in self.timeseries_df.itertuples(index=False)
-        }
-        print(f"  Indexed {len(self.timeseries_index):,} data points")
+        # Load dense arrays if provided (FASTEST method for precomputation)
+        if dense_array_path and os.path.exists(dense_array_path):
+            print(f"Loading dense feature arrays from {dense_array_path}...")
+            dense_data = np.load(dense_array_path)
+            self.dense_arrays = {
+                'features': dense_data['features'],  # [stations, dates, features]
+                'masks': dense_data['masks'],  # [stations, dates, features]
+                'station_ids': dense_data['station_ids'].tolist(),
+                'dates': pd.DatetimeIndex(dense_data['dates']),
+                'feature_params': dense_data['feature_params'].tolist()
+            }
+            # Create fast lookup mappings
+            self.dense_station_to_idx = {sid: idx for idx, sid in enumerate(self.dense_arrays['station_ids'])}
+            self.dense_date_to_idx = {date: idx for idx, date in enumerate(self.dense_arrays['dates'])}
+            print(f"  Loaded dense arrays: {self.dense_arrays['features'].shape}")
+            print(f"  Memory: ~{self.dense_arrays['features'].nbytes / 1e6:.1f} MB")
+            self.timeseries_index = None  # Don't need dict lookup if we have dense arrays
+        else:
+            # Fall back to dict lookup index
+            print("Creating fast lookup index for timeseries...")
+            # Use itertuples() - 10x faster than iterrows()
+            self.timeseries_index = {
+                (int(row.station_id), row.date, row.parameter_code): float(row.value)
+                for row in self.timeseries_df.itertuples(index=False)
+            }
+            print(f"  Indexed {len(self.timeseries_index):,} data points")
 
         # Determine target stations
         if target_stations is None:
@@ -1008,6 +1029,104 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             torch.from_numpy(mask)
         )
 
+    def _build_sequence_from_dense(
+            self,
+            target_station_id: int,
+            start_date: pd.Timestamp,
+            end_date: pd.Timestamp
+    ) -> 'Tuple[torch.Tensor, torch.Tensor, torch.Tensor]':
+        """
+        Build sequence tensor from dense arrays using FAST ARRAY SLICING
+
+        This is the optimal method - no redundant computation, vectorized operations.
+        Consecutive samples share 63/64 days but we just slice different windows.
+
+        Returns:
+            features: [seq_length, total_features] tensor
+            target: tensor (soil moisture at end_date)
+            mask: [seq_length, total_features] tensor (1 for valid, 0 for missing)
+        """
+        nearby_stations = self._get_nearest_stations(target_station_id)
+
+        # Get date range indices
+        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+        date_indices = [self.dense_date_to_idx.get(date) for date in date_range]
+
+        # Check if all dates are in our dense array
+        if None in date_indices:
+            # Fall back to dict method if dates not available
+            return self._build_sequence_tensor(target_station_id, start_date, end_date)
+
+        # Get station indices
+        target_idx = self.dense_station_to_idx.get(target_station_id)
+        if target_idx is None:
+            return self._build_sequence_tensor(target_station_id, start_date, end_date)
+
+        nearby_indices = []
+        for nearby in nearby_stations:
+            nearby_idx = self.dense_station_to_idx.get(nearby['station_id'])
+            if nearby_idx is None:
+                return self._build_sequence_tensor(target_station_id, start_date, end_date)
+            nearby_indices.append((nearby_idx, nearby['distance']))
+
+        # Calculate feature dimensions
+        target_features_per_timestep = len(self.feature_params)
+        nearby_features_per_timestep = len(self.feature_params) + 1 + 1  # features + soil moisture + distance
+        total_features = target_features_per_timestep + (nearby_features_per_timestep * self.n_nearest)
+
+        # Initialize output arrays
+        features = np.full((self.seq_length, total_features), self.missing_value, dtype=np.float32)
+        mask = np.zeros((self.seq_length, total_features), dtype=np.float32)
+
+        # VECTORIZED: Slice target station data for all dates at once
+        target_slice = self.dense_arrays['features'][target_idx, date_indices, :]  # [seq_length, num_features]
+        target_mask_slice = self.dense_arrays['masks'][target_idx, date_indices, :]
+
+        # Copy target features (exclude soil moisture if present)
+        features[:, :target_features_per_timestep] = target_slice[:, :target_features_per_timestep]
+        mask[:, :target_features_per_timestep] = target_mask_slice[:, :target_features_per_timestep]
+
+        # VECTORIZED: Slice each nearby station's data
+        for n_idx, (nearby_idx, distance) in enumerate(nearby_indices):
+            nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
+
+            # Distance (constant across time)
+            features[:, nearby_offset] = distance
+            mask[:, nearby_offset] = 1.0
+
+            # Slice all nearby station data at once
+            nearby_slice = self.dense_arrays['features'][nearby_idx, date_indices, :]  # [seq_length, num_features]
+            nearby_mask_slice = self.dense_arrays['masks'][nearby_idx, date_indices, :]
+
+            # Copy features (not including soil moisture yet)
+            feat_start = nearby_offset + 1
+            feat_end = feat_start + target_features_per_timestep
+            features[:, feat_start:feat_end] = nearby_slice[:, :target_features_per_timestep]
+            mask[:, feat_start:feat_end] = nearby_mask_slice[:, :target_features_per_timestep]
+
+            # Soil moisture (if available in dense array)
+            soil_idx_in_dense = None
+            if self.soil_moisture_param in self.dense_arrays['feature_params']:
+                soil_idx_in_dense = self.dense_arrays['feature_params'].index(self.soil_moisture_param)
+                soil_idx = feat_end
+                features[:, soil_idx] = nearby_slice[:, soil_idx_in_dense]
+                mask[:, soil_idx] = nearby_mask_slice[:, soil_idx_in_dense]
+
+        # Get target value (soil moisture at end_date for target station)
+        end_date_idx = date_indices[-1]
+        if soil_idx_in_dense is not None:
+            target = self.dense_arrays['features'][target_idx, end_date_idx, soil_idx_in_dense]
+        else:
+            # Fall back to dict lookup for soil moisture if not in dense array
+            target_key = (target_station_id, end_date, self.soil_moisture_param)
+            target = self.timeseries_index.get(target_key, self.missing_value) if self.timeseries_index else self.missing_value
+
+        return (
+            torch.from_numpy(features),
+            torch.tensor(target, dtype=torch.float32).unsqueeze(0),
+            torch.from_numpy(mask)
+        )
+
     def _compute_norm_stats_from_precomputed(self):
         """Compute normalization statistics from precomputed data"""
         print("Computing min/max for each feature (excluding invalid values)...")
@@ -1116,9 +1235,17 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         print(f"Precomputing {len(self.sample_index)} sequences...")
         print("This may take a while but only needs to be done once.")
 
+        # Choose the optimal sequence building method
+        if self.dense_arrays is not None:
+            print("  Using FAST dense array slicing method!")
+            build_method = self._build_sequence_from_dense
+        else:
+            print("  Using dict lookup method")
+            build_method = self._build_sequence_tensor
+
         # Determine feature dimensions from first sample
         sample0 = self.sample_index[0]
-        features0, target0, mask0 = self._build_sequence_tensor(
+        features0, target0, mask0 = build_method(
             sample0['target_station'],
             sample0['start_date'],
             sample0['end_date']
@@ -1143,7 +1270,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 print(f"  Progress: {idx}/{total} ({100*idx/total:.1f}%)")
 
             sample = self.sample_index[idx]
-            features, target, mask = self._build_sequence_tensor(
+            features, target, mask = build_method(
                 sample['target_station'],
                 sample['start_date'],
                 sample['end_date']
