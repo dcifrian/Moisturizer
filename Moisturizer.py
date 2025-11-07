@@ -557,7 +557,7 @@ class MeteoGaliciaCollector:
             self,
             ml_dataset_file: Optional[str] = None,
             coverage_threshold: float = 0.25,
-            soil_moisture_param: str = "fdsdsfsfdsfdfds"
+            soil_moisture_param: str = "HS_CV_AVG_-0.2m"
     ) -> Tuple[Dict[str, float], List[str]]:
         """
         Analyze parameter coverage in the ML-ready dataset and return parameters above threshold
