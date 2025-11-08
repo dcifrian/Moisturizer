@@ -27,12 +27,12 @@ def _process_batch_worker(batch_info):
     Worker function for parallel batch processing.
 
     Args:
-        batch_info: Tuple of (batch_num, start_idx, end_idx, dataset_params, augmentation_params, temp_dir)
+        batch_info: Tuple of (batch_num, start_idx, end_idx, dataset_params, augmentation_params, batch_dir)
 
     Returns:
         Path to saved batch file
     """
-    batch_num, start_idx, end_idx, dataset_params, aug_params, temp_dir = batch_info
+    batch_num, start_idx, end_idx, dataset_params, aug_params, batch_dir = batch_info
 
     # Unpack parameters
     timeseries_path, stations_path, nearest_path, dense_path = dataset_params
@@ -116,8 +116,8 @@ def _process_batch_worker(batch_info):
 
                 aug_idx += 1
 
-    # Save batch to temporary file
-    batch_file = Path(temp_dir) / f"batch_{batch_num:04d}.npz"
+    # Save batch to file
+    batch_file = Path(batch_dir) / f"batch_{batch_num:04d}.npz"
     np.savez_compressed(
         batch_file,
         features=batch_features,
@@ -202,17 +202,19 @@ def generate_all_augmentations_batched(
 
     print(f"   Sample shape: [{seq_length}, {total_features}]")
 
-    # Create temporary directory for batch files
-    temp_dir = Path(tempfile.mkdtemp(prefix="augmented_batches_"))
+    # Create temporary directory for batch files under data_dir (not /tmp)
+    batch_dir = Path(data_dir) / "augmented_batches"
+    batch_dir.mkdir(exist_ok=True)
     num_batches = (len(base_dataset.sample_index) + batch_size - 1) // batch_size
     num_workers = mp.cpu_count()
 
-    print(f"\n4. Processing in batches of {batch_size} using {num_workers} CPU cores (temp dir: {temp_dir})...")
+    print(f"\n4. Processing in batches of {batch_size} using {num_workers} CPU cores...")
+    print(f"   Batch directory: {batch_dir}")
     print(f"   Total batches: {num_batches}")
     print(f"   Estimated speedup: ~{num_workers}x faster than sequential")
 
     # Prepare parameters for workers
-    dataset_params = (timeseries_path, stations_path, nearest_path, dense_path)
+    dataset_params = (collector.timeseries_file, collector.stations_file, collector.nearest_file, dense_path)
     aug_params = {
         'dimensions': (seq_length, n_nearby_available, n_nearby_in_features),
         'skip_patterns': skip_patterns,
@@ -229,7 +231,7 @@ def generate_all_augmentations_batched(
     for batch_num in range(num_batches):
         start_idx = batch_num * batch_size
         end_idx = min(start_idx + batch_size, len(base_dataset.sample_index))
-        batch_infos.append((batch_num, start_idx, end_idx, dataset_params, aug_params, str(temp_dir)))
+        batch_infos.append((batch_num, start_idx, end_idx, dataset_params, aug_params, str(batch_dir)))
 
     # Process batches in parallel
     print(f"   Starting parallel processing...")
@@ -399,8 +401,8 @@ def generate_all_augmentations_batched(
     )
 
     # Cleanup
-    print(f"\n9. Cleaning up temporary files...")
-    shutil.rmtree(temp_dir)
+    print(f"\n9. Cleaning up batch files...")
+    shutil.rmtree(batch_dir)
 
     print(f"\n   Saved to: {output_path}")
     print(f"   File size: {output_path.stat().st_size / 1e9:.2f} GB")
