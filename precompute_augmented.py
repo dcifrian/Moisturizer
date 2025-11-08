@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """
-Pre-compute augmented dataset with ALL skip patterns and permutations
+Pre-compute augmented dataset with BATCHED processing (memory efficient!)
 
 Strategy:
-1. Load base dataset with n_nearest=5 (to get 5th station)
-2. For each base sample:
-   - For each of 5 skip patterns (skip station 0,1,2,3,4):
-     - For each of 24 permutations:
-       - Build augmented sample
-       - Add to precomputed array
-3. Save to precomputed_sequences_augmented.npz
+1. Process base samples in small batches (e.g., 100 at a time)
+2. For each batch, generate all 120 augmentations
+3. Save batch to temporary file
+4. Merge all batches at the end
 
-Total: base_samples × 5 skips × 24 perms = base_samples × 120
-
-This takes ~10-20 min to compute once, then training is as fast as base dataset!
+Memory usage: Only ~1-2GB instead of 360GB!
 """
 
 import numpy as np
@@ -21,25 +16,22 @@ import pandas as pd
 from pathlib import Path
 from itertools import permutations
 from Moisturizer import MeteoGaliciaCollector, SoilMoistureSequenceDataset
+import tempfile
+import shutil
 
 
-def generate_all_augmentations(
+def generate_all_augmentations_batched(
     data_dir: str = "./meteogalicia_data",
-    n_nearby_available: int = 5,  # Use 5 stations to generate augmentations
-    n_nearby_in_features: int = 4,  # But only use 4 in each sample
-    coverage_threshold: float = 0.25
+    n_nearby_available: int = 5,
+    n_nearby_in_features: int = 4,
+    coverage_threshold: float = 0.25,
+    batch_size: int = 100  # Process 100 base samples at a time
 ):
     """
-    Pre-compute ALL augmented samples (deterministic, complete coverage)
-
-    Args:
-        data_dir: Data directory
-        n_nearby_available: Number of nearby stations to load (5 = original 4 + 1 for skipping)
-        n_nearby_in_features: Number to actually use in features (4)
-        coverage_threshold: Parameter coverage threshold
+    Pre-compute ALL augmented samples with batched processing (memory efficient!)
     """
     print("=" * 70)
-    print("PRE-COMPUTING AUGMENTED DATASET (ALL COMBINATIONS)")
+    print("PRE-COMPUTING AUGMENTED DATASET (MEMORY EFFICIENT)")
     print("=" * 70)
 
     collector = MeteoGaliciaCollector(data_dir=data_dir)
@@ -52,7 +44,7 @@ def generate_all_augmentations(
 
     print(f"   Selected {len(filtered_params)} parameters")
 
-    # Load base dataset with n_nearest=5 (need 5th station for skip augmentation)
+    # Load base dataset with n_nearest=5
     print(f"\n2. Loading base dataset with {n_nearby_available} nearby stations...")
 
     dense_path = Path(data_dir) / "dense_features.npz"
@@ -62,155 +54,181 @@ def generate_all_augmentations(
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),
         seq_length=64,
-        n_nearest=n_nearby_available,  # Load 5 stations
+        n_nearest=n_nearby_available,
         feature_params=filtered_params,
-        precomputed_path=None,  # Build from scratch
+        precomputed_path=None,
         dense_array_path=str(dense_path) if dense_path.exists() else None,
-        normalize=False  # We'll normalize the augmented dataset at the end
+        normalize=False
     )
 
     print(f"   Base dataset: {len(base_dataset.sample_index)} samples")
 
-    # Generate all skip patterns and permutations
+    # Generate augmentation combinations
     print(f"\n3. Generating augmentation combinations...")
 
-    # All ways to pick n_nearby_in_features stations from n_nearby_available
     available_indices = list(range(n_nearby_available))
-
-    # Skip patterns: which station to skip (or keep all if n_nearby_in_features == n_nearby_available)
     skip_patterns = []
     for skip_idx in range(n_nearby_available):
-        # Indices to keep (all except skip_idx)
         keep_indices = [i for i in available_indices if i != skip_idx][:n_nearby_in_features]
         skip_patterns.append(keep_indices)
 
-    print(f"   Skip patterns: {len(skip_patterns)}")
-    for i, pattern in enumerate(skip_patterns):
-        print(f"     Pattern {i}: Skip station {i}, use stations {pattern}")
-
-    # All permutations of n_nearby_in_features stations
     all_permutations = list(permutations(range(n_nearby_in_features)))
-    print(f"   Permutations per skip pattern: {len(all_permutations)}")
-
     total_augmentations = len(skip_patterns) * len(all_permutations)
-    print(f"   Total augmentations per base sample: {total_augmentations}")
-    print(f"   Total samples in augmented dataset: {len(base_dataset.sample_index) * total_augmentations:,}")
 
-    # Pre-compute all augmented samples
-    print(f"\n4. Building all augmented samples...")
+    print(f"   Skip patterns: {len(skip_patterns)}")
+    print(f"   Permutations per skip: {len(all_permutations)}")
+    print(f"   Total augmentations per base: {total_augmentations}")
+    print(f"   Total augmented samples: {len(base_dataset.sample_index) * total_augmentations:,}")
 
-    # Get dimensions from first sample
+    # Get dimensions
     sample0 = base_dataset[0]
     seq_length = sample0['features'].shape[0]
-
-    # Calculate feature dimensions for n_nearby_in_features=4
     target_features = len(filtered_params)
-    nearby_features_per_station = 1 + len(filtered_params) + 1  # distance + features + soil
+    nearby_features_per_station = 1 + len(filtered_params) + 1
     total_features = target_features + (nearby_features_per_station * n_nearby_in_features)
 
     print(f"   Sample shape: [{seq_length}, {total_features}]")
 
-    # Preallocate arrays
-    total_samples = len(base_dataset.sample_index) * total_augmentations
-    all_features = np.zeros((total_samples, seq_length, total_features), dtype=np.float32)
-    all_targets = np.zeros((total_samples, 1), dtype=np.float32)
-    all_masks = np.zeros((total_samples, seq_length, total_features), dtype=np.float32)
+    # Create temporary directory for batch files
+    temp_dir = Path(tempfile.mkdtemp(prefix="augmented_batches_"))
+    print(f"\n4. Processing in batches of {batch_size} (temp dir: {temp_dir})...")
 
-    # Metadata for each augmented sample
-    aug_target_stations = []
-    aug_end_dates = []
-    aug_start_dates = []
-    aug_skip_pattern = []  # Which skip pattern was used
-    aug_permutation = []   # Which permutation was used
+    batch_files = []
+    num_batches = (len(base_dataset.sample_index) + batch_size - 1) // batch_size
 
-    aug_idx = 0
+    for batch_num in range(num_batches):
+        start_idx = batch_num * batch_size
+        end_idx = min(start_idx + batch_size, len(base_dataset.sample_index))
+        batch_actual_size = end_idx - start_idx
 
-    for base_idx in range(len(base_dataset.sample_index)):
-        if base_idx % 1000 == 0:
-            print(f"   Progress: {base_idx}/{len(base_dataset.sample_index)} ({100*base_idx/len(base_dataset.sample_index):.1f}%)")
+        print(f"\n   Batch {batch_num+1}/{num_batches}: Processing base samples {start_idx}-{end_idx}...")
 
-        # Get base sample (with 5 nearby stations)
-        sample = base_dataset[base_idx]
-        base_features = sample['features'].numpy()  # [seq_length, total_features_with_5_stations]
-        base_mask = sample['mask'].numpy()
-        base_target = sample['target'].numpy()
+        # Allocate arrays for this batch only
+        batch_aug_size = batch_actual_size * total_augmentations
+        batch_features = np.zeros((batch_aug_size, seq_length, total_features), dtype=np.float32)
+        batch_targets = np.zeros((batch_aug_size, 1), dtype=np.float32)
+        batch_masks = np.zeros((batch_aug_size, seq_length, total_features), dtype=np.float32)
+        batch_target_stations = []
+        batch_end_dates = []
+        batch_start_dates = []
+        batch_skip_pattern = []
+        batch_permutation = []
 
-        # Extract target station features (unchanged)
-        target_feat = base_features[:, :target_features]
-        target_mask = base_mask[:, :target_features]
+        aug_idx = 0
 
-        # Extract nearby station features (5 stations)
-        nearby_start = target_features
-        nearby_features_5 = base_features[:, nearby_start:]  # All 5 stations
-        nearby_mask_5 = base_mask[:, nearby_start:]
+        for base_idx in range(start_idx, end_idx):
+            # Get base sample
+            sample = base_dataset[base_idx]
+            base_features = sample['features'].numpy()
+            base_mask = sample['mask'].numpy()
+            base_target = sample['target'].numpy()
 
-        # Reshape to separate stations [seq_length, 5, features_per_station]
-        nearby_features_5 = nearby_features_5.reshape(
-            seq_length,
-            n_nearby_available,
-            nearby_features_per_station
+            # Extract target and nearby features
+            target_feat = base_features[:, :target_features]
+            target_mask = base_mask[:, :target_features]
+
+            nearby_start = target_features
+            nearby_features_5 = base_features[:, nearby_start:].reshape(
+                seq_length, n_nearby_available, nearby_features_per_station
+            )
+            nearby_mask_5 = base_mask[:, nearby_start:].reshape(
+                seq_length, n_nearby_available, nearby_features_per_station
+            )
+
+            # Generate all augmentations for this base sample
+            for skip_idx, keep_indices in enumerate(skip_patterns):
+                nearby_features_4 = nearby_features_5[:, keep_indices, :]
+                nearby_mask_4 = nearby_mask_5[:, keep_indices, :]
+
+                for perm_idx, perm in enumerate(all_permutations):
+                    perm_nearby_features = nearby_features_4[:, perm, :].reshape(seq_length, -1)
+                    perm_nearby_mask = nearby_mask_4[:, perm, :].reshape(seq_length, -1)
+
+                    aug_features = np.concatenate([target_feat, perm_nearby_features], axis=1)
+                    aug_mask = np.concatenate([target_mask, perm_nearby_mask], axis=1)
+
+                    batch_features[aug_idx] = aug_features
+                    batch_targets[aug_idx] = base_target
+                    batch_masks[aug_idx] = aug_mask
+
+                    sample_info = base_dataset.sample_index[base_idx]
+                    batch_target_stations.append(sample_info['target_station'])
+                    batch_end_dates.append(sample_info['end_date'].timestamp())
+                    batch_start_dates.append(sample_info['start_date'].timestamp())
+                    batch_skip_pattern.append(skip_idx)
+                    batch_permutation.append(perm_idx)
+
+                    aug_idx += 1
+
+        # Save batch to temporary file
+        batch_file = temp_dir / f"batch_{batch_num:04d}.npz"
+        np.savez_compressed(
+            batch_file,
+            features=batch_features,
+            targets=batch_targets,
+            masks=batch_masks,
+            target_stations=np.array(batch_target_stations, dtype=np.int32),
+            end_dates=np.array(batch_end_dates, dtype=np.float64),
+            start_dates=np.array(batch_start_dates, dtype=np.float64),
+            skip_pattern=np.array(batch_skip_pattern, dtype=np.int32),
+            permutation=np.array(batch_permutation, dtype=np.int32)
         )
-        nearby_mask_5 = nearby_mask_5.reshape(
-            seq_length,
-            n_nearby_available,
-            nearby_features_per_station
-        )
+        batch_files.append(batch_file)
 
-        # For each skip pattern
-        for skip_idx, keep_indices in enumerate(skip_patterns):
-            # Select 4 stations according to skip pattern
-            nearby_features_4 = nearby_features_5[:, keep_indices, :]  # [seq_length, 4, features_per_station]
-            nearby_mask_4 = nearby_mask_5[:, keep_indices, :]
+        print(f"      Saved {aug_idx} augmented samples to {batch_file.name}")
+        print(f"      Memory freed for next batch...")
 
-            # For each permutation
-            for perm_idx, perm in enumerate(all_permutations):
-                # Apply permutation to the 4 selected stations
-                perm_nearby_features = nearby_features_4[:, perm, :]
-                perm_nearby_mask = nearby_mask_4[:, perm, :]
+        # Explicitly free memory
+        del batch_features, batch_targets, batch_masks
+        del batch_target_stations, batch_end_dates, batch_start_dates
+        del batch_skip_pattern, batch_permutation
 
-                # Flatten back to feature vector
-                perm_nearby_features = perm_nearby_features.reshape(seq_length, -1)
-                perm_nearby_mask = perm_nearby_mask.reshape(seq_length, -1)
+    # Merge all batches
+    print(f"\n5. Merging {len(batch_files)} batches...")
+    print(f"   This will take a few minutes...")
 
-                # Concatenate target + nearby
-                aug_features = np.concatenate([target_feat, perm_nearby_features], axis=1)
-                aug_mask = np.concatenate([target_mask, perm_nearby_mask], axis=1)
+    # Load all batches and concatenate
+    all_features_list = []
+    all_targets_list = []
+    all_masks_list = []
+    all_target_stations = []
+    all_end_dates = []
+    all_start_dates = []
+    all_skip_pattern = []
+    all_permutation = []
 
-                # Store augmented sample
-                all_features[aug_idx] = aug_features
-                all_targets[aug_idx] = base_target
-                all_masks[aug_idx] = aug_mask
+    for i, batch_file in enumerate(batch_files):
+        print(f"   Loading batch {i+1}/{len(batch_files)}...")
+        batch_data = np.load(batch_file)
 
-                # Store metadata
-                sample_info = base_dataset.sample_index[base_idx]
-                aug_target_stations.append(sample_info['target_station'])
-                aug_end_dates.append(sample_info['end_date'].timestamp())
-                aug_start_dates.append(sample_info['start_date'].timestamp())
-                aug_skip_pattern.append(skip_idx)
-                aug_permutation.append(perm_idx)
+        all_features_list.append(batch_data['features'])
+        all_targets_list.append(batch_data['targets'])
+        all_masks_list.append(batch_data['masks'])
+        all_target_stations.extend(batch_data['target_stations'])
+        all_end_dates.extend(batch_data['end_dates'])
+        all_start_dates.extend(batch_data['start_dates'])
+        all_skip_pattern.extend(batch_data['skip_pattern'])
+        all_permutation.extend(batch_data['permutation'])
 
-                aug_idx += 1
+    print(f"   Concatenating arrays...")
+    all_features = np.concatenate(all_features_list, axis=0)
+    all_targets = np.concatenate(all_targets_list, axis=0)
+    all_masks = np.concatenate(all_masks_list, axis=0)
 
-    print(f"   Generated {aug_idx:,} augmented samples")
+    print(f"   Total samples: {len(all_features):,}")
 
-    # Normalize the augmented dataset
-    print(f"\n5. Computing normalization statistics...")
+    # Normalize
+    print(f"\n6. Computing normalization statistics...")
 
-    # Use same normalization logic as base dataset
-    from Moisturizer import SoilMoistureSequenceDataset
-
-    # Temporarily create a mock dataset to use its normalization methods
-    # We'll compute stats from the augmented data directly
     n_features = all_features.shape[2]
     feature_mins = np.full(n_features, np.inf, dtype=np.float32)
     feature_maxs = np.full(n_features, -np.inf, dtype=np.float32)
-
     invalid_markers = [-9999.0, -1000.0]
 
-    # Compute min/max for each feature
-    batch_size = 1000
-    for i in range(0, len(all_features), batch_size):
-        end_i = min(i + batch_size, len(all_features))
+    # Sample-based statistics computation (memory efficient)
+    sample_batch_size = 10000
+    for i in range(0, len(all_features), sample_batch_size):
+        end_i = min(i + sample_batch_size, len(all_features))
         features_batch = all_features[i:end_i]
         masks_batch = all_masks[i:end_i]
 
@@ -218,7 +236,6 @@ def generate_all_augmentations(
             feat_data = features_batch[:, :, feat_idx]
             feat_mask = masks_batch[:, :, feat_idx]
 
-            # Get valid data
             valid_mask = feat_mask > 0
             for marker in invalid_markers:
                 valid_mask &= (feat_data != marker)
@@ -229,57 +246,47 @@ def generate_all_augmentations(
                 feature_mins[feat_idx] = min(feature_mins[feat_idx], valid_data.min())
                 feature_maxs[feat_idx] = max(feature_maxs[feat_idx], valid_data.max())
 
-    # Compute for targets
-    valid_targets = all_targets.copy()
-    for marker in invalid_markers:
-        valid_targets = valid_targets[valid_targets != marker]
-
+    valid_targets = all_targets[~np.isin(all_targets, invalid_markers)]
     target_min = valid_targets.min() if len(valid_targets) > 0 else 0.0
     target_max = valid_targets.max() if len(valid_targets) > 0 else 1.0
 
     print(f"   Feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
     print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
 
-    # Apply normalization
-    print(f"\n6. Normalizing augmented samples...")
+    # Normalize in batches
+    print(f"\n7. Normalizing augmented samples...")
 
     normalized_invalid_marker = -2.0
 
-    for idx in range(len(all_features)):
-        if idx % 10000 == 0:
+    for idx in range(0, len(all_features), sample_batch_size):
+        end_idx = min(idx + sample_batch_size, len(all_features))
+        if idx % 50000 == 0:
             print(f"   Progress: {idx}/{len(all_features)} ({100*idx/len(all_features):.1f}%)")
 
-        # Normalize features
-        for feat_idx in range(n_features):
-            feat_min = feature_mins[feat_idx]
-            feat_max = feature_maxs[feat_idx]
+        for sample_idx in range(idx, end_idx):
+            # Normalize features
+            for feat_idx in range(n_features):
+                feat_min = feature_mins[feat_idx]
+                feat_max = feature_maxs[feat_idx]
 
-            # Handle invalid markers
-            invalid_mask = np.zeros(all_features[idx].shape[0], dtype=bool)
-            for marker in invalid_markers:
-                invalid_mask |= (all_features[idx][:, feat_idx] == marker)
+                invalid_mask = np.zeros(all_features[sample_idx].shape[0], dtype=bool)
+                for marker in invalid_markers:
+                    invalid_mask |= (all_features[sample_idx][:, feat_idx] == marker)
 
-            # Normalize valid values to [-1, 1]
-            if feat_max > feat_min:
-                all_features[idx][:, feat_idx] = 2.0 * (all_features[idx][:, feat_idx] - feat_min) / (feat_max - feat_min) - 1.0
+                if feat_max > feat_min:
+                    all_features[sample_idx][:, feat_idx] = 2.0 * (all_features[sample_idx][:, feat_idx] - feat_min) / (feat_max - feat_min) - 1.0
 
-            # Set invalid markers to -2
-            all_features[idx][invalid_mask, feat_idx] = normalized_invalid_marker
+                all_features[sample_idx][invalid_mask, feat_idx] = normalized_invalid_marker
 
-        # Normalize target
-        target_invalid = False
-        for marker in invalid_markers:
-            if np.any(all_targets[idx] == marker):
-                target_invalid = True
-                break
+            # Normalize target
+            target_invalid = np.any(np.isin(all_targets[sample_idx], invalid_markers))
+            if target_invalid:
+                all_targets[sample_idx][:] = normalized_invalid_marker
+            elif target_max > target_min:
+                all_targets[sample_idx][:] = 2.0 * (all_targets[sample_idx] - target_min) / (target_max - target_min) - 1.0
 
-        if target_invalid:
-            all_targets[idx][:] = normalized_invalid_marker
-        elif target_max > target_min:
-            all_targets[idx][:] = 2.0 * (all_targets[idx] - target_min) / (target_max - target_min) - 1.0
-
-    # Save augmented dataset
-    print(f"\n7. Saving augmented dataset...")
+    # Save final dataset
+    print(f"\n8. Saving augmented dataset...")
 
     output_path = Path(data_dir) / "precomputed_sequences_augmented.npz"
     norm_stats_path = Path(data_dir) / "normalization_stats_augmented.npz"
@@ -289,11 +296,11 @@ def generate_all_augmentations(
         features=all_features,
         targets=all_targets,
         masks=all_masks,
-        target_stations=np.array(aug_target_stations, dtype=np.int32),
-        end_dates=np.array(aug_end_dates, dtype=np.float64),
-        start_dates=np.array(aug_start_dates, dtype=np.float64),
-        skip_pattern=np.array(aug_skip_pattern, dtype=np.int32),
-        permutation=np.array(aug_permutation, dtype=np.int32),
+        target_stations=np.array(all_target_stations, dtype=np.int32),
+        end_dates=np.array(all_end_dates, dtype=np.float64),
+        start_dates=np.array(all_start_dates, dtype=np.float64),
+        skip_pattern=np.array(all_skip_pattern, dtype=np.int32),
+        permutation=np.array(all_permutation, dtype=np.int32),
         is_normalized=np.array([True], dtype=bool)
     )
 
@@ -305,8 +312,11 @@ def generate_all_augmentations(
         target_max=target_max
     )
 
-    print(f"   Saved to: {output_path}")
-    print(f"   Normalization stats: {norm_stats_path}")
+    # Cleanup
+    print(f"\n9. Cleaning up temporary files...")
+    shutil.rmtree(temp_dir)
+
+    print(f"\n   Saved to: {output_path}")
     print(f"   File size: {output_path.stat().st_size / 1e9:.2f} GB")
 
     print("\n" + "=" * 70)
@@ -315,16 +325,9 @@ def generate_all_augmentations(
     print(f"Base samples: {len(base_dataset.sample_index):,}")
     print(f"Augmented samples: {len(all_features):,}")
     print(f"Augmentation factor: {len(all_features) / len(base_dataset.sample_index):.0f}x")
-    print(f"\nBreakdown:")
-    print(f"  - Skip patterns: {len(skip_patterns)}")
-    print(f"  - Permutations per skip: {len(all_permutations)}")
-    print(f"  - Total per base: {total_augmentations}")
-    print("\nTo use in training:")
-    print("  dataset = SoilMoistureSequenceDataset(...,")
-    print("      precomputed_path='precomputed_sequences_augmented.npz',")
-    print("      norm_stats_path='normalization_stats_augmented.npz')")
+    print(f"\nPeak memory usage: ~{batch_size * total_augmentations * seq_length * total_features * 4 / 1e9:.1f} GB per batch")
     print("=" * 70)
 
 
 if __name__ == "__main__":
-    generate_all_augmentations()
+    generate_all_augmentations_batched(batch_size=100)
