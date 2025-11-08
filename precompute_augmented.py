@@ -183,39 +183,65 @@ def generate_all_augmentations_batched(
         del batch_target_stations, batch_end_dates, batch_start_dates
         del batch_skip_pattern, batch_permutation
 
-    # Merge all batches
+    # Merge all batches - MEMORY EFFICIENT VERSION
     print(f"\n5. Merging {len(batch_files)} batches...")
     print(f"   This will take a few minutes...")
 
-    # Load all batches and concatenate
-    all_features_list = []
-    all_targets_list = []
-    all_masks_list = []
-    all_target_stations = []
+    # First pass: Calculate total size
+    print(f"   Pass 1/2: Calculating total size...")
+    total_samples = 0
+    for batch_file in batch_files:
+        batch_data = np.load(batch_file)
+        total_samples += len(batch_data['features'])
+        batch_data.close()
+
+    print(f"   Total samples to merge: {total_samples:,}")
+
+    # Get shapes from first batch
+    first_batch = np.load(batch_files[0])
+    seq_length = first_batch['features'].shape[1]
+    n_features = first_batch['features'].shape[2]
+    first_batch.close()
+
+    # Pre-allocate final arrays
+    print(f"   Pre-allocating final arrays...")
+    all_features = np.zeros((total_samples, seq_length, n_features), dtype=np.float32)
+    all_targets = np.zeros((total_samples, 1), dtype=np.float32)
+    all_masks = np.zeros((total_samples, seq_length, n_features), dtype=np.float32)
+    all_target_stations = np.zeros(total_samples, dtype=np.int32)
     all_end_dates = []
     all_start_dates = []
-    all_skip_pattern = []
-    all_permutation = []
+    all_skip_pattern = np.zeros(total_samples, dtype=np.int32)
+    all_permutation = np.zeros(total_samples, dtype=np.int32)
 
+    # Second pass: Copy data incrementally
+    print(f"   Pass 2/2: Copying batch data...")
+    current_idx = 0
     for i, batch_file in enumerate(batch_files):
-        print(f"   Loading batch {i+1}/{len(batch_files)}...")
+        if i % 10 == 0:
+            print(f"      Batch {i+1}/{len(batch_files)} (progress: {current_idx:,}/{total_samples:,})...")
         batch_data = np.load(batch_file)
 
-        all_features_list.append(batch_data['features'])
-        all_targets_list.append(batch_data['targets'])
-        all_masks_list.append(batch_data['masks'])
-        all_target_stations.extend(batch_data['target_stations'])
+        batch_size = len(batch_data['features'])
+        end_idx = current_idx + batch_size
+
+        # Copy into pre-allocated arrays
+        all_features[current_idx:end_idx] = batch_data['features']
+        all_targets[current_idx:end_idx] = batch_data['targets']
+        all_masks[current_idx:end_idx] = batch_data['masks']
+        all_target_stations[current_idx:end_idx] = batch_data['target_stations']
         all_end_dates.extend(batch_data['end_dates'])
         all_start_dates.extend(batch_data['start_dates'])
-        all_skip_pattern.extend(batch_data['skip_pattern'])
-        all_permutation.extend(batch_data['permutation'])
+        all_skip_pattern[current_idx:end_idx] = batch_data['skip_pattern']
+        all_permutation[current_idx:end_idx] = batch_data['permutation']
 
-    print(f"   Concatenating arrays...")
-    all_features = np.concatenate(all_features_list, axis=0)
-    all_targets = np.concatenate(all_targets_list, axis=0)
-    all_masks = np.concatenate(all_masks_list, axis=0)
+        # CRITICAL: Close and delete batch immediately to free memory
+        batch_data.close()
+        del batch_data
 
-    print(f"   Total samples: {len(all_features):,}")
+        current_idx = end_idx
+
+    print(f"   Merge complete: {total_samples:,} samples")
 
     # Normalize
     print(f"\n6. Computing normalization statistics...")
