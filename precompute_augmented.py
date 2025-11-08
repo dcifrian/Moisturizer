@@ -18,6 +18,119 @@ from itertools import permutations
 from Moisturizer import MeteoGaliciaCollector, SoilMoistureSequenceDataset
 import tempfile
 import shutil
+import multiprocessing as mp
+from functools import partial
+
+
+def _process_batch_worker(batch_info):
+    """
+    Worker function for parallel batch processing.
+
+    Args:
+        batch_info: Tuple of (batch_num, start_idx, end_idx, dataset_params, augmentation_params, temp_dir)
+
+    Returns:
+        Path to saved batch file
+    """
+    batch_num, start_idx, end_idx, dataset_params, aug_params, temp_dir = batch_info
+
+    # Unpack parameters
+    timeseries_path, stations_path, nearest_path, dense_path = dataset_params
+    seq_length, n_nearby_available, n_nearby_in_features = aug_params['dimensions']
+    skip_patterns = aug_params['skip_patterns']
+    all_permutations = aug_params['permutations']
+    filtered_params = aug_params['filtered_params']
+    total_augmentations = aug_params['total_augmentations']
+    target_features = aug_params['target_features']
+    nearby_features_per_station = aug_params['nearby_features_per_station']
+    total_features = aug_params['total_features']
+
+    # Load dataset in this worker process
+    dataset = SoilMoistureSequenceDataset(
+        timeseries=str(timeseries_path),
+        stations=str(stations_path),
+        nearest=str(nearest_path),
+        seq_length=seq_length,
+        n_nearest=n_nearby_available,
+        feature_params=filtered_params,
+        dense_array_path=str(dense_path) if Path(dense_path).exists() else None,
+        normalize=False
+    )
+
+    batch_actual_size = end_idx - start_idx
+    batch_aug_size = batch_actual_size * total_augmentations
+
+    # Allocate arrays for this batch
+    batch_features = np.zeros((batch_aug_size, seq_length, total_features), dtype=np.float32)
+    batch_targets = np.zeros((batch_aug_size, 1), dtype=np.float32)
+    batch_masks = np.zeros((batch_aug_size, seq_length, total_features), dtype=np.float32)
+    batch_target_stations = []
+    batch_end_dates = []
+    batch_start_dates = []
+    batch_skip_pattern = []
+    batch_permutation = []
+
+    aug_idx = 0
+
+    for base_idx in range(start_idx, end_idx):
+        # Get base sample
+        sample = dataset[base_idx]
+        base_features = sample['features'].numpy()
+        base_mask = sample['mask'].numpy()
+        base_target = sample['target'].numpy()
+
+        # Extract target and nearby features
+        target_feat = base_features[:, :target_features]
+        target_mask = base_mask[:, :target_features]
+
+        nearby_start = target_features
+        nearby_features_5 = base_features[:, nearby_start:].reshape(
+            seq_length, n_nearby_available, nearby_features_per_station
+        )
+        nearby_mask_5 = base_mask[:, nearby_start:].reshape(
+            seq_length, n_nearby_available, nearby_features_per_station
+        )
+
+        # Generate all augmentations for this base sample
+        for skip_idx, keep_indices in enumerate(skip_patterns):
+            nearby_features_4 = nearby_features_5[:, keep_indices, :]
+            nearby_mask_4 = nearby_mask_5[:, keep_indices, :]
+
+            for perm_idx, perm in enumerate(all_permutations):
+                perm_nearby_features = nearby_features_4[:, perm, :].reshape(seq_length, -1)
+                perm_nearby_mask = nearby_mask_4[:, perm, :].reshape(seq_length, -1)
+
+                aug_features = np.concatenate([target_feat, perm_nearby_features], axis=1)
+                aug_mask = np.concatenate([target_mask, perm_nearby_mask], axis=1)
+
+                batch_features[aug_idx] = aug_features
+                batch_targets[aug_idx] = base_target
+                batch_masks[aug_idx] = aug_mask
+
+                sample_info = dataset.sample_index[base_idx]
+                batch_target_stations.append(sample_info['target_station'])
+                batch_end_dates.append(sample_info['end_date'].timestamp())
+                batch_start_dates.append(sample_info['start_date'].timestamp())
+                batch_skip_pattern.append(skip_idx)
+                batch_permutation.append(perm_idx)
+
+                aug_idx += 1
+
+    # Save batch to temporary file
+    batch_file = Path(temp_dir) / f"batch_{batch_num:04d}.npz"
+    np.savez_compressed(
+        batch_file,
+        features=batch_features,
+        targets=batch_targets,
+        masks=batch_masks,
+        target_stations=np.array(batch_target_stations, dtype=np.int32),
+        end_dates=np.array(batch_end_dates, dtype=np.float64),
+        start_dates=np.array(batch_start_dates, dtype=np.float64),
+        skip_pattern=np.array(batch_skip_pattern, dtype=np.int32),
+        permutation=np.array(batch_permutation, dtype=np.int32)
+    )
+
+    return batch_file
 
 
 def generate_all_augmentations_batched(
@@ -91,97 +204,44 @@ def generate_all_augmentations_batched(
 
     # Create temporary directory for batch files
     temp_dir = Path(tempfile.mkdtemp(prefix="augmented_batches_"))
-    print(f"\n4. Processing in batches of {batch_size} (temp dir: {temp_dir})...")
-
-    batch_files = []
     num_batches = (len(base_dataset.sample_index) + batch_size - 1) // batch_size
+    num_workers = mp.cpu_count()
 
+    print(f"\n4. Processing in batches of {batch_size} using {num_workers} CPU cores (temp dir: {temp_dir})...")
+    print(f"   Total batches: {num_batches}")
+    print(f"   Estimated speedup: ~{num_workers}x faster than sequential")
+
+    # Prepare parameters for workers
+    dataset_params = (timeseries_path, stations_path, nearest_path, dense_path)
+    aug_params = {
+        'dimensions': (seq_length, n_nearby_available, n_nearby_in_features),
+        'skip_patterns': skip_patterns,
+        'permutations': all_permutations,
+        'filtered_params': filtered_params,
+        'total_augmentations': total_augmentations,
+        'target_features': target_features,
+        'nearby_features_per_station': nearby_features_per_station,
+        'total_features': total_features
+    }
+
+    # Create batch info tuples for all batches
+    batch_infos = []
     for batch_num in range(num_batches):
         start_idx = batch_num * batch_size
         end_idx = min(start_idx + batch_size, len(base_dataset.sample_index))
-        batch_actual_size = end_idx - start_idx
+        batch_infos.append((batch_num, start_idx, end_idx, dataset_params, aug_params, str(temp_dir)))
 
-        print(f"\n   Batch {batch_num+1}/{num_batches}: Processing base samples {start_idx}-{end_idx}...")
+    # Process batches in parallel
+    print(f"   Starting parallel processing...")
+    with mp.Pool(processes=num_workers) as pool:
+        # Use imap to get progress updates as batches complete
+        batch_files = []
+        for i, batch_file in enumerate(pool.imap(_process_batch_worker, batch_infos)):
+            batch_files.append(batch_file)
+            if (i + 1) % max(1, num_batches // 20) == 0 or (i + 1) == num_batches:
+                print(f"      Progress: {i+1}/{num_batches} batches complete ({100*(i+1)/num_batches:.1f}%)")
 
-        # Allocate arrays for this batch only
-        batch_aug_size = batch_actual_size * total_augmentations
-        batch_features = np.zeros((batch_aug_size, seq_length, total_features), dtype=np.float32)
-        batch_targets = np.zeros((batch_aug_size, 1), dtype=np.float32)
-        batch_masks = np.zeros((batch_aug_size, seq_length, total_features), dtype=np.float32)
-        batch_target_stations = []
-        batch_end_dates = []
-        batch_start_dates = []
-        batch_skip_pattern = []
-        batch_permutation = []
-
-        aug_idx = 0
-
-        for base_idx in range(start_idx, end_idx):
-            # Get base sample
-            sample = base_dataset[base_idx]
-            base_features = sample['features'].numpy()
-            base_mask = sample['mask'].numpy()
-            base_target = sample['target'].numpy()
-
-            # Extract target and nearby features
-            target_feat = base_features[:, :target_features]
-            target_mask = base_mask[:, :target_features]
-
-            nearby_start = target_features
-            nearby_features_5 = base_features[:, nearby_start:].reshape(
-                seq_length, n_nearby_available, nearby_features_per_station
-            )
-            nearby_mask_5 = base_mask[:, nearby_start:].reshape(
-                seq_length, n_nearby_available, nearby_features_per_station
-            )
-
-            # Generate all augmentations for this base sample
-            for skip_idx, keep_indices in enumerate(skip_patterns):
-                nearby_features_4 = nearby_features_5[:, keep_indices, :]
-                nearby_mask_4 = nearby_mask_5[:, keep_indices, :]
-
-                for perm_idx, perm in enumerate(all_permutations):
-                    perm_nearby_features = nearby_features_4[:, perm, :].reshape(seq_length, -1)
-                    perm_nearby_mask = nearby_mask_4[:, perm, :].reshape(seq_length, -1)
-
-                    aug_features = np.concatenate([target_feat, perm_nearby_features], axis=1)
-                    aug_mask = np.concatenate([target_mask, perm_nearby_mask], axis=1)
-
-                    batch_features[aug_idx] = aug_features
-                    batch_targets[aug_idx] = base_target
-                    batch_masks[aug_idx] = aug_mask
-
-                    sample_info = base_dataset.sample_index[base_idx]
-                    batch_target_stations.append(sample_info['target_station'])
-                    batch_end_dates.append(sample_info['end_date'].timestamp())
-                    batch_start_dates.append(sample_info['start_date'].timestamp())
-                    batch_skip_pattern.append(skip_idx)
-                    batch_permutation.append(perm_idx)
-
-                    aug_idx += 1
-
-        # Save batch to temporary file
-        batch_file = temp_dir / f"batch_{batch_num:04d}.npz"
-        np.savez_compressed(
-            batch_file,
-            features=batch_features,
-            targets=batch_targets,
-            masks=batch_masks,
-            target_stations=np.array(batch_target_stations, dtype=np.int32),
-            end_dates=np.array(batch_end_dates, dtype=np.float64),
-            start_dates=np.array(batch_start_dates, dtype=np.float64),
-            skip_pattern=np.array(batch_skip_pattern, dtype=np.int32),
-            permutation=np.array(batch_permutation, dtype=np.int32)
-        )
-        batch_files.append(batch_file)
-
-        print(f"      Saved {aug_idx} augmented samples to {batch_file.name}")
-        print(f"      Memory freed for next batch...")
-
-        # Explicitly free memory
-        del batch_features, batch_targets, batch_masks
-        del batch_target_stations, batch_end_dates, batch_start_dates
-        del batch_skip_pattern, batch_permutation
+    print(f"   All {num_batches} batches processed!")
 
     # Merge all batches - MEMORY EFFICIENT VERSION
     print(f"\n5. Merging {len(batch_files)} batches...")
