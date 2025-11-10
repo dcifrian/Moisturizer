@@ -1,0 +1,3471 @@
+/home/pickman/miniforge3/envs/unsloth_env/bin/python /home/pickman/Moisturizer/precompute_augmented.py
+======================================================================
+PRE-COMPUTING AUGMENTED DATASET (MEMORY EFFICIENT)
+======================================================================
+
+1. Analyzing parameter coverage...
+
+Analyzing parameter coverage in meteogalicia_data/ml_ready_dataset.csv...
+
+Total stations in dataset: 28509
+Coverage threshold: 25%
+
+Parameter coverage:
+----------------------------------------------------------------------
+✗ BCN_AVG_1.5m             :  23.1% (6579/28509 stations)
+✗ BCN_MAX_1.5m             :  23.1% (6579/28509 stations)
+✓ BH_SUM_1.5m              :  59.0% (16813/28509 stations)
+✗ DVP_MODA_10m             :  15.4% (4386/28509 stations)
+✓ DVP_MODA_2m              :  84.6% (24123/28509 stations)
+✗ DV_CONDICION_10m         :  15.4% (4386/28509 stations)
+✓ DV_CONDICION_2m          :  84.6% (24123/28509 stations)
+✓ ET0_SUM_1.5m             :  56.4% (16082/28509 stations)
+✓ HFRIO7_RECUENTO_1.5m     :  95.1% (27107/28509 stations)
+✗ HFRIO7_RECUENTO_15m      :   0.0% (0/28509 stations)
+✓ HF_SUM_2m                : 100.0% (28509/28509 stations)
+✓ HR_AVG_1.5m              : 100.0% (28509/28509 stations)
+✗ HR_AVG_15m               :   0.0% (0/28509 stations)
+✓ HR_MAX_1.5m              : 100.0% (28509/28509 stations)
+✗ HR_MAX_15m               :   0.0% (0/28509 stations)
+✓ HR_MIN_1.5m              : 100.0% (28509/28509 stations)
+✗ HR_MIN_15m               :   0.0% (0/28509 stations)
+✓ HSOL_SUM_1.5m            :  59.0% (16813/28509 stations)
+✓ HS_CV_AVG_-0.2m          : 100.0% (28509/28509 stations)
+✓ INS_RATIO_1.5m           :  59.0% (16813/28509 stations)
+✓ IRD_SUM_1.5m             :  59.0% (16813/28509 stations)
+✗ IUVX_MAX_1.5m            :   0.0% (0/28509 stations)
+✓ PP_SUM_1.5m              : 100.0% (28509/28509 stations)
+✓ PRED_AVG_1.5m            :  58.5% (16681/28509 stations)
+✓ PR_AVG_1.5m              :  58.5% (16681/28509 stations)
+✓ TA_AVG_0.1m              :  97.4% (27778/28509 stations)
+✓ TA_AVG_1.5m              : 100.0% (28509/28509 stations)
+✗ TA_AVG_15m               :   0.0% (0/28509 stations)
+✓ TA_MAX_1.5m              : 100.0% (28509/28509 stations)
+✗ TA_MAX_15m               :   0.0% (0/28509 stations)
+✓ TA_MIN_1.5m              : 100.0% (28509/28509 stations)
+✗ TA_MIN_15m               :   0.0% (0/28509 stations)
+✓ TO_AVG_1.5m              : 100.0% (28509/28509 stations)
+✗ TO_AVG_15m               :   0.0% (0/28509 stations)
+✓ TS_AVG_-0.1m             : 100.0% (28509/28509 stations)
+✗ VB_AVG_10m               :   0.0% (0/28509 stations)
+✗ VB_MAX_10m               :   0.0% (0/28509 stations)
+✗ VB_MIN_10m               :   0.0% (0/28509 stations)
+✗ VV_AVG_10m               :  15.4% (4386/28509 stations)
+✓ VV_AVG_2m                :  84.6% (24123/28509 stations)
+✗ VV_MAX_10m               :  15.4% (4386/28509 stations)
+✓ VV_MAX_2m                :  84.6% (24123/28509 stations)
+✓ altitude                 : 100.0% (28509/28509 stations)
+✓ utmx                     : 100.0% (28509/28509 stations)
+✓ utmy                     : 100.0% (28509/28509 stations)
+----------------------------------------------------------------------
+
+Parameters passing 25% threshold: 26/45
+  (Excluded HS_CV_AVG_-0.2m - it's the target variable)
+Filtered parameters: ['BH_SUM_1.5m', 'DVP_MODA_2m', 'DV_CONDICION_2m', 'ET0_SUM_1.5m', 'HFRIO7_RECUENTO_1.5m', 'HF_SUM_2m', 'HR_AVG_1.5m', 'HR_MAX_1.5m', 'HR_MIN_1.5m', 'HSOL_SUM_1.5m', 'INS_RATIO_1.5m', 'IRD_SUM_1.5m', 'PP_SUM_1.5m', 'PRED_AVG_1.5m', 'PR_AVG_1.5m', 'TA_AVG_0.1m', 'TA_AVG_1.5m', 'TA_MAX_1.5m', 'TA_MIN_1.5m', 'TO_AVG_1.5m', 'TS_AVG_-0.1m', 'VV_AVG_2m', 'VV_MAX_2m', 'altitude', 'utmx', 'utmy']
+   Selected 26 parameters
+
+2. Loading base dataset with 5 nearby stations...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+   Base dataset: 28509 samples
+
+3. Generating augmentation combinations...
+   Skip patterns: 5
+   Permutations per skip: 24
+   Total augmentations per base: 120
+   Total augmented samples: 3,421,080
+   Sample shape: [64, 138]
+
+4. Processing in batches of 100 using 32 CPU cores...
+   Batch directory: meteogalicia_data/augmented_batches
+   Total batches: 286
+   Estimated speedup: ~32x faster than sequential
+   Starting parallel processing...
+Loading data files...
+Loading data files...Loading data files...
+
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading data files...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+      Progress: 14/286 batches complete (4.9%)
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+      Progress: 28/286 batches complete (9.8%)
+Loading data files...
+Building sample index...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+      Progress: 42/286 batches complete (14.7%)
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Building sample index...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+      Progress: 56/286 batches complete (19.6%)
+Loading data files...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Building sample index...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Building sample index...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+      Progress: 70/286 batches complete (24.5%)
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Building sample index...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Building sample index...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Building sample index...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+      Progress: 84/286 batches complete (29.4%)
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+      Progress: 98/286 batches complete (34.3%)
+Loading data files...
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Building sample index...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+      Progress: 112/286 batches complete (39.2%)
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Loading data files...
+Loading data files...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Building sample index...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+      Progress: 126/286 batches complete (44.1%)
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+      Progress: 140/286 batches complete (49.0%)
+Loading data files...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Building sample index...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+      Progress: 154/286 batches complete (53.8%)
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Building sample index...
+Building sample index...
+Loading data files...
+Building sample index...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Building sample index...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading data files...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+      Progress: 168/286 batches complete (58.7%)
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Building sample index...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Building sample index...
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Building sample index...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Loading data files...
+Building sample index...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+      Progress: 182/286 batches complete (63.6%)
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Building sample index...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+      Progress: 196/286 batches complete (68.5%)
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Building sample index...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+Building sample index...
+      Progress: 210/286 batches complete (73.4%)
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Loading data files...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading data files...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Building sample index...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+Building sample index...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Loading data files...
+Building sample index...
+Building sample index...
+Building sample index...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Building sample index...
+Dataset initialized:
+  Sequence length: 64
+  Target stations: 39
+  Feature parameters: 26
+  Valid samples: 28509
+  Using precomputed: False
+  Pre-normalized: False
+  Runtime normalization: False
+Building sample index...
+      Progress: 224/286 batches complete (78.3%)
+Loading data files...
+Loading dense feature arrays from meteogalicia_data/dense_features.npz...
+  Loaded dense arrays: (154, 731, 27)
+  Memory: ~12.2 MB
+  Building fallback index for edge cases...
+Building sample index...
+Process ForkPoolWorker-21:
+Process ForkPoolWorker-31:
+Process ForkPoolWorker-1:
+Process ForkPoolWorker-23:
+Process ForkPoolWorker-30:
+Process ForkPoolWorker-29:
+Process ForkPoolWorker-26:
+Process ForkPoolWorker-10:
+Process ForkPoolWorker-3:
+Process ForkPoolWorker-4:
+Process ForkPoolWorker-11:
+Process ForkPoolWorker-15:
+Process ForkPoolWorker-16:
+Traceback (most recent call last):
+  File "/home/pickman/miniforge3/envs/unsloth_env/lib/python3.10/multiprocessing/pool.py", line 856, in next
+    item = self._items.popleft()
+IndexError: pop from an empty deque
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/pickman/Moisturizer/precompute_augmented.py", line 421, in <module>
+    generate_all_augmentations_batched(batch_size=100)
+  File "/home/pickman/Moisturizer/precompute_augmented.py", line 241, in generate_all_augmentations_batched
+    for i, batch_file in enumerate(pool.imap(_process_batch_worker, batch_infos)):
+  File "/home/pickman/miniforge3/envs/unsloth_env/lib/python3.10/multiprocessing/pool.py", line 861, in next
+    self._cond.wait(timeout)
+  File "/home/pickman/miniforge3/envs/unsloth_env/lib/python3.10/threading.py", line 320, in wait
+    waiter.acquire()
+KeyboardInterrupt
+
+Process finished with exit code 130 (interrupted by signal 2:SIGINT)
