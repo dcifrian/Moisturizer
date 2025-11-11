@@ -290,12 +290,12 @@ def generate_all_augmentations_batched(
 
     print(f"   All {num_batches} batches processed!")
 
-    # Merge all batches - MEMORY EFFICIENT VERSION
+    # Merge all batches - TRULY MEMORY EFFICIENT VERSION using memory-mapped arrays
     print(f"\n5. Merging {len(batch_files)} batches...")
-    print(f"   This will take a few minutes...")
+    print(f"   Using memory-mapped arrays to avoid loading everything into RAM...")
 
     # First pass: Calculate total size
-    print(f"   Pass 1/2: Calculating total size...")
+    print(f"   Pass 1/3: Calculating total size...")
     total_samples = 0
     for batch_file in batch_files:
         batch_data = np.load(batch_file)
@@ -310,19 +310,46 @@ def generate_all_augmentations_batched(
     n_features = first_batch['features'].shape[2]
     first_batch.close()
 
-    # Pre-allocate final arrays
-    print(f"   Pre-allocating final arrays...")
-    all_features = np.zeros((total_samples, seq_length, n_features), dtype=np.float32)
-    all_targets = np.zeros((total_samples, 1), dtype=np.float32)
-    all_masks = np.zeros((total_samples, seq_length, n_features), dtype=np.float32)
-    all_target_stations = np.zeros(total_samples, dtype=np.int32)
+    # Calculate memory requirements
+    features_size_gb = total_samples * seq_length * n_features * 4 / 1e9
+    masks_size_gb = total_samples * seq_length * n_features * 4 / 1e9
+    print(f"   Dataset size: {features_size_gb:.1f}GB features + {masks_size_gb:.1f}GB masks = {features_size_gb + masks_size_gb:.1f}GB total")
+    print(f"   Using disk-backed memory-mapped arrays (won't consume RAM)")
+
+    # Create memory-mapped arrays on disk (these don't consume RAM!)
+    print(f"   Pass 2/3: Creating memory-mapped arrays...")
+    memmap_dir = Path(data_dir) / "memmap_temp"
+    memmap_dir.mkdir(exist_ok=True)
+
+    all_features = np.memmap(
+        str(memmap_dir / "features.dat"), dtype=np.float32, mode='w+',
+        shape=(total_samples, seq_length, n_features)
+    )
+    all_targets = np.memmap(
+        str(memmap_dir / "targets.dat"), dtype=np.float32, mode='w+',
+        shape=(total_samples, 1)
+    )
+    all_masks = np.memmap(
+        str(memmap_dir / "masks.dat"), dtype=np.float32, mode='w+',
+        shape=(total_samples, seq_length, n_features)
+    )
+    all_target_stations = np.memmap(
+        str(memmap_dir / "target_stations.dat"), dtype=np.int32, mode='w+',
+        shape=(total_samples,)
+    )
+    all_skip_pattern = np.memmap(
+        str(memmap_dir / "skip_pattern.dat"), dtype=np.int32, mode='w+',
+        shape=(total_samples,)
+    )
+    all_permutation = np.memmap(
+        str(memmap_dir / "permutation.dat"), dtype=np.int32, mode='w+',
+        shape=(total_samples,)
+    )
     all_end_dates = []
     all_start_dates = []
-    all_skip_pattern = np.zeros(total_samples, dtype=np.int32)
-    all_permutation = np.zeros(total_samples, dtype=np.int32)
 
-    # Second pass: Copy data incrementally
-    print(f"   Pass 2/2: Copying batch data...")
+    # Copy batch data into memory-mapped arrays
+    print(f"   Pass 3/3: Copying batch data into memory-mapped arrays...")
     current_idx = 0
     for i, batch_file in enumerate(batch_files):
         if i % 10 == 0:
@@ -332,7 +359,7 @@ def generate_all_augmentations_batched(
         batch_size = len(batch_data['features'])
         end_idx = current_idx + batch_size
 
-        # Copy into pre-allocated arrays
+        # Copy into memory-mapped arrays (writes to disk, not RAM)
         all_features[current_idx:end_idx] = batch_data['features']
         all_targets[current_idx:end_idx] = batch_data['targets']
         all_masks[current_idx:end_idx] = batch_data['masks']
@@ -346,7 +373,22 @@ def generate_all_augmentations_batched(
         batch_data.close()
         del batch_data
 
+        # Flush to disk periodically to avoid buffer buildup
+        if (i + 1) % 50 == 0:
+            all_features.flush()
+            all_targets.flush()
+            all_masks.flush()
+
         current_idx = end_idx
+
+    # Final flush to ensure all data is written to disk
+    print(f"   Flushing data to disk...")
+    all_features.flush()
+    all_targets.flush()
+    all_masks.flush()
+    all_target_stations.flush()
+    all_skip_pattern.flush()
+    all_permutation.flush()
 
     print(f"   Merge complete: {total_samples:,} samples")
 
@@ -386,7 +428,7 @@ def generate_all_augmentations_batched(
     print(f"   Feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
     print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
 
-    # Normalize in batches
+    # Normalize in batches (working with memory-mapped arrays)
     print(f"\n7. Normalizing augmented samples...")
 
     normalized_invalid_marker = -2.0
@@ -418,22 +460,38 @@ def generate_all_augmentations_batched(
             elif target_max > target_min:
                 all_targets[sample_idx][:] = 2.0 * (all_targets[sample_idx] - target_min) / (target_max - target_min) - 1.0
 
+        # Flush normalized data to disk periodically
+        if (end_idx % 100000) < sample_batch_size:
+            all_features.flush()
+            all_targets.flush()
+
+    # Final flush before saving
+    print(f"\n8. Flushing all changes to disk...")
+    all_features.flush()
+    all_targets.flush()
+    all_masks.flush()
+    all_target_stations.flush()
+    all_skip_pattern.flush()
+    all_permutation.flush()
+
     # Save final dataset
-    print(f"\n8. Saving augmented dataset...")
+    print(f"\n9. Saving augmented dataset to compressed NPZ...")
+    print(f"   This will take several minutes as data is compressed...")
 
     output_path = Path(data_dir) / "precomputed_sequences_augmented.npz"
     norm_stats_path = Path(data_dir) / "normalization_stats_augmented.npz"
 
+    # Note: np.savez_compressed can read from memory-mapped arrays directly
     np.savez_compressed(
         output_path,
         features=all_features,
         targets=all_targets,
         masks=all_masks,
-        target_stations=np.array(all_target_stations, dtype=np.int32),
+        target_stations=all_target_stations,
         end_dates=np.array(all_end_dates, dtype=np.float64),
         start_dates=np.array(all_start_dates, dtype=np.float64),
-        skip_pattern=np.array(all_skip_pattern, dtype=np.int32),
-        permutation=np.array(all_permutation, dtype=np.int32),
+        skip_pattern=all_skip_pattern,
+        permutation=all_permutation,
         is_normalized=np.array([True], dtype=bool)
     )
 
@@ -445,9 +503,12 @@ def generate_all_augmentations_batched(
         target_max=target_max
     )
 
-    # Cleanup
-    print(f"\n9. Cleaning up batch files...")
+    # Cleanup temporary files
+    print(f"\n10. Cleaning up temporary files...")
+    print(f"   Removing batch files...")
     shutil.rmtree(batch_dir)
+    print(f"   Removing memory-mapped arrays...")
+    shutil.rmtree(memmap_dir)
 
     print(f"\n   Saved to: {output_path}")
     print(f"   File size: {output_path.stat().st_size / 1e9:.2f} GB")
@@ -456,9 +517,13 @@ def generate_all_augmentations_batched(
     print("✓ AUGMENTED DATASET COMPLETE!")
     print("=" * 70)
     print(f"Base samples: {len(base_dataset.sample_index):,}")
-    print(f"Augmented samples: {len(all_features):,}")
-    print(f"Augmentation factor: {len(all_features) / len(base_dataset.sample_index):.0f}x")
-    print(f"\nPeak memory usage: ~{batch_size * total_augmentations * seq_length * total_features * 4 / 1e9:.1f} GB per batch")
+    print(f"Augmented samples: {total_samples:,}")
+    print(f"Augmentation factor: {total_samples / len(base_dataset.sample_index):.0f}x")
+    print(f"\nMemory usage:")
+    print(f"  - Per batch processing: ~{batch_size * total_augmentations * seq_length * total_features * 4 / 1e9:.1f} GB")
+    print(f"  - Total worker memory: ~{num_workers * 2.5:.1f} GB")
+    print(f"  - Merge/normalize: <5 GB (used memory-mapped arrays)")
+    print(f"  - Disk space used: ~{(features_size_gb + masks_size_gb):.1f} GB temporary + {output_path.stat().st_size / 1e9:.1f} GB final")
     print("=" * 70)
 
 
