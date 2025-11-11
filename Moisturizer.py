@@ -853,7 +853,10 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         # Load precomputed data if available
         if precomputed_path and os.path.exists(precomputed_path):
             print(f"Loading precomputed sequences from {precomputed_path}...")
-            self.precomputed_data = np.load(precomputed_path)
+            # Use memory-mapped mode to avoid loading entire dataset into RAM
+            # Only accessed samples will be loaded, allowing training on large datasets
+            self.precomputed_data = np.load(precomputed_path, mmap_mode='r')
+            print(f"  Using memory-mapped arrays (dataset will not be loaded into RAM)")
 
             # Check if data is already normalized
             if 'is_normalized' in self.precomputed_data:
