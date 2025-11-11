@@ -22,31 +22,27 @@ import multiprocessing as mp
 from functools import partial
 
 
-def _process_batch_worker(batch_info):
+# Global variable to hold the dataset in each worker process
+_worker_dataset = None
+
+
+def _init_worker(dataset_params, aug_params):
     """
-    Worker function for parallel batch processing.
+    Initializer function called once when each worker process starts.
+    Loads the dataset once per worker (not per batch!).
 
     Args:
-        batch_info: Tuple of (batch_num, start_idx, end_idx, dataset_params, augmentation_params, batch_dir)
-
-    Returns:
-        Path to saved batch file
+        dataset_params: Tuple of (timeseries_path, stations_path, nearest_path, dense_path)
+        aug_params: Dict with augmentation parameters including dimensions and filtered_params
     """
-    batch_num, start_idx, end_idx, dataset_params, aug_params, batch_dir = batch_info
+    global _worker_dataset
 
-    # Unpack parameters
     timeseries_path, stations_path, nearest_path, dense_path = dataset_params
-    seq_length, n_nearby_available, n_nearby_in_features = aug_params['dimensions']
-    skip_patterns = aug_params['skip_patterns']
-    all_permutations = aug_params['permutations']
+    seq_length, n_nearby_available, _ = aug_params['dimensions']
     filtered_params = aug_params['filtered_params']
-    total_augmentations = aug_params['total_augmentations']
-    target_features = aug_params['target_features']
-    nearby_features_per_station = aug_params['nearby_features_per_station']
-    total_features = aug_params['total_features']
 
-    # Load dataset in this worker process
-    dataset = SoilMoistureSequenceDataset(
+    # Load dataset ONCE for this worker
+    _worker_dataset = SoilMoistureSequenceDataset(
         timeseries=str(timeseries_path),
         stations=str(stations_path),
         nearest=str(nearest_path),
@@ -56,6 +52,33 @@ def _process_batch_worker(batch_info):
         dense_array_path=str(dense_path) if Path(dense_path).exists() else None,
         normalize=False
     )
+
+
+def _process_batch_worker(batch_info):
+    """
+    Worker function for parallel batch processing.
+    Uses the globally loaded dataset (loaded once per worker).
+
+    Args:
+        batch_info: Tuple of (batch_num, start_idx, end_idx, aug_params, batch_dir)
+
+    Returns:
+        Path to saved batch file
+    """
+    global _worker_dataset
+    batch_num, start_idx, end_idx, aug_params, batch_dir = batch_info
+
+    # Unpack parameters
+    seq_length, n_nearby_available, n_nearby_in_features = aug_params['dimensions']
+    skip_patterns = aug_params['skip_patterns']
+    all_permutations = aug_params['permutations']
+    total_augmentations = aug_params['total_augmentations']
+    target_features = aug_params['target_features']
+    nearby_features_per_station = aug_params['nearby_features_per_station']
+    total_features = aug_params['total_features']
+
+    # Use the pre-loaded dataset
+    dataset = _worker_dataset
 
     batch_actual_size = end_idx - start_idx
     batch_aug_size = batch_actual_size * total_augmentations
@@ -138,10 +161,24 @@ def generate_all_augmentations_batched(
     n_nearby_available: int = 5,
     n_nearby_in_features: int = 4,
     coverage_threshold: float = 0.25,
-    batch_size: int = 100  # Process 100 base samples at a time
+    batch_size: int = 100,  # Process 100 base samples at a time
+    num_workers: int = None  # Number of worker processes (None = min(8, cpu_count))
 ):
     """
     Pre-compute ALL augmented samples with batched processing (memory efficient!)
+
+    Uses multiprocessing with worker initializers to parallelize augmentation:
+    - Each worker loads the dataset ONCE when it starts
+    - Workers then process multiple batches without reloading
+    - Memory usage: ~2-3GB per worker (instead of per batch!)
+
+    Args:
+        data_dir: Directory containing the MeteoGalicia dataset
+        n_nearby_available: Number of nearby stations in base dataset (5)
+        n_nearby_in_features: Number of nearby stations in augmented samples (4)
+        coverage_threshold: Minimum coverage to include a parameter (0.25 = 25%)
+        batch_size: Number of base samples to process per batch
+        num_workers: Number of parallel workers (default: min(8, cpu_count) for memory efficiency)
     """
     print("=" * 70)
     print("PRE-COMPUTING AUGMENTED DATASET (MEMORY EFFICIENT)")
@@ -206,11 +243,17 @@ def generate_all_augmentations_batched(
     batch_dir = Path(data_dir) / "augmented_batches"
     batch_dir.mkdir(exist_ok=True)
     num_batches = (len(base_dataset.sample_index) + batch_size - 1) // batch_size
-    num_workers = mp.cpu_count()
+
+    # Use conservative default for workers to avoid excessive memory usage
+    # Each worker loads ~2-3GB, so 8 workers = ~16-24GB total
+    if num_workers is None:
+        num_workers = min(8, mp.cpu_count())
 
     print(f"\n4. Processing in batches of {batch_size} using {num_workers} CPU cores...")
     print(f"   Batch directory: {batch_dir}")
     print(f"   Total batches: {num_batches}")
+    print(f"   Estimated memory per worker: ~2-3GB")
+    print(f"   Total estimated memory: ~{num_workers * 2.5:.1f}GB")
     print(f"   Estimated speedup: ~{num_workers}x faster than sequential")
 
     # Prepare parameters for workers
@@ -227,15 +270,17 @@ def generate_all_augmentations_batched(
     }
 
     # Create batch info tuples for all batches
+    # Note: No longer passing dataset_params in batch_info since dataset is loaded in initializer
     batch_infos = []
     for batch_num in range(num_batches):
         start_idx = batch_num * batch_size
         end_idx = min(start_idx + batch_size, len(base_dataset.sample_index))
-        batch_infos.append((batch_num, start_idx, end_idx, dataset_params, aug_params, str(batch_dir)))
+        batch_infos.append((batch_num, start_idx, end_idx, aug_params, str(batch_dir)))
 
-    # Process batches in parallel
+    # Process batches in parallel with worker initializer
     print(f"   Starting parallel processing...")
-    with mp.Pool(processes=num_workers) as pool:
+    print(f"   Each worker will load the dataset once, then process multiple batches...")
+    with mp.Pool(processes=num_workers, initializer=_init_worker, initargs=(dataset_params, aug_params)) as pool:
         # Use imap to get progress updates as batches complete
         batch_files = []
         for i, batch_file in enumerate(pool.imap(_process_batch_worker, batch_infos)):
