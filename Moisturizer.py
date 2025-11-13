@@ -925,25 +925,20 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             if 'is_normalized' in self.precomputed_data:
                 self.is_prenormalized = bool(self.precomputed_data['is_normalized'][0])
 
-            # Reconstruct sample_index from components (avoid pickle)
-            target_stations = self.precomputed_data['target_stations']
-            end_dates = self.precomputed_data['end_dates']
-            start_dates = self.precomputed_data['start_dates']
+            # Keep metadata as memory-mapped arrays - don't build sample_index
+            # This avoids creating thousands/millions of Python objects
+            self.sample_index = None  # Will use array-based indexing
+            self.n_samples = len(self.precomputed_data['target_stations'])
+            self.indices = None  # No index mapping (use all data)
 
-            self.sample_index = []
-            for i in range(len(target_stations)):
-                self.sample_index.append({
-                    'target_station': int(target_stations[i]),
-                    'end_date': pd.Timestamp.fromtimestamp(end_dates[i]),
-                    'start_date': pd.Timestamp.fromtimestamp(start_dates[i])
-                })
-
-            print(f"  Loaded {len(self.sample_index)} precomputed samples")
+            print(f"  Loaded {self.n_samples} precomputed samples")
             if self.is_prenormalized:
                 print(f"  Data is pre-normalized (fast path enabled!)")
         else:
             # Build index of valid samples
             self._build_sample_index()
+            self.n_samples = len(self.sample_index)
+            self.indices = None  # No index mapping for non-precomputed
 
         # Load normalization statistics (only needed for reference or if not pre-normalized)
         if normalize and not self.is_prenormalized:
@@ -966,7 +961,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         print(f"  Sequence length: {seq_length}")
         print(f"  Target stations: {len(self.target_stations)}")
         print(f"  Feature parameters: {len(self.feature_params)}")
-        print(f"  Valid samples: {len(self.sample_index)}")
+        print(f"  Valid samples: {self.n_samples}")
         print(f"  Using precomputed: {precomputed_path is not None and os.path.exists(precomputed_path)}")
         print(f"  Pre-normalized: {self.is_prenormalized}")
         print(f"  Runtime normalization: {self.normalize}")
@@ -1414,6 +1409,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         print("Done!")
 
     def __len__(self) -> int:
+        if self.sample_index is None:
+            # Precomputed data - use n_samples
+            return self.n_samples
         return len(self.sample_index)
 
     def __getitem__(self, idx: int) -> 'Dict[str, torch.Tensor]':
@@ -1430,11 +1428,14 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         """
         # Load from precomputed data if available (fast path)
         if self.precomputed_data is not None:
+            # Map index if this is a split dataset
+            actual_idx = self.indices[idx] if self.indices is not None else idx
+
             # Direct numpy array access - no copy needed if data is read-only
             # PyTorch will handle memory efficiently
-            features = self.precomputed_data['features'][idx]
-            target = self.precomputed_data['targets'][idx]
-            mask = self.precomputed_data['masks'][idx]
+            features = self.precomputed_data['features'][actual_idx]
+            target = self.precomputed_data['targets'][actual_idx]
+            mask = self.precomputed_data['masks'][actual_idx]
 
             # Remove soil moisture from target station features if present (data leakage prevention)
             if self.soil_in_features and self.soil_feature_idx is not None:
@@ -1469,15 +1470,24 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 self.sample_index[idx]['end_date']
             )
 
-        # Get end date (lightweight operation at end)
-        sample = self.sample_index[idx]
-        end_date_unix = sample['end_date'].timestamp() if hasattr(sample['end_date'], 'timestamp') else float(sample['end_date'])
+        # Get metadata
+        if self.sample_index is None:
+            # Precomputed data - get from arrays directly
+            # Map index if this is a split dataset
+            actual_idx = self.indices[idx] if self.indices is not None else idx
+            target_station_id = int(self.precomputed_data['target_stations'][actual_idx])
+            end_date_unix = float(self.precomputed_data['end_dates'][actual_idx])
+        else:
+            # Non-precomputed - get from sample_index
+            sample = self.sample_index[idx]
+            target_station_id = sample['target_station']
+            end_date_unix = sample['end_date'].timestamp() if hasattr(sample['end_date'], 'timestamp') else float(sample['end_date'])
 
         return {
             'features': features_tensor,
             'target': target_tensor,
             'mask': mask_tensor,
-            'target_station_id': sample['target_station'],
+            'target_station_id': target_station_id,
             'end_date': end_date_unix
         }
 
@@ -1511,9 +1521,17 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         the precomputed arrays instead of rebuilding from DataFrames.
         """
         # Get indices for each split
-        train_indices = [i for i, s in enumerate(self.sample_index) if s['target_station'] in train_stations]
-        val_indices = [i for i, s in enumerate(self.sample_index) if s['target_station'] in val_stations]
-        test_indices = [i for i, s in enumerate(self.sample_index) if s['target_station'] in test_stations]
+        if self.sample_index is None:
+            # Precomputed data - use arrays directly
+            all_stations = self.precomputed_data['target_stations']
+            train_indices = [i for i in range(len(all_stations)) if int(all_stations[i]) in train_stations]
+            val_indices = [i for i in range(len(all_stations)) if int(all_stations[i]) in val_stations]
+            test_indices = [i for i in range(len(all_stations)) if int(all_stations[i]) in test_stations]
+        else:
+            # Non-precomputed - use sample_index
+            train_indices = [i for i, s in enumerate(self.sample_index) if s['target_station'] in train_stations]
+            val_indices = [i for i, s in enumerate(self.sample_index) if s['target_station'] in val_stations]
+            test_indices = [i for i, s in enumerate(self.sample_index) if s['target_station'] in test_stations]
 
         print(f"  Train: {len(train_indices)} samples")
         print(f"  Val: {len(val_indices)} samples")
@@ -1561,21 +1579,16 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         split_dataset.target_stations = target_stations
         split_dataset.feature_params = self.feature_params
 
-        # Filter precomputed data by indices
-        split_dataset.precomputed_data = {
-            'features': self.precomputed_data['features'][indices],
-            'targets': self.precomputed_data['targets'][indices],
-            'masks': self.precomputed_data['masks'][indices],
-            'target_stations': self.precomputed_data['target_stations'][indices],
-            'end_dates': self.precomputed_data['end_dates'][indices],
-            'start_dates': self.precomputed_data['start_dates'][indices]
-        }
-        # Preserve is_normalized flag if present
-        if 'is_normalized' in self.precomputed_data:
-            split_dataset.precomputed_data['is_normalized'] = self.precomputed_data['is_normalized']
+        # Keep reference to original precomputed_data (don't copy arrays!)
+        # This avoids loading hundreds of GB into RAM
+        split_dataset.precomputed_data = self.precomputed_data
 
-        # Filter sample_index
-        split_dataset.sample_index = [self.sample_index[i] for i in indices]
+        # Store index mapping for this split
+        split_dataset.indices = indices
+        split_dataset.n_samples = len(indices)
+
+        # Don't build sample_index (use lazy access instead)
+        split_dataset.sample_index = None
 
         # Copy normalization stats (shared across all splits)
         split_dataset.norm_stats = self.norm_stats
