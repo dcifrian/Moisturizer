@@ -36,7 +36,9 @@ Use the uncompressed file path:
 
 ```python
 dataset = SoilMoistureSequenceDataset(
-    data_dir="meteogalicia_data/data",
+    timeseries="meteogalicia_data/raw_timeseries.csv",
+    stations="meteogalicia_data/stations_metadata.csv",
+    nearest="meteogalicia_data/nearest_stations.csv",
     seq_length=96,
     precomputed_path="meteogalicia_data/precomputed_sequences_uncompressed.npz",  # Changed
     # ... other parameters
@@ -101,22 +103,26 @@ This is the pattern we're now following: use uncompressed files at runtime, comp
 After decompression, verify it works:
 
 ```bash
-# Test with the small dataset first
-python -c "
-from Moisturizer import SoilMoistureSequenceDataset
-from torch.utils.data import DataLoader
+# Quick verification test - checks mmap access from multiple processes
+python3 << 'EOF'
+import numpy as np
+from multiprocessing import Pool
 
-ds = SoilMoistureSequenceDataset(
-    data_dir='meteogalicia_data/data',
-    seq_length=96,
-    precomputed_path='test_data/precomputed_sequences_uncompressed.npz'
-)
+def test_access(worker_id):
+    """Each worker loads and accesses the uncompressed NPZ"""
+    data = np.load('test_data/precomputed_sequences_uncompressed.npz', mmap_mode='r')
+    # Access some data to verify no zlib errors
+    features = data['features'][0]
+    return f"Worker {worker_id}: OK (shape={features.shape})"
 
-loader = DataLoader(ds, batch_size=16, num_workers=15)
-batch = next(iter(loader))
-print(f'✓ Successfully loaded batch with 15 workers!')
-print(f'  Features shape: {batch[\"features\"].shape}')
-"
+print("Testing multi-process access to uncompressed NPZ...")
+with Pool(15) as pool:
+    results = pool.map(test_access, range(15))
+    for r in results:
+        print(r)
+print("\n✓ All 15 workers accessed the file successfully!")
+print("✓ No zlib errors with uncompressed NPZ!")
+EOF
 ```
 
 ## Next Steps
