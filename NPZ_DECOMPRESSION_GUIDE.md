@@ -15,7 +15,31 @@ This is a fundamental limitation of Python's zipfile module when many processes 
 
 Convert compressed NPZ files to uncompressed format for true memory-mapping without decompression overhead.
 
-### Step 1: Decompress Your Dataset
+**Note:** As of the latest version, `Moisturizer.py` automatically detects compressed NPZ files and decompresses them on first load. You can also manually decompress files using the utility below.
+
+### Option 1: Automatic Decompression (Recommended)
+
+Just use your existing compressed NPZ files - Moisturizer.py will automatically:
+1. Detect if the file is compressed
+2. Look for an existing `_uncompressed.npz` version
+3. If not found, decompress it automatically (one-time operation)
+4. Use the uncompressed version for all subsequent loads
+
+```python
+# Just use the compressed file path - decompression happens automatically
+dataset = SoilMoistureSequenceDataset(
+    timeseries="meteogalicia_data/raw_timeseries.csv",
+    stations="meteogalicia_data/stations_metadata.csv",
+    nearest="meteogalicia_data/nearest_stations.csv",
+    seq_length=96,
+    precomputed_path="meteogalicia_data/precomputed_sequences.npz",  # Can be compressed
+    # ... other parameters
+)
+```
+
+### Option 2: Manual Decompression
+
+You can also manually decompress files using the `decompress_npz.py` utility:
 
 ```bash
 # Decompress the precomputed dataset
@@ -30,22 +54,7 @@ python decompress_npz.py data/batches/merged_dataset.npz
 # Creates: data/batches/merged_dataset_uncompressed.npz
 ```
 
-### Step 2: Update Your Code
-
-Use the uncompressed file path:
-
-```python
-dataset = SoilMoistureSequenceDataset(
-    timeseries="meteogalicia_data/raw_timeseries.csv",
-    stations="meteogalicia_data/stations_metadata.csv",
-    nearest="meteogalicia_data/nearest_stations.csv",
-    seq_length=96,
-    precomputed_path="meteogalicia_data/precomputed_sequences_uncompressed.npz",  # Changed
-    # ... other parameters
-)
-```
-
-### Step 3: Test with Multiple Workers
+### Step 2: Test with Multiple Workers (No Code Changes Needed!)
 
 ```python
 train_loader = DataLoader(
@@ -72,20 +81,20 @@ train_loader = DataLoader(
 
 ### Disk Space Trade-off
 
-- Small dataset: 542 MB → ~11 GB (21x increase)
-- Large augmented dataset: ~11 GB → ~240 GB (21x increase)
+- Small dataset: 542 MB → ~2 GB (3.7x increase)
+- Large augmented dataset: varies depending on compression
 
-The user confirmed disk space is not a concern, avoiding the need to regenerate datasets (which takes hours).
+Disk space is not typically a concern, avoiding the need to regenerate datasets (which takes hours).
 
 ### Compression Ratio
 
-The `decompress_npz.py` utility reports the compression ratio:
+The `decompress_npz.py` utility reports the compression ratio. Example output:
 
 ```
   Input size: 0.54 GB
-  Uncompressed size: 11.38 GB
-  Output size: 11.38 GB
-  Compression ratio was: 21.30x
+  Uncompressed size: 2.02 GB
+  Output size: 2.02 GB
+  Compression ratio was: 3.71x
 ```
 
 ## How precompute_augmented.py Avoided This
@@ -127,9 +136,14 @@ EOF
 
 ## Next Steps
 
-1. Decompress your existing datasets
-2. Update file paths in your training scripts
-3. Test with 15 workers to verify no errors
-4. Confirm no OOM issues with the large 240GB dataset
+With automatic decompression now built into Moisturizer.py:
+
+1. **No changes needed** - just run your existing training code
+2. On first load, compressed files will be automatically decompressed (one-time operation)
+3. Subsequent loads will use the uncompressed version automatically
+4. Test with 15 workers to verify no zlib errors
+5. Confirm no OOM issues with the large dataset
+
+Alternatively, you can manually pre-decompress large datasets using `decompress_npz.py` to avoid the wait on first load.
 
 The solution preserves all pre-normalized data and metadata without requiring regeneration.
