@@ -13,6 +13,7 @@ from typing import List, Optional, Dict, Tuple, Set, Union
 import json
 import time
 from pathlib import Path
+import zipfile
 
 # PyTorch imports - optional, only needed for Dataset class
 try:
@@ -719,6 +720,66 @@ else:
     _BaseDataset = object
 
 
+def _get_uncompressed_npz_path(npz_path: str) -> str:
+    """
+    Get path to uncompressed version of NPZ file, decompressing if necessary.
+
+    Compressed NPZ files cause zlib errors with multiple DataLoader workers.
+    This function ensures we always use uncompressed NPZ for memory-mapping.
+
+    Args:
+        npz_path: Path to potentially compressed NPZ file
+
+    Returns:
+        Path to uncompressed NPZ file (may decompress if needed)
+    """
+    npz_path = Path(npz_path)
+
+    if not npz_path.exists():
+        return str(npz_path)  # Return as-is, let caller handle missing file
+
+    # Check if file is compressed by checking if it's a valid ZIP archive
+    is_compressed = False
+    try:
+        with zipfile.ZipFile(npz_path, 'r') as zf:
+            # If we can open it as a ZIP, it's compressed
+            is_compressed = True
+    except zipfile.BadZipFile:
+        # Not a ZIP file, so it's uncompressed
+        is_compressed = False
+
+    if not is_compressed:
+        # Already uncompressed, use as-is
+        return str(npz_path)
+
+    # File is compressed - look for or create uncompressed version
+    uncompressed_path = npz_path.parent / f"{npz_path.stem}_uncompressed.npz"
+
+    if uncompressed_path.exists():
+        print(f"  Using existing uncompressed file: {uncompressed_path.name}")
+        return str(uncompressed_path)
+
+    # Need to decompress
+    print(f"  Compressed NPZ detected: {npz_path.name}")
+    print(f"  Decompressing to avoid zlib errors with multiple workers...")
+    print(f"  This is a one-time operation and may take a few minutes...")
+
+    # Load compressed data
+    data = np.load(npz_path)
+    arrays_dict = {key: data[key] for key in data.keys()}
+
+    # Save uncompressed
+    np.savez(uncompressed_path, **arrays_dict)
+    data.close()
+
+    compressed_size = npz_path.stat().st_size / 1e9
+    uncompressed_size = uncompressed_path.stat().st_size / 1e9
+    print(f"  ✓ Decompressed: {compressed_size:.2f} GB → {uncompressed_size:.2f} GB")
+    print(f"  ✓ Saved to: {uncompressed_path.name}")
+
+    return str(uncompressed_path)
+
+
 class SoilMoistureSequenceDataset(_BaseDataset):
     """
     PyTorch Dataset for soil moisture prediction with temporal sequences
@@ -853,9 +914,11 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         # Load precomputed data if available
         if precomputed_path and os.path.exists(precomputed_path):
             print(f"Loading precomputed sequences from {precomputed_path}...")
+            # Ensure we use uncompressed NPZ to avoid zlib errors with multiple workers
+            uncompressed_path = _get_uncompressed_npz_path(precomputed_path)
             # Use memory-mapped mode to avoid loading entire dataset into RAM
             # Only accessed samples will be loaded, allowing training on large datasets
-            self.precomputed_data = np.load(precomputed_path, mmap_mode='r')
+            self.precomputed_data = np.load(uncompressed_path, mmap_mode='r')
             print(f"  Using memory-mapped arrays (dataset will not be loaded into RAM)")
 
             # Check if data is already normalized
