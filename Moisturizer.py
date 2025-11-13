@@ -925,19 +925,20 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             if 'is_normalized' in self.precomputed_data:
                 self.is_prenormalized = bool(self.precomputed_data['is_normalized'][0])
 
-            # CRITICAL: Don't build sample_index for large datasets!
-            # Instead, keep metadata in memory-mapped arrays and access lazily
-            # This prevents OOM when loading datasets with millions of samples
-            n_samples = len(self.precomputed_data['target_stations'])
-            self.sample_index = None  # Access lazily in __getitem__
-            self._n_samples = n_samples
+            # Keep metadata as memory-mapped arrays - don't build sample_index
+            # This avoids creating thousands/millions of Python objects
+            self.sample_index = None  # Will use array-based indexing
+            self.n_samples = len(self.precomputed_data['target_stations'])
+            self.indices = None  # No index mapping (use all data)
 
-            print(f"  Loaded {n_samples:,} precomputed samples (lazy metadata loading)")
+            print(f"  Loaded {self.n_samples} precomputed samples")
             if self.is_prenormalized:
                 print(f"  Data is pre-normalized (fast path enabled!)")
         else:
             # Build index of valid samples
             self._build_sample_index()
+            self.n_samples = len(self.sample_index)
+            self.indices = None  # No index mapping for non-precomputed
 
         # Load normalization statistics (only needed for reference or if not pre-normalized)
         if normalize and not self.is_prenormalized:
@@ -960,7 +961,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         print(f"  Sequence length: {seq_length}")
         print(f"  Target stations: {len(self.target_stations)}")
         print(f"  Feature parameters: {len(self.feature_params)}")
-        print(f"  Valid samples: {len(self)}")
+        print(f"  Valid samples: {self.n_samples}")
         print(f"  Using precomputed: {precomputed_path is not None and os.path.exists(precomputed_path)}")
         print(f"  Pre-normalized: {self.is_prenormalized}")
         print(f"  Runtime normalization: {self.normalize}")
@@ -1408,9 +1409,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         print("Done!")
 
     def __len__(self) -> int:
-        # Handle lazy loading: if sample_index is None, use _n_samples
         if self.sample_index is None:
-            return self._n_samples
+            # Precomputed data - use n_samples
+            return self.n_samples
         return len(self.sample_index)
 
     def __getitem__(self, idx: int) -> 'Dict[str, torch.Tensor]':
@@ -1425,17 +1426,16 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 - target_station_id: int
                 - end_date: timestamp
         """
-        # Map index if this is a split dataset (uses index mapping, not array slicing)
-        if hasattr(self, '_split_indices') and self._split_indices is not None:
-            idx = self._split_indices[idx]
-
         # Load from precomputed data if available (fast path)
         if self.precomputed_data is not None:
+            # Map index if this is a split dataset
+            actual_idx = self.indices[idx] if self.indices is not None else idx
+
             # Direct numpy array access - no copy needed if data is read-only
             # PyTorch will handle memory efficiently
-            features = self.precomputed_data['features'][idx]
-            target = self.precomputed_data['targets'][idx]
-            mask = self.precomputed_data['masks'][idx]
+            features = self.precomputed_data['features'][actual_idx]
+            target = self.precomputed_data['targets'][actual_idx]
+            mask = self.precomputed_data['masks'][actual_idx]
 
             # Remove soil moisture from target station features if present (data leakage prevention)
             if self.soil_in_features and self.soil_feature_idx is not None:
@@ -1470,13 +1470,15 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 self.sample_index[idx]['end_date']
             )
 
-        # Get metadata - access lazily from memory-mapped arrays if needed
-        if self.sample_index is None and self.precomputed_data is not None:
-            # Lazy metadata access from memory-mapped arrays (doesn't load entire arrays)
-            target_station_id = int(self.precomputed_data['target_stations'][idx])
-            end_date_unix = float(self.precomputed_data['end_dates'][idx])
+        # Get metadata
+        if self.sample_index is None:
+            # Precomputed data - get from arrays directly
+            # Map index if this is a split dataset
+            actual_idx = self.indices[idx] if self.indices is not None else idx
+            target_station_id = int(self.precomputed_data['target_stations'][actual_idx])
+            end_date_unix = float(self.precomputed_data['end_dates'][actual_idx])
         else:
-            # Normal access via sample_index
+            # Non-precomputed - get from sample_index
             sample = self.sample_index[idx]
             target_station_id = sample['target_station']
             end_date_unix = sample['end_date'].timestamp() if hasattr(sample['end_date'], 'timestamp') else float(sample['end_date'])
@@ -1515,15 +1517,21 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         """
         Efficiently split precomputed data by filtering arrays
 
-        This is MUCH faster than creating new datasets because we just use index mapping
-        instead of loading and slicing the actual data arrays.
+        This is MUCH faster than creating new datasets because we just filter
+        the precomputed arrays instead of rebuilding from DataFrames.
         """
-        # Get indices for each split - access mmap'd array directly
-        # Use np.isin which is efficient with memory-mapped arrays
-        target_stations_array = self.precomputed_data['target_stations']
-        train_indices = np.where(np.isin(target_stations_array, train_stations))[0].tolist()
-        val_indices = np.where(np.isin(target_stations_array, val_stations))[0].tolist()
-        test_indices = np.where(np.isin(target_stations_array, test_stations))[0].tolist()
+        # Get indices for each split
+        if self.sample_index is None:
+            # Precomputed data - use arrays directly
+            all_stations = self.precomputed_data['target_stations']
+            train_indices = [i for i in range(len(all_stations)) if int(all_stations[i]) in train_stations]
+            val_indices = [i for i in range(len(all_stations)) if int(all_stations[i]) in val_stations]
+            test_indices = [i for i in range(len(all_stations)) if int(all_stations[i]) in test_stations]
+        else:
+            # Non-precomputed - use sample_index
+            train_indices = [i for i, s in enumerate(self.sample_index) if s['target_station'] in train_stations]
+            val_indices = [i for i, s in enumerate(self.sample_index) if s['target_station'] in val_stations]
+            test_indices = [i for i, s in enumerate(self.sample_index) if s['target_station'] in test_stations]
 
         print(f"  Train: {len(train_indices)} samples")
         print(f"  Val: {len(val_indices)} samples")
@@ -1571,14 +1579,16 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         split_dataset.target_stations = target_stations
         split_dataset.feature_params = self.feature_params
 
-        # CRITICAL: Keep reference to original precomputed_data (memory-mapped!)
-        # Use index mapping instead of creating new arrays (would load into RAM!)
-        split_dataset.precomputed_data = self.precomputed_data  # Reference, not copy!
-        split_dataset._split_indices = np.array(indices, dtype=np.int32)  # Index mapping
+        # Keep reference to original precomputed_data (don't copy arrays!)
+        # This avoids loading hundreds of GB into RAM
+        split_dataset.precomputed_data = self.precomputed_data
 
-        # Keep sample_index as None for lazy loading (don't build it!)
+        # Store index mapping for this split
+        split_dataset.indices = indices
+        split_dataset.n_samples = len(indices)
+
+        # Don't build sample_index (use lazy access instead)
         split_dataset.sample_index = None
-        split_dataset._n_samples = len(indices)
 
         # Copy normalization stats (shared across all splits)
         split_dataset.norm_stats = self.norm_stats
