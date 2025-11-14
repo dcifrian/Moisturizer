@@ -489,34 +489,30 @@ def create_moisture_map(
     if sequences_to_predict:
         print(f"\nPhase 2: Running batched inference for {len(sequences_to_predict)} stations...")
 
-        # Stack all sequences into a single batch
-        batch_features = torch.stack([
-            torch.from_numpy(features_norm) for _, features_norm, _ in sequences_to_predict
-        ])  # [N, 64, features]
-
         batch_size = len(sequences_to_predict)
-        print(f"  Batch shape: {batch_features.shape}")
 
-        # Run batched inference
+        # Stack all sequences - same as unsqueeze(0) but for multiple items
+        X_batch = torch.stack([
+            torch.from_numpy(features_norm) for _, features_norm, _ in sequences_to_predict
+        ])  # [batch_size, 64, features]
+
+        print(f"  Batch shape: {X_batch.shape}")
+
+        # Run batched inference - same pattern as original but batch_size instead of 1
         x_gpu = torch.zeros([batch_size, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
                            dtype=torch.float16, device=device)
 
         with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
-            # Copy entire batch
-            x_gpu[:batch_size, :batch_features.shape[2], :].copy_(
-                batch_features.permute(0, 2, 1), non_blocking=True
-            )
+            x_gpu[:batch_size, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
             x = x_gpu[:batch_size, :, :]
-
-            # Single forward pass for entire batch
-            predictions_normalized = model(x).cpu().numpy().flatten()  # [N]
+            predictions_normalized = model(x).cpu()  # [batch_size, 1] or [batch_size]
 
         print(f"✓ Inference complete")
 
         # Phase 3: Denormalize and assemble results
         print(f"\nPhase 3: Denormalizing predictions...")
         for i, (station_info, _, _) in enumerate(sequences_to_predict):
-            pred_normalized = predictions_normalized[i]
+            pred_normalized = predictions_normalized[i].item()  # Extract scalar same as original
             pred_denorm = denormalize_soil_moisture(
                 pred_normalized,
                 str(collector.data_dir / "normalization_stats.npz")
