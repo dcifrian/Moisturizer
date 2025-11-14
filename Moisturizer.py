@@ -770,6 +770,48 @@ def _decompress_npz_if_needed(npz_path: str) -> str:
     return str(uncompressed_path)
 
 
+def _load_precomputed_data(precomputed_path: str):
+    """
+    Load precomputed data with true memory-mapping support.
+
+    Supports two formats:
+    1. Directory of .npy files (RECOMMENDED - true memory-mapping)
+    2. .npz file (fallback - will warn about memory issues)
+
+    Returns dict-like object with array access.
+    """
+    precomputed_path = Path(precomputed_path)
+
+    # Check if it's a directory of .npy files
+    if precomputed_path.is_dir():
+        print(f"  Loading from directory of .npy files (true memory-mapping)")
+        # Load each .npy file individually with mmap_mode
+        npy_files = list(precomputed_path.glob("*.npy"))
+        if not npy_files:
+            raise ValueError(f"No .npy files found in {precomputed_path}")
+
+        data_dict = {}
+        for npy_file in npy_files:
+            key = npy_file.stem  # filename without .npy
+            data_dict[key] = np.load(npy_file, mmap_mode='r')
+            print(f"    Loaded {key}: shape={data_dict[key].shape}")
+
+        return data_dict
+
+    # Otherwise treat as .npz file
+    else:
+        print(f"  ⚠ WARNING: NPZ files cannot be truly memory-mapped!")
+        print(f"  ⚠ This will load the entire dataset into RAM on first access")
+        print(f"  ⚠ Recommend converting to .npy directory format:")
+        print(f"  ⚠   python convert_npz_to_memmap.py {precomputed_path}")
+
+        # Try to decompress if needed
+        if precomputed_path.suffix == '.npz':
+            precomputed_path = _decompress_npz_if_needed(str(precomputed_path))
+
+        return np.load(precomputed_path, mmap_mode='r')
+
+
 class SoilMoistureSequenceDataset(_BaseDataset):
     """
     PyTorch Dataset for soil moisture prediction with temporal sequences
@@ -904,11 +946,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         # Load precomputed data if available
         if precomputed_path and os.path.exists(precomputed_path):
             print(f"Loading precomputed sequences from {precomputed_path}...")
-            # Decompress if needed for true memory-mapping
-            uncompressed_path = _decompress_npz_if_needed(precomputed_path)
-            # Use memory-mapped mode to avoid loading entire dataset into RAM
-            # Only accessed samples will be loaded, allowing training on large datasets
-            self.precomputed_data = np.load(uncompressed_path, mmap_mode='r')
+            # Use the new loading function that supports both .npy directories and .npz files
+            self.precomputed_data = _load_precomputed_data(precomputed_path)
             print(f"  Using memory-mapped arrays (dataset will not be loaded into RAM)")
 
             # Check if data is already normalized
