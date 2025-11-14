@@ -64,7 +64,7 @@ def load_coastline_data(lon_min, lon_max, lat_min, lat_max, padding=0.15):
 
     # Sample points along the coastline(s)
     coastline_points = []
-    n_points_per_coastline = max(1000 // len(coastlines), 100) if coastlines else 0
+    n_points_per_coastline = max(10000 // len(coastlines), 100) if coastlines else 0
 
     for coastline in coastlines:
         # Sample points along this coastline
@@ -428,10 +428,10 @@ def create_moisture_map(
     # Load normalization stats
     norm_stats = np.load(str(collector.data_dir / "normalization_stats.npz"))
 
-    # Get moisture values for all stations
-    print("\nGathering soil moisture data...")
-    results = []
-    first_prediction_done = False
+    # Phase 1: Collect real data and build sequences for predictions
+    print("\nPhase 1: Gathering real data and building sequences...")
+    real_results = []
+    sequences_to_predict = []  # List of (station_info, features_norm, mask)
 
     for idx, station in stations_df.iterrows():
         if idx % 20 == 0:
@@ -446,7 +446,7 @@ def create_moisture_map(
             # Get real data
             moisture = get_real_soil_moisture(collector, station_id, target_date)
             if moisture is not None:
-                results.append({
+                real_results.append({
                     'station_id': station_id,
                     'latitude': lat,
                     'longitude': lon,
@@ -455,7 +455,7 @@ def create_moisture_map(
                     'name': station.get('name', f'Station {station_id}')
                 })
         else:
-            # Build sequence on-the-fly and predict
+            # Build sequence for later batch inference
             try:
                 sequence_data = build_sequence_for_any_station(
                     station_id=station_id,
@@ -470,52 +470,70 @@ def create_moisture_map(
 
                 if sequence_data is not None:
                     features_norm, mask = sequence_data
-
-                    # Debug output for first prediction
-                    if not first_prediction_done:
-                        print(f"\n  DEBUG: First prediction (Station {station_id}):")
-                        print(f"    Feature shape: {features_norm.shape}")
-                        print(f"    Feature range: [{features_norm.min():.3f}, {features_norm.max():.3f}]")
-                        print(f"    Feature mean: {features_norm.mean():.3f}")
-                        print(f"    Normalization stats range: [{norm_stats['feature_mins'].min():.3f}, {norm_stats['feature_maxs'].max():.3f}]")
-                        print(f"    Target range in stats: [{norm_stats['target_min']:.3f}, {norm_stats['target_max']:.3f}]")
-
-                    # Run inference with your TROLOLO model
-                    x_gpu = torch.zeros([1, model.embed_dim - 2, model.seq_length - model.n_class_tokens], dtype=torch.float16, device=device)
-                    with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
-                        X_batch = torch.from_numpy(features_norm).unsqueeze(0)  # [1, 64, features]
-                        x_gpu[:1, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
-                        x = x_gpu[:1, :, :]
-                        pred_normalized = model(x).cpu().item()
-
-                    # Denormalize prediction
-                    pred_denorm = denormalize_soil_moisture(
-                        pred_normalized,
-                        str(collector.data_dir / "normalization_stats.npz")
-                    )
-
-                    # Debug output for first prediction
-                    if not first_prediction_done:
-                        print(f"    Prediction (normalized): {pred_normalized:.6f}")
-                        print(f"    Prediction (denormalized): {pred_denorm:.6f}")
-                        first_prediction_done = True
-
-                    results.append({
+                    station_info = {
                         'station_id': station_id,
                         'latitude': lat,
                         'longitude': lon,
-                        'moisture': pred_denorm,
-                        'type': 'predicted',
                         'name': station.get('name', f'Station {station_id}')
-                    })
+                    }
+                    sequences_to_predict.append((station_info, features_norm, mask))
 
             except Exception as e:
-                print(f"  Warning: Could not predict for station {station_id}: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"  Warning: Could not build sequence for station {station_id}: {e}")
                 continue
 
-    results_df = pd.DataFrame(results)
+    print(f"✓ Phase 1 complete: {len(real_results)} real, {len(sequences_to_predict)} to predict")
+
+    # Phase 2: Batch inference for all predictions
+    predicted_results = []
+    if sequences_to_predict:
+        print(f"\nPhase 2: Running batched inference for {len(sequences_to_predict)} stations...")
+
+        # Stack all sequences into a single batch
+        batch_features = torch.stack([
+            torch.from_numpy(features_norm) for _, features_norm, _ in sequences_to_predict
+        ])  # [N, 64, features]
+
+        batch_size = len(sequences_to_predict)
+        print(f"  Batch shape: {batch_features.shape}")
+
+        # Run batched inference
+        x_gpu = torch.zeros([batch_size, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
+                           dtype=torch.float16, device=device)
+
+        with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
+            # Copy entire batch
+            x_gpu[:batch_size, :batch_features.shape[2], :].copy_(
+                batch_features.permute(0, 2, 1), non_blocking=True
+            )
+            x = x_gpu[:batch_size, :, :]
+
+            # Single forward pass for entire batch
+            predictions_normalized = model(x).cpu().numpy().flatten()  # [N]
+
+        print(f"✓ Inference complete")
+
+        # Phase 3: Denormalize and assemble results
+        print(f"\nPhase 3: Denormalizing predictions...")
+        for i, (station_info, _, _) in enumerate(sequences_to_predict):
+            pred_normalized = predictions_normalized[i]
+            pred_denorm = denormalize_soil_moisture(
+                pred_normalized,
+                str(collector.data_dir / "normalization_stats.npz")
+            )
+
+            predicted_results.append({
+                'station_id': station_info['station_id'],
+                'latitude': station_info['latitude'],
+                'longitude': station_info['longitude'],
+                'moisture': pred_denorm,
+                'type': 'predicted',
+                'name': station_info['name']
+            })
+
+    # Combine all results
+    all_results = real_results + predicted_results
+    results_df = pd.DataFrame(all_results)
     print(f"\n✓ Collected data for {len(results_df)} stations")
     print(f"  - Real: {(results_df['type'] == 'real').sum()}")
     print(f"  - Predicted: {(results_df['type'] == 'predicted').sum()}")
