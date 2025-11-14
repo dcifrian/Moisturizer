@@ -345,7 +345,7 @@ def create_moisture_map(
         seq_length=64,
         n_nearest=4,
         feature_params=filtered_params,
-        precomputed_path=str(collector.data_dir / "precomputed_sequences.npz"),
+        precomputed_path=str(collector.data_dir / "precomputed_sequences"),  # .npy directory
         normalize=True,
         norm_stats_path=str(collector.data_dir / "normalization_stats.npz")
     )
@@ -462,8 +462,22 @@ def create_moisture_map(
 
 
 def create_visualization(results_df, target_date, output_file):
-    """Create beautiful moisture map visualization"""
-    fig, ax = plt.subplots(figsize=(14, 10))
+    """Create beautiful moisture map visualization overlaid on Galicia map"""
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+    from scipy.interpolate import griddata
+    import numpy as np
+
+    # Try to import contextily for basemap support
+    try:
+        import contextily as ctx
+        HAS_CONTEXTILY = True
+    except ImportError:
+        print("  Note: Install contextily for basemap background:")
+        print("    pip install contextily")
+        HAS_CONTEXTILY = False
+
+    fig, ax = plt.subplots(figsize=(16, 12))
 
     # Custom colormap: dry (brown) -> moist (green) -> wet (blue)
     colors = ['#8B4513', '#D2691E', '#F4A460', '#90EE90', '#32CD32', '#228B22', '#4682B4', '#1E90FF']
@@ -478,6 +492,28 @@ def create_visualization(results_df, target_date, output_file):
     lon_pad = (lon_max - lon_min) * 0.1
     lat_pad = (lat_max - lat_min) * 0.1
 
+    # Set axis limits
+    ax.set_xlim(lon_min - lon_pad, lon_max + lon_pad)
+    ax.set_ylim(lat_min - lat_pad, lat_max + lat_pad)
+
+    # Add basemap if contextily available
+    if HAS_CONTEXTILY:
+        try:
+            # Add OpenStreetMap basemap
+            # Use a terrain or light style for better contrast
+            ctx.add_basemap(
+                ax,
+                crs="EPSG:4326",  # WGS84 lat/lon
+                source=ctx.providers.OpenStreetMap.Mapnik,
+                alpha=0.5,
+                zoom=10
+            )
+            print("  ✓ Added OpenStreetMap basemap")
+        except Exception as e:
+            print(f"  Warning: Could not add basemap: {e}")
+            print("  Continuing without basemap...")
+            ax.grid(True, alpha=0.3, linestyle='--')
+
     # Create interpolation grid
     grid_lon = np.linspace(lon_min - lon_pad, lon_max + lon_pad, 300)
     grid_lat = np.linspace(lat_min - lat_pad, lat_max + lat_pad, 300)
@@ -488,49 +524,52 @@ def create_visualization(results_df, target_date, output_file):
     values = results_df['moisture'].values
     grid_moisture = griddata(points, values, (grid_lon_mesh, grid_lat_mesh), method='cubic')
 
-    # Plot interpolated background
+    # Plot interpolated moisture as semi-transparent overlay
     moisture_plot = ax.contourf(
         grid_lon_mesh, grid_lat_mesh, grid_moisture,
-        levels=20, cmap=cmap, alpha=0.6, extend='both'
+        levels=20, cmap=cmap, alpha=0.65, extend='both', zorder=2
     )
 
     # Plot station points
     real_data = results_df[results_df['type'] == 'real']
     pred_data = results_df[results_df['type'] == 'predicted']
 
-    # Real data: solid circles
+    # Real data: solid circles with black outline
     scatter_real = ax.scatter(
         real_data['longitude'], real_data['latitude'],
-        c=real_data['moisture'], s=100, cmap=cmap,
-        edgecolors='black', linewidths=2,
+        c=real_data['moisture'], s=150, cmap=cmap,
+        edgecolors='black', linewidths=2.5,
         marker='o', label='Real data (sensors)',
         vmin=values.min(), vmax=values.max(), zorder=10
     )
 
-    # Predicted data: triangles
+    # Predicted data: triangles with gray outline
     if len(pred_data) > 0:
         scatter_pred = ax.scatter(
             pred_data['longitude'], pred_data['latitude'],
-            c=pred_data['moisture'], s=100, cmap=cmap,
-            edgecolors='gray', linewidths=1.5,
+            c=pred_data['moisture'], s=130, cmap=cmap,
+            edgecolors='white', linewidths=2,
             marker='^', label='Predicted (no sensor)',
             vmin=values.min(), vmax=values.max(), zorder=9
         )
 
     # Add colorbar
-    cbar = plt.colorbar(moisture_plot, ax=ax, pad=0.02)
-    cbar.set_label('Soil Moisture (%)', fontsize=12, weight='bold')
+    cbar = plt.colorbar(moisture_plot, ax=ax, pad=0.02, shrink=0.8)
+    cbar.set_label('Soil Moisture (%)', fontsize=14, weight='bold')
+    cbar.ax.tick_params(labelsize=11)
 
     # Labels and title
-    ax.set_xlabel('Longitude', fontsize=12, weight='bold')
-    ax.set_ylabel('Latitude', fontsize=12, weight='bold')
+    ax.set_xlabel('Longitude', fontsize=13, weight='bold')
+    ax.set_ylabel('Latitude', fontsize=13, weight='bold')
     ax.set_title(
         f'Galicia Soil Moisture Map\n{target_date.strftime("%Y-%m-%d")}',
-        fontsize=16, weight='bold', pad=20
+        fontsize=18, weight='bold', pad=20
     )
 
-    # Legend
-    ax.legend(loc='upper right', fontsize=11, framealpha=0.9)
+    # Legend with better styling
+    legend = ax.legend(loc='upper right', fontsize=12, framealpha=0.95,
+                       edgecolor='black', fancybox=True, shadow=True)
+    legend.get_frame().set_facecolor('white')
 
     # Grid
     ax.grid(True, alpha=0.3, linestyle='--')
