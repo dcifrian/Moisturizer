@@ -194,7 +194,126 @@ def get_real_soil_moisture(collector, station_id, date):
     return None
 
 
+def build_fast_timeseries_lookup(timeseries_df, start_date, end_date, station_ids, feature_params):
+    """
+    Pre-process timeseries into fast numpy lookup structure.
+
+    Returns dict: {(station_id, date_str, parameter_code): value}
+    """
+    # Filter to relevant date range and stations
+    mask = (
+        (timeseries_df['date'] >= start_date) &
+        (timeseries_df['date'] <= end_date) &
+        (timeseries_df['station_id'].isin(station_ids))
+    )
+    filtered = timeseries_df[mask]
+
+    # Create lookup dict for O(1) access
+    lookup = {}
+    for _, row in filtered.iterrows():
+        key = (int(row['station_id']), str(row['date'].date()), row['parameter_code'])
+        lookup[key] = float(row['value'])
+
+    return lookup
+
+
 def build_sequence_for_any_station(
+    station_id,
+    end_date,
+    timeseries_lookup,
+    nearest_df,
+    feature_params,
+    norm_stats,
+    seq_length=64,
+    n_nearest=4,
+    missing_value=-1000.0
+):
+    """
+    Build a sequence for ANY station (even without soil moisture sensor)
+
+    This allows us to predict for stations without sensors by using their
+    weather data + nearby stations with sensors as context.
+
+    Args:
+        timeseries_lookup: Pre-built dict from build_fast_timeseries_lookup
+    """
+    import numpy as np
+
+    start_date = end_date - timedelta(days=seq_length - 1)
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+
+    # Get nearest stations for this station
+    nearest_info = nearest_df[nearest_df['station_id'] == station_id]
+    if nearest_info.empty:
+        return None
+
+    nearest_info = nearest_info.iloc[0]
+
+    # Find n nearest stations WITH soil moisture
+    nearby_stations = []
+    for i in range(1, 50):  # Check up to 50 nearest
+        if f'nearest_{i}_id' not in nearest_info:
+            break
+        if nearest_info.get(f'nearest_{i}_has_soil_moisture', False):
+            nearby_stations.append({
+                'station_id': int(nearest_info[f'nearest_{i}_id']),
+                'distance': nearest_info[f'nearest_{i}_distance']
+            })
+            if len(nearby_stations) == n_nearest:
+                break
+
+    if len(nearby_stations) < n_nearest:
+        return None
+
+    # Calculate feature dimensions
+    target_features_per_timestep = len(feature_params)
+    nearby_features_per_timestep = (len(feature_params) + 1 + 1)  # features + soil moisture + distance
+    total_features = target_features_per_timestep + (nearby_features_per_timestep * n_nearest)
+
+    # Initialize arrays
+    features = np.full((seq_length, total_features), missing_value, dtype=np.float32)
+    mask = np.zeros((seq_length, total_features), dtype=np.float32)
+
+    # Fill target station features using fast lookup
+    for t, date in enumerate(date_range):
+        date_str = str(date.date())
+
+        for f_idx, param in enumerate(feature_params):
+            key = (station_id, date_str, param)
+            if key in timeseries_lookup:
+                features[t, f_idx] = timeseries_lookup[key]
+                mask[t, f_idx] = 1.0
+
+        # Fill nearby stations features
+        for n_idx, nearby in enumerate(nearby_stations):
+            nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
+
+            # Distance (constant across time)
+            features[t, nearby_offset] = nearby['distance']
+            mask[t, nearby_offset] = 1.0
+
+            # Features
+            for f_idx, param in enumerate(feature_params):
+                key = (nearby['station_id'], date_str, param)
+                feat_idx = nearby_offset + 1 + f_idx
+                if key in timeseries_lookup:
+                    features[t, feat_idx] = timeseries_lookup[key]
+                    mask[t, feat_idx] = 1.0
+
+            # Soil moisture for nearby station
+            key = (nearby['station_id'], date_str, 'HS_CV_AVG_-0.2m')
+            soil_idx = nearby_offset + 1 + len(feature_params)
+            if key in timeseries_lookup:
+                features[t, soil_idx] = timeseries_lookup[key]
+                mask[t, soil_idx] = 1.0
+
+    # Apply normalization
+    features_normalized = apply_normalization_to_features(features, mask, norm_stats, missing_value)
+
+    return features_normalized, mask
+
+
+def build_sequence_for_any_station_OLD(
     station_id,
     end_date,
     timeseries_df,
@@ -428,6 +547,30 @@ def create_moisture_map(
     # Load normalization stats
     norm_stats = np.load(str(collector.data_dir / "normalization_stats.npz"))
 
+    # Build fast lookup for timeseries data
+    print("\nBuilding fast timeseries lookup...")
+    start_date = target_date - timedelta(days=64 - 1)
+
+    # Collect all station IDs we'll need (all stations + their nearby stations)
+    all_needed_stations = set(stations_df['station_id'].tolist())
+    for _, station in stations_df.iterrows():
+        if not station['has_soil_moisture']:
+            # Add nearby stations for this station
+            nearest_info = nearest_df[nearest_df['station_id'] == station['station_id']]
+            if not nearest_info.empty:
+                nearest_info = nearest_info.iloc[0]
+                for i in range(1, 50):
+                    if f'nearest_{i}_id' not in nearest_info:
+                        break
+                    if nearest_info.get(f'nearest_{i}_has_soil_moisture', False):
+                        all_needed_stations.add(int(nearest_info[f'nearest_{i}_id']))
+
+    timeseries_lookup = build_fast_timeseries_lookup(
+        timeseries_df, start_date, target_date,
+        list(all_needed_stations), filtered_params
+    )
+    print(f"  ✓ Built lookup with {len(timeseries_lookup)} entries for {len(all_needed_stations)} stations")
+
     # Phase 1: Collect real data and build sequences for predictions
     print("\nPhase 1: Gathering real data and building sequences...")
     real_results = []
@@ -460,7 +603,7 @@ def create_moisture_map(
                 sequence_data = build_sequence_for_any_station(
                     station_id=station_id,
                     end_date=target_date,
-                    timeseries_df=timeseries_df,
+                    timeseries_lookup=timeseries_lookup,
                     nearest_df=nearest_df,
                     feature_params=filtered_params,
                     norm_stats=norm_stats,
