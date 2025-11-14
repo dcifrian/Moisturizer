@@ -122,8 +122,10 @@ log_memory("After loading dataset")
 print(f"\nDataset created:")
 print(f"  - Length: {len(dataset)}")
 print(f"  - sample_index is None: {dataset.sample_index is None}")
-print(f"  - n_samples: {dataset.n_samples}")
-print(f"  - indices: {dataset.indices}")
+if hasattr(dataset, 'n_samples'):
+    print(f"  - n_samples: {dataset.n_samples}")
+if hasattr(dataset, 'indices'):
+    print(f"  - indices: {dataset.indices}")
 
 log_memory("Before accessing item[0]")
 item = dataset[0]
@@ -152,7 +154,8 @@ try:
     print(f"  - Train length: {len(train_data)}")
     print(f"  - Val length: {len(val_data) if val_data else 0}")
     print(f"  - Train sample_index is None: {train_data.sample_index is None}")
-    print(f"  - Train indices length: {len(train_data.indices) if train_data.indices else None}")
+    if hasattr(train_data, 'indices'):
+        print(f"  - Train indices length: {len(train_data.indices) if train_data.indices else None}")
 
     log_memory("Before accessing train[0]")
     train_item = train_data[0]
