@@ -878,9 +878,13 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             print(f"  Loaded {len(self.sample_index)} precomputed samples")
             if self.is_prenormalized:
                 print(f"  Data is pre-normalized (fast path enabled!)")
+
+            # No index mapping for original dataset (only used in splits)
+            self._indices = None
         else:
             # Build index of valid samples
             self._build_sample_index()
+            self._indices = None
 
         # Load normalization statistics (only needed for reference or if not pre-normalized)
         if normalize and not self.is_prenormalized:
@@ -1367,11 +1371,14 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         """
         # Load from precomputed data if available (fast path)
         if self.precomputed_data is not None:
+            # Map index if this is a split dataset
+            actual_idx = self._indices[idx] if hasattr(self, '_indices') and self._indices is not None else idx
+
             # Direct numpy array access - no copy needed if data is read-only
             # PyTorch will handle memory efficiently
-            features = self.precomputed_data['features'][idx]
-            target = self.precomputed_data['targets'][idx]
-            mask = self.precomputed_data['masks'][idx]
+            features = self.precomputed_data['features'][actual_idx]
+            target = self.precomputed_data['targets'][actual_idx]
+            mask = self.precomputed_data['masks'][actual_idx]
 
             # Remove soil moisture from target station features if present (data leakage prevention)
             if self.soil_in_features and self.soil_feature_idx is not None:
@@ -1498,20 +1505,14 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         split_dataset.target_stations = target_stations
         split_dataset.feature_params = self.feature_params
 
-        # Filter precomputed data by indices
-        split_dataset.precomputed_data = {
-            'features': self.precomputed_data['features'][indices],
-            'targets': self.precomputed_data['targets'][indices],
-            'masks': self.precomputed_data['masks'][indices],
-            'target_stations': self.precomputed_data['target_stations'][indices],
-            'end_dates': self.precomputed_data['end_dates'][indices],
-            'start_dates': self.precomputed_data['start_dates'][indices]
-        }
-        # Preserve is_normalized flag if present
-        if 'is_normalized' in self.precomputed_data:
-            split_dataset.precomputed_data['is_normalized'] = self.precomputed_data['is_normalized']
+        # Keep reference to original precomputed_data (don't copy arrays!)
+        # This avoids loading hundreds of GB into RAM for large datasets
+        split_dataset.precomputed_data = self.precomputed_data
 
-        # Filter sample_index
+        # Store index mapping for this split
+        split_dataset._indices = indices
+
+        # Build filtered sample_index for this split
         split_dataset.sample_index = [self.sample_index[i] for i in indices]
 
         # Copy normalization stats (shared across all splits)
