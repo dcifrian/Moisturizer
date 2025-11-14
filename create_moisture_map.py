@@ -477,6 +477,17 @@ def create_visualization(results_df, target_date, output_file):
         print("    pip install contextily")
         HAS_CONTEXTILY = False
 
+    # Try to import geopandas for land masking
+    try:
+        import geopandas as gpd
+        from shapely.geometry import Point
+        from shapely.ops import unary_union
+        HAS_GEOPANDAS = True
+    except ImportError:
+        print("  Note: Install geopandas for better coastline masking:")
+        print("    pip install geopandas")
+        HAS_GEOPANDAS = False
+
     fig, ax = plt.subplots(figsize=(16, 12))
 
     # Custom colormap: dry (brown) -> moist (green) -> wet (blue)
@@ -484,13 +495,13 @@ def create_visualization(results_df, target_date, output_file):
     n_bins = 100
     cmap = LinearSegmentedColormap.from_list('moisture', colors, N=n_bins)
 
-    # Get coordinate bounds
+    # Get coordinate bounds with extra padding for extrapolation
     lon_min, lon_max = results_df['longitude'].min(), results_df['longitude'].max()
     lat_min, lat_max = results_df['latitude'].min(), results_df['latitude'].max()
 
     # Add padding
-    lon_pad = (lon_max - lon_min) * 0.1
-    lat_pad = (lat_max - lat_min) * 0.1
+    lon_pad = (lon_max - lon_min) * 0.15
+    lat_pad = (lat_max - lat_min) * 0.15
 
     # Set axis limits
     ax.set_xlim(lon_min - lon_pad, lon_max + lon_pad)
@@ -514,20 +525,54 @@ def create_visualization(results_df, target_date, output_file):
             print("  Continuing without basemap...")
             ax.grid(True, alpha=0.3, linestyle='--')
 
-    # Create interpolation grid
-    grid_lon = np.linspace(lon_min - lon_pad, lon_max + lon_pad, 300)
-    grid_lat = np.linspace(lat_min - lat_pad, lat_max + lat_pad, 300)
+    # Create interpolation grid (higher resolution for smoother contours)
+    grid_lon = np.linspace(lon_min - lon_pad, lon_max + lon_pad, 400)
+    grid_lat = np.linspace(lat_min - lat_pad, lat_max + lat_pad, 400)
     grid_lon_mesh, grid_lat_mesh = np.meshgrid(grid_lon, grid_lat)
 
     # Interpolate moisture across the region
     points = results_df[['longitude', 'latitude']].values
     values = results_df['moisture'].values
-    grid_moisture = griddata(points, values, (grid_lon_mesh, grid_lat_mesh), method='cubic')
 
-    # Plot interpolated moisture as semi-transparent overlay
+    # Use linear interpolation (supports extrapolation better than cubic)
+    grid_moisture = griddata(points, values, (grid_lon_mesh, grid_lat_mesh), method='linear')
+
+    # Fill NaN values at edges using nearest neighbor (for coastal extrapolation)
+    mask_nan = np.isnan(grid_moisture)
+    if mask_nan.any():
+        grid_moisture_nearest = griddata(points, values, (grid_lon_mesh, grid_lat_mesh), method='nearest')
+        grid_moisture[mask_nan] = grid_moisture_nearest[mask_nan]
+
+    # Create land mask to exclude sea areas (gulfs, ocean)
+    if HAS_GEOPANDAS:
+        try:
+            print("  Creating land mask for Galicia coastline...")
+            # Create buffered regions around all station points
+            station_points = [Point(lon, lat) for lon, lat in zip(results_df['longitude'], results_df['latitude'])]
+            # Buffer each point by ~0.3 degrees (roughly 30km)
+            buffered_regions = [p.buffer(0.3) for p in station_points]
+            land_shape = unary_union(buffered_regions)
+
+            # Create mask for grid points
+            land_mask = np.zeros_like(grid_moisture, dtype=bool)
+            for i in range(grid_moisture.shape[0]):
+                for j in range(grid_moisture.shape[1]):
+                    point = Point(grid_lon_mesh[i, j], grid_lat_mesh[i, j])
+                    if land_shape.contains(point) or land_shape.touches(point):
+                        land_mask[i, j] = True
+
+            # Apply land mask - set sea areas to NaN
+            grid_moisture[~land_mask] = np.nan
+            print("  ✓ Applied land mask to exclude sea areas")
+
+        except Exception as e:
+            print(f"  Note: Could not create land mask: {e}")
+            print("  Continuing without land mask...")
+
+    # Plot interpolated moisture as semi-transparent overlay (50% opacity)
     moisture_plot = ax.contourf(
         grid_lon_mesh, grid_lat_mesh, grid_moisture,
-        levels=20, cmap=cmap, alpha=0.65, extend='both', zorder=2
+        levels=20, cmap=cmap, alpha=0.5, extend='both', zorder=2
     )
 
     # Plot station points
