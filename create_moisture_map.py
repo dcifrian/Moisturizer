@@ -530,44 +530,106 @@ def create_visualization(results_df, target_date, output_file):
     grid_lat = np.linspace(lat_min - lat_pad, lat_max + lat_pad, 400)
     grid_lon_mesh, grid_lat_mesh = np.meshgrid(grid_lon, grid_lat)
 
-    # Interpolate moisture across the region
-    points = results_df[['longitude', 'latitude']].values
-    values = results_df['moisture'].values
+    # Prepare station points and values
+    station_points = results_df[['longitude', 'latitude']].values
+    station_values = results_df['moisture'].values
 
-    # Use linear interpolation (supports extrapolation better than cubic)
-    grid_moisture = griddata(points, values, (grid_lon_mesh, grid_lat_mesh), method='linear')
-
-    # Fill NaN values at edges using nearest neighbor (for coastal extrapolation)
-    mask_nan = np.isnan(grid_moisture)
-    if mask_nan.any():
-        grid_moisture_nearest = griddata(points, values, (grid_lon_mesh, grid_lat_mesh), method='nearest')
-        grid_moisture[mask_nan] = grid_moisture_nearest[mask_nan]
-
-    # Create land mask to exclude sea areas (gulfs, ocean)
+    # Add virtual stations along coastline to constrain interpolation
     if HAS_GEOPANDAS:
         try:
-            print("  Creating land mask for Galicia coastline...")
-            # Create buffered regions around all station points
-            station_points = [Point(lon, lat) for lon, lat in zip(results_df['longitude'], results_df['latitude'])]
-            # Buffer each point by ~0.3 degrees (roughly 30km)
-            buffered_regions = [p.buffer(0.3) for p in station_points]
-            land_shape = unary_union(buffered_regions)
+            print("  Extracting Galicia coastline...")
+            # Load land polygons from Natural Earth (medium scale)
+            world = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres'))
 
-            # Create mask for grid points
-            land_mask = np.zeros_like(grid_moisture, dtype=bool)
-            for i in range(grid_moisture.shape[0]):
-                for j in range(grid_moisture.shape[1]):
+            # Filter to Spain and get the geometry in our region
+            spain = world[world.name == 'Spain']
+
+            # Clip to our region of interest
+            from shapely.geometry import box
+            bbox = box(lon_min - lon_pad, lat_min - lat_pad, lon_max + lon_pad, lat_max + lat_pad)
+            galicia_land = spain.geometry.intersection(bbox).iloc[0]
+
+            print("  Sampling coastline points...")
+            # Extract exterior boundary (coastline)
+            if hasattr(galicia_land, 'geoms'):
+                # MultiPolygon - get all exteriors
+                coastlines = []
+                for geom in galicia_land.geoms:
+                    if hasattr(geom, 'exterior'):
+                        coastlines.append(geom.exterior)
+            elif hasattr(galicia_land, 'exterior'):
+                # Single Polygon
+                coastlines = [galicia_land.exterior]
+            else:
+                coastlines = []
+
+            # Sample points along the coastline(s)
+            coastline_points = []
+            n_points_per_coastline = max(1000 // len(coastlines), 100) if coastlines else 0
+
+            for coastline in coastlines:
+                # Sample points along this coastline
+                coords = list(coastline.coords)
+                if len(coords) < 2:
+                    continue
+
+                # Interpolate points evenly along the line
+                from shapely.geometry import LineString
+                line = LineString(coords)
+                total_length = line.length
+
+                for i in range(n_points_per_coastline):
+                    distance = (i / n_points_per_coastline) * total_length
+                    point = line.interpolate(distance)
+                    coastline_points.append([point.x, point.y])
+
+            coastline_points = np.array(coastline_points)
+            print(f"  ✓ Sampled {len(coastline_points)} coastline points")
+
+            # For each coastline point, find nearest station and assign its moisture value
+            from scipy.spatial import cKDTree
+            tree = cKDTree(station_points)
+            distances, indices = tree.query(coastline_points)
+            coastline_values = station_values[indices]
+
+            # Add coastline virtual stations to interpolation data
+            all_points = np.vstack([station_points, coastline_points])
+            all_values = np.concatenate([station_values, coastline_values])
+
+            print(f"  ✓ Added {len(coastline_points)} virtual coastline stations for interpolation")
+
+            # Also create land mask for grid
+            land_mask = np.zeros_like(grid_lon_mesh, dtype=bool)
+            for i in range(grid_lon_mesh.shape[0]):
+                for j in range(grid_lon_mesh.shape[1]):
                     point = Point(grid_lon_mesh[i, j], grid_lat_mesh[i, j])
-                    if land_shape.contains(point) or land_shape.touches(point):
+                    if galicia_land.contains(point):
                         land_mask[i, j] = True
 
-            # Apply land mask - set sea areas to NaN
-            grid_moisture[~land_mask] = np.nan
-            print("  ✓ Applied land mask to exclude sea areas")
-
         except Exception as e:
-            print(f"  Note: Could not create land mask: {e}")
-            print("  Continuing without land mask...")
+            print(f"  Note: Could not add coastline constraints: {e}")
+            print("  Continuing with stations only...")
+            all_points = station_points
+            all_values = station_values
+            land_mask = None
+    else:
+        all_points = station_points
+        all_values = station_values
+        land_mask = None
+
+    # Interpolate moisture across the region using all points (real + virtual)
+    grid_moisture = griddata(all_points, all_values, (grid_lon_mesh, grid_lat_mesh), method='linear')
+
+    # Fill NaN values at edges using nearest neighbor
+    mask_nan = np.isnan(grid_moisture)
+    if mask_nan.any():
+        grid_moisture_nearest = griddata(all_points, all_values, (grid_lon_mesh, grid_lat_mesh), method='nearest')
+        grid_moisture[mask_nan] = grid_moisture_nearest[mask_nan]
+
+    # Apply land mask to exclude sea areas
+    if land_mask is not None:
+        grid_moisture[~land_mask] = np.nan
+        print("  ✓ Applied land mask to exclude sea areas")
 
     # Plot interpolated moisture as semi-transparent overlay (50% opacity)
     moisture_plot = ax.contourf(
