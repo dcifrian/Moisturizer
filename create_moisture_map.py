@@ -29,73 +29,62 @@ def load_coastline_data(lon_min, lon_max, lat_min, lat_max, padding=0.15):
     Load and prepare coastline data early to fail fast if there are issues.
 
     Returns:
-        tuple: (coastline_points, galicia_land) or (None, None) if geopandas unavailable
+        tuple: (coastline_points, galicia_land)
     """
-    try:
-        import geopandas as gpd
-        from shapely.geometry import box, Point, LineString
-    except ImportError:
-        print("  Note: Install geopandas for coastline fitting:")
-        print("    pip install geopandas")
-        return None, None
+    import geopandas as gpd
+    from shapely.geometry import box, Point, LineString
 
-    try:
-        print("  Loading Natural Earth coastline data...")
-        # Download 10m resolution land data from Natural Earth
-        url = "https://www.naturalearthdata.com/http//www.naturalearthdata.com/download/10m/physical/ne_10m_land.zip"
-        world = gpd.read_file(url)
+    print("  Loading Natural Earth coastline data...")
+    # Download 10m resolution land data from Natural Earth CDN
+    url = "https://naciscdn.org/naturalearth/10m/physical/ne_10m_land.zip"
+    world = gpd.read_file(url)
 
-        # Add padding to bounding box
-        lon_pad = (lon_max - lon_min) * padding
-        lat_pad = (lat_max - lat_min) * padding
+    # Add padding to bounding box
+    lon_pad = (lon_max - lon_min) * padding
+    lat_pad = (lat_max - lat_min) * padding
 
-        # Clip to our region of interest
-        bbox = box(lon_min - lon_pad, lat_min - lat_pad, lon_max + lon_pad, lat_max + lat_pad)
+    # Clip to our region of interest
+    bbox = box(lon_min - lon_pad, lat_min - lat_pad, lon_max + lon_pad, lat_max + lat_pad)
 
-        # Get land areas in our bbox
-        galicia_land = world.geometry.intersection(bbox)
-        galicia_land = galicia_land[~galicia_land.is_empty].unary_union
+    # Get land areas in our bbox
+    galicia_land = world.geometry.intersection(bbox)
+    galicia_land = galicia_land[~galicia_land.is_empty].unary_union
 
-        print("  Sampling coastline points...")
-        # Extract exterior boundary (coastline)
-        coastlines = []
-        if hasattr(galicia_land, 'geoms'):
-            # MultiPolygon - get all exteriors
-            for geom in galicia_land.geoms:
-                if hasattr(geom, 'exterior'):
-                    coastlines.append(geom.exterior)
-        elif hasattr(galicia_land, 'exterior'):
-            # Single Polygon
-            coastlines = [galicia_land.exterior]
+    print("  Sampling coastline points...")
+    # Extract exterior boundary (coastline)
+    coastlines = []
+    if hasattr(galicia_land, 'geoms'):
+        # MultiPolygon - get all exteriors
+        for geom in galicia_land.geoms:
+            if hasattr(geom, 'exterior'):
+                coastlines.append(geom.exterior)
+    elif hasattr(galicia_land, 'exterior'):
+        # Single Polygon
+        coastlines = [galicia_land.exterior]
 
-        # Sample points along the coastline(s)
-        coastline_points = []
-        n_points_per_coastline = max(1000 // len(coastlines), 100) if coastlines else 0
+    # Sample points along the coastline(s)
+    coastline_points = []
+    n_points_per_coastline = max(1000 // len(coastlines), 100) if coastlines else 0
 
-        for coastline in coastlines:
-            # Sample points along this coastline
-            coords = list(coastline.coords)
-            if len(coords) < 2:
-                continue
+    for coastline in coastlines:
+        # Sample points along this coastline
+        coords = list(coastline.coords)
+        if len(coords) < 2:
+            continue
 
-            # Interpolate points evenly along the line
-            line = LineString(coords)
-            total_length = line.length
+        # Interpolate points evenly along the line
+        line = LineString(coords)
+        total_length = line.length
 
-            for i in range(n_points_per_coastline):
-                distance = (i / n_points_per_coastline) * total_length
-                point = line.interpolate(distance)
-                coastline_points.append([point.x, point.y])
+        for i in range(n_points_per_coastline):
+            distance = (i / n_points_per_coastline) * total_length
+            point = line.interpolate(distance)
+            coastline_points.append([point.x, point.y])
 
-        coastline_points = np.array(coastline_points)
-        print(f"  ✓ Loaded coastline with {len(coastline_points)} sampled points")
+    coastline_points = np.array(coastline_points)
+    print(f"  ✓ Loaded coastline with {len(coastline_points)} sampled points")
 
-        return coastline_points, galicia_land
-
-    except Exception as e:
-        print(f"  Warning: Could not load coastline data: {e}")
-        print("  Continuing without coastline constraints...")
-        return None, None
+    return coastline_points, galicia_land
 
 
 def load_model(model_path, device='cuda'):
@@ -546,27 +535,10 @@ def create_visualization(results_df, target_date, output_file, coastline_points=
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap
     from scipy.interpolate import griddata
+    from scipy.spatial import cKDTree
     import numpy as np
-
-    # Try to import contextily for basemap support
-    try:
-        import contextily as ctx
-        HAS_CONTEXTILY = True
-    except ImportError:
-        print("  Note: Install contextily for basemap background:")
-        print("    pip install contextily")
-        HAS_CONTEXTILY = False
-
-    # Try to import geopandas for land masking
-    try:
-        import geopandas as gpd
-        from shapely.geometry import Point
-        from shapely.ops import unary_union
-        HAS_GEOPANDAS = True
-    except ImportError:
-        print("  Note: Install geopandas for better coastline masking:")
-        print("    pip install geopandas")
-        HAS_GEOPANDAS = False
+    import contextily as ctx
+    from shapely.geometry import Point
 
     fig, ax = plt.subplots(figsize=(16, 12))
 
@@ -587,23 +559,15 @@ def create_visualization(results_df, target_date, output_file, coastline_points=
     ax.set_xlim(lon_min - lon_pad, lon_max + lon_pad)
     ax.set_ylim(lat_min - lat_pad, lat_max + lat_pad)
 
-    # Add basemap if contextily available
-    if HAS_CONTEXTILY:
-        try:
-            # Add OpenStreetMap basemap
-            # Use a terrain or light style for better contrast
-            ctx.add_basemap(
-                ax,
-                crs="EPSG:4326",  # WGS84 lat/lon
-                source=ctx.providers.OpenStreetMap.Mapnik,
-                alpha=0.5,
-                zoom=10
-            )
-            print("  ✓ Added OpenStreetMap basemap")
-        except Exception as e:
-            print(f"  Warning: Could not add basemap: {e}")
-            print("  Continuing without basemap...")
-            ax.grid(True, alpha=0.3, linestyle='--')
+    # Add OpenStreetMap basemap
+    ctx.add_basemap(
+        ax,
+        crs="EPSG:4326",  # WGS84 lat/lon
+        source=ctx.providers.OpenStreetMap.Mapnik,
+        alpha=0.5,
+        zoom=10
+    )
+    print("  ✓ Added OpenStreetMap basemap")
 
     # Create interpolation grid (higher resolution for smoother contours)
     grid_lon = np.linspace(lon_min - lon_pad, lon_max + lon_pad, 400)
@@ -615,59 +579,43 @@ def create_visualization(results_df, target_date, output_file, coastline_points=
     station_values = results_df['moisture'].values
 
     # Add virtual stations along coastline to constrain interpolation
-    if coastline_points is not None and galicia_land is not None:
-        try:
-            print("  Creating virtual coastline stations with distance-weighted averaging...")
-            # For each coastline point, find 2 nearest stations and use distance-weighted average
-            from scipy.spatial import cKDTree
-            tree = cKDTree(station_points)
+    print("  Creating virtual coastline stations with distance-weighted averaging...")
+    tree = cKDTree(station_points)
 
-            # Query for 2 nearest neighbors
-            distances, indices = tree.query(coastline_points, k=2)
+    # Query for 2 nearest neighbors for each coastline point
+    distances, indices = tree.query(coastline_points, k=2)
 
-            # Compute distance-weighted average for each coastline point
-            coastline_values = np.zeros(len(coastline_points))
-            for i in range(len(coastline_points)):
-                # Get distances and indices for the 2 nearest stations
-                dists = distances[i]  # shape: (2,)
-                idxs = indices[i]     # shape: (2,)
+    # Compute distance-weighted average for each coastline point
+    coastline_values = np.zeros(len(coastline_points))
+    for i in range(len(coastline_points)):
+        # Get distances and indices for the 2 nearest stations
+        dists = distances[i]  # shape: (2,)
+        idxs = indices[i]     # shape: (2,)
 
-                # Handle edge case: if a coastline point is exactly on a station (distance = 0)
-                if dists[0] < 1e-9:  # essentially zero distance
-                    coastline_values[i] = station_values[idxs[0]]
-                else:
-                    # Inverse distance weighting: weight_i = 1/distance_i
-                    weights = 1.0 / dists
-                    # Normalize weights so they sum to 1
-                    weights = weights / weights.sum()
-                    # Weighted average
-                    coastline_values[i] = np.sum(weights * station_values[idxs])
+        # Handle edge case: if a coastline point is exactly on a station (distance = 0)
+        if dists[0] < 1e-9:  # essentially zero distance
+            coastline_values[i] = station_values[idxs[0]]
+        else:
+            # Inverse distance weighting: weight_i = 1/distance_i
+            weights = 1.0 / dists
+            # Normalize weights so they sum to 1
+            weights = weights / weights.sum()
+            # Weighted average
+            coastline_values[i] = np.sum(weights * station_values[idxs])
 
-            # Add coastline virtual stations to interpolation data
-            all_points = np.vstack([station_points, coastline_points])
-            all_values = np.concatenate([station_values, coastline_values])
+    # Add coastline virtual stations to interpolation data
+    all_points = np.vstack([station_points, coastline_points])
+    all_values = np.concatenate([station_values, coastline_values])
 
-            print(f"  ✓ Added {len(coastline_points)} virtual coastline stations (2-nearest distance-weighted)")
+    print(f"  ✓ Added {len(coastline_points)} virtual coastline stations (2-nearest distance-weighted)")
 
-            # Create land mask for grid
-            from shapely.geometry import Point
-            land_mask = np.zeros_like(grid_lon_mesh, dtype=bool)
-            for i in range(grid_lon_mesh.shape[0]):
-                for j in range(grid_lon_mesh.shape[1]):
-                    point = Point(grid_lon_mesh[i, j], grid_lat_mesh[i, j])
-                    if galicia_land.contains(point):
-                        land_mask[i, j] = True
-
-        except Exception as e:
-            print(f"  Note: Could not add coastline constraints: {e}")
-            print("  Continuing with stations only...")
-            all_points = station_points
-            all_values = station_values
-            land_mask = None
-    else:
-        all_points = station_points
-        all_values = station_values
-        land_mask = None
+    # Create land mask for grid
+    land_mask = np.zeros_like(grid_lon_mesh, dtype=bool)
+    for i in range(grid_lon_mesh.shape[0]):
+        for j in range(grid_lon_mesh.shape[1]):
+            point = Point(grid_lon_mesh[i, j], grid_lat_mesh[i, j])
+            if galicia_land.contains(point):
+                land_mask[i, j] = True
 
     # Interpolate moisture across the region using all points (real + virtual)
     grid_moisture = griddata(all_points, all_values, (grid_lon_mesh, grid_lat_mesh), method='linear')
@@ -679,9 +627,8 @@ def create_visualization(results_df, target_date, output_file, coastline_points=
         grid_moisture[mask_nan] = grid_moisture_nearest[mask_nan]
 
     # Apply land mask to exclude sea areas
-    if land_mask is not None:
-        grid_moisture[~land_mask] = np.nan
-        print("  ✓ Applied land mask to exclude sea areas")
+    grid_moisture[~land_mask] = np.nan
+    print("  ✓ Applied land mask to exclude sea areas")
 
     # Plot interpolated moisture as semi-transparent overlay (50% opacity)
     moisture_plot = ax.contourf(
