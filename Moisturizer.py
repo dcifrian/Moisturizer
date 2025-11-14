@@ -821,8 +821,10 @@ class SoilMoistureSequenceDataset(_BaseDataset):
     this class can still be instantiated but PyTorch-specific functionality
     (tensors, DataLoader) will not work.
 
-    For optimal performance, use precompute_and_save() to precompute all sequences
-    and save to disk, then load with precomputed_path parameter.
+    For optimal performance with large datasets:
+    1. Precompute sequences using precompute_and_save()
+    2. Convert .npz to .npy directory format: python convert_npz_to_memmap.py data.npz
+    3. Load with precomputed_path pointing to the .npy directory for true memory-mapping
     """
 
     def __init__(
@@ -856,7 +858,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                            Tip: Use analyze_parameter_coverage() to get filtered params
             soil_moisture_param: Parameter code for soil moisture (target variable)
             missing_value: Value to use for missing data
-            precomputed_path: Path to precomputed .npz file (for fast loading)
+            precomputed_path: Path to precomputed data directory (.npy files) or .npz file
+                             RECOMMENDED: Use .npy directory for true memory-mapping
+                             Convert .npz to .npy: python convert_npz_to_memmap.py data.npz
             normalize: Whether to normalize features to [-1, 1] range
             norm_stats_path: Path to normalization stats .npz file (if None, computed automatically)
             dense_array_path: Path to dense_features.npz (FASTEST - recommended for generation)
