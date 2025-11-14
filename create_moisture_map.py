@@ -538,16 +538,18 @@ def create_visualization(results_df, target_date, output_file):
     if HAS_GEOPANDAS:
         try:
             print("  Extracting Galicia coastline...")
-            # Load land polygons from Natural Earth (medium scale)
-            world = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres'))
-
-            # Filter to Spain and get the geometry in our region
-            spain = world[world.name == 'Spain']
+            # Load land polygons from Natural Earth (download directly)
+            # Use the 10m resolution coastline for better accuracy
+            url = "https://www.naturalearthdata.com/http//www.naturalearthdata.com/download/10m/physical/ne_10m_land.zip"
+            world = gpd.read_file(url)
 
             # Clip to our region of interest
             from shapely.geometry import box
             bbox = box(lon_min - lon_pad, lat_min - lat_pad, lon_max + lon_pad, lat_max + lat_pad)
-            galicia_land = spain.geometry.intersection(bbox).iloc[0]
+
+            # Get land areas in our bbox
+            galicia_land = world.geometry.intersection(bbox)
+            galicia_land = galicia_land[~galicia_land.is_empty].unary_union
 
             print("  Sampling coastline points...")
             # Extract exterior boundary (coastline)
@@ -647,7 +649,7 @@ def create_visualization(results_df, target_date, output_file):
         c=real_data['moisture'], s=150, cmap=cmap,
         edgecolors='black', linewidths=2.5,
         marker='o', label='Real data (sensors)',
-        vmin=values.min(), vmax=values.max(), zorder=10
+        vmin=station_values.min(), vmax=station_values.max(), zorder=10
     )
 
     # Predicted data: triangles with gray outline
@@ -657,7 +659,7 @@ def create_visualization(results_df, target_date, output_file):
             c=pred_data['moisture'], s=130, cmap=cmap,
             edgecolors='white', linewidths=2,
             marker='^', label='Predicted (no sensor)',
-            vmin=values.min(), vmax=values.max(), zorder=9
+            vmin=station_values.min(), vmax=station_values.max(), zorder=9
         )
 
     # Add colorbar
@@ -685,8 +687,8 @@ def create_visualization(results_df, target_date, output_file):
     stats_text = (
         f"Stations: {len(results_df)} total\n"
         f"Real: {len(real_data)} | Predicted: {len(pred_data)}\n"
-        f"Range: {values.min():.1f}% - {values.max():.1f}%\n"
-        f"Mean: {values.mean():.1f}%"
+        f"Range: {station_values.min():.1f}% - {station_values.max():.1f}%\n"
+        f"Mean: {station_values.mean():.1f}%"
     )
     ax.text(
         0.02, 0.98, stats_text,
