@@ -26,3 +26,7 @@ test_*/
 Thumbs.db
 /TROLOLO/
 /trololo.weight
+
+# Log files
+*.log
+*_log.txt
