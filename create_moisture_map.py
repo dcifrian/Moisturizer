@@ -101,26 +101,46 @@ def load_model(model_path, device='cuda'):
     # Load checkpoint
     checkpoint = torch.load(model_path, map_location=device)
 
-    trololo = TROLOLO(seq_length=64,
-                      num_layers=6,
+    quantize = False
+    """trololo = TROLOLO(seq_length=64,
+                      num_layers=8,
                       num_heads=48,
                       embed_dim=192,
-                      mlp_dim=192,
+                      mlp_dim=512,
                       n_class_tokens=2,
                       num_classes=1,
-                      mlp_rank=0.05,
-                      qkv_rank=0.05,
-                      attnproj_rank=0.05,
+                      mlp_rank=0.1,
+                      qkv_rank=0.2,
+                      attnproj_rank=0.1,
                       sequence_pyramid=[],
-                      attn_rank_pyramid=[(0, 32), (1, 32)],
+                      attn_rank_pyramid=[],
                       rank_pyramid_begin=2,
                       rank_pyramid_factor=1.0,
                       head_constriction="ONE_CLASS_TOKEN",
-                      dropout=0.0,
-                      attention_dropout=0.0,
-                      quantize_bits=None
+                      dropout=0.05,
+                      attention_dropout=0.01,
+                      quantize_bits=None if not quantize else 8
                       )
-
+    """
+    trololo = TROLOLO(seq_length=64,
+                      num_layers=16,
+                      num_heads=48,
+                      embed_dim=192,
+                      mlp_dim=512,
+                      n_class_tokens=2,
+                      num_classes=1,
+                      mlp_rank=0.1,
+                      qkv_rank=0.2,
+                      attnproj_rank=0.1,
+                      sequence_pyramid=[],
+                      attn_rank_pyramid=[],
+                      rank_pyramid_begin=2,
+                      rank_pyramid_factor=1.0,
+                      head_constriction="ONE_CLASS_TOKEN",
+                      dropout=0.05,
+                      attention_dropout=0.01,
+                      quantize_bits= None if not quantize else 8
+                      )
     trololo.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
     trololo.to(device)
     trololo.eval()
@@ -644,7 +664,7 @@ def create_moisture_map(
         # Run batched inference - same pattern as original but batch_size instead of 1
         x_gpu = torch.zeros([batch_size, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
                            dtype=torch.float16, device=device)
-
+        torch._dynamo.config.disable = True
         with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
             x_gpu[:batch_size, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
             x = x_gpu[:batch_size, :, :]

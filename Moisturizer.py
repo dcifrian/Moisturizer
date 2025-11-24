@@ -1827,7 +1827,7 @@ def buildDataset():
 
     # Collect 2 years of data
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=730)
+    start_date = end_date - timedelta(days=3705)
 
     timeseries_df = collector.build_historical_dataset(
         station_ids=all_station_ids,
@@ -1900,6 +1900,19 @@ def buildDataset():
     print(f"  Target: {sample['target']}")
     print(f"  Mask shape: {sample['mask'].shape}")
     print(f"  Station ID: {sample['target_station_id']}")
+
+    # Precompute and save
+    precomputed_path = collector.data_dir / "precomputed_sequences.npz"
+    norm_stats_path = collector.data_dir / "normalization_stats.npz"
+
+    dataset.precompute_and_save(
+        output_path=str(precomputed_path),
+        norm_stats_path=str(norm_stats_path)
+    )
+
+    print(f"\n✓ Precomputed sequences saved to: {precomputed_path}")
+    print(f"✓ Normalization stats saved to: {norm_stats_path}")
+    print(f"\nYou can now use loadDataset() for fast loading!")
 
     # Train/val/test split
     print("\n" + "=" * 60)
@@ -1980,8 +1993,8 @@ def loadDataset(use_precomputed=True, normalize=True):
     print(f"\nUsing {len(filtered_params)} filtered parameters...")
 
     # Check for precomputed data
-    precomputed_path = collector.data_dir / "precomputed_sequences.npz"
-    norm_stats_path = collector.data_dir / "normalization_stats.npz"
+    precomputed_path = collector.data_dir / "precomputed_sequences_augmented"
+    norm_stats_path = collector.data_dir / "normalization_stats_augmented.npz"
 
     if use_precomputed and not precomputed_path.exists():
         print(f"\n⚠ Precomputed data not found at {precomputed_path}")
@@ -2024,8 +2037,11 @@ def loadDataset(use_precomputed=True, normalize=True):
     )
     return train_ds, val_ds, test_ds
 
-# Example usage
 if __name__ == "__main__":
+    buildDataset()
+
+# Example usage
+if __name__ == "__main2__":
     # Check if precomputed data exists
     collector = MeteoGaliciaCollector()
     precomputed_path = collector.data_dir / "precomputed_sequences.npz"
@@ -2074,17 +2090,17 @@ if __name__ == "__main__":
     from TROLOLO.TROLOLO_pyramid import TROLOLO
     quantize = False
     trololo = TROLOLO(seq_length=64,
-                      num_layers=6,
+                      num_layers=16,
                       num_heads=48,
                       embed_dim=192,
-                      mlp_dim=192,
+                      mlp_dim=512,
                       n_class_tokens=2,
                       num_classes=1,
-                      mlp_rank=0.05,
-                      qkv_rank=0.05,
-                      attnproj_rank=0.05,
+                      mlp_rank=0.1,
+                      qkv_rank=0.2,
+                      attnproj_rank=0.1,
                       sequence_pyramid=[],
-                      attn_rank_pyramid=[(0, 32), (1, 32)],
+                      attn_rank_pyramid=[],
                       rank_pyramid_begin=2,
                       rank_pyramid_factor=1.0,
                       head_constriction="ONE_CLASS_TOKEN",
@@ -2092,4 +2108,4 @@ if __name__ == "__main__":
                       attention_dropout=0.01,
                       quantize_bits= None if not quantize else 8
                       )
-    trololo.training_loop(train_data=train_ds,val_data=val_ds,lr=4.1e-4,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=10000,batch_size=512,transfer=0)
+    trololo.training_loop(train_data=train_ds,val_data=val_ds,lr=4.1e-4,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=84,batch_size=512,transfer=0)

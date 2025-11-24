@@ -161,8 +161,8 @@ def generate_all_augmentations_batched(
     n_nearby_available: int = 5,
     n_nearby_in_features: int = 4,
     coverage_threshold: float = 0.25,
-    batch_size: int = 100,  # Process 100 base samples at a time
-    num_workers: int = None  # Number of worker processes (None = min(8, cpu_count))
+    batch_size: int = 1000,  # Process 100 base samples at a time
+    num_workers: int = 15  # Number of worker processes (None = min(8, cpu_count))
 ):
     """
     Pre-compute ALL augmented samples with batched processing (memory efficient!)
@@ -478,22 +478,19 @@ def generate_all_augmentations_batched(
     print(f"\n9. Saving augmented dataset to compressed NPZ...")
     print(f"   This will take several minutes as data is compressed...")
 
-    output_path = Path(data_dir) / "precomputed_sequences_augmented.npz"
+    output_path = Path(data_dir) / "precomputed_sequences_augmented"
     norm_stats_path = Path(data_dir) / "normalization_stats_augmented.npz"
 
     # Note: np.savez_compressed can read from memory-mapped arrays directly
-    np.savez_compressed(
-        output_path,
-        features=all_features,
-        targets=all_targets,
-        masks=all_masks,
-        target_stations=all_target_stations,
-        end_dates=np.array(all_end_dates, dtype=np.float64),
-        start_dates=np.array(all_start_dates, dtype=np.float64),
-        skip_pattern=all_skip_pattern,
-        permutation=all_permutation,
-        is_normalized=np.array([True], dtype=bool)
-    )
+    np.save(output_path / "features.npy",all_features)
+    np.save(output_path / "targets.npy",all_targets)
+    np.save(output_path / "masks.npy",all_masks)
+    np.save(output_path / "target_stations.npy",all_target_stations)
+    np.save(output_path / "end_dates.npy",np.array(all_end_dates, dtype=np.float64))
+    np.save(output_path / "start_dates.npy",np.array(all_start_dates, dtype=np.float64))
+    np.save(output_path / "skip_pattern.npy",all_skip_pattern)
+    np.save(output_path / "permutation.npy",all_permutation)
+    np.save(output_path / "is_normalized.npy",np.array([True], dtype=bool))
 
     np.savez(
         norm_stats_path,

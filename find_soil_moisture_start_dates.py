@@ -78,7 +78,7 @@ def binary_search_start_date(collector, station_id, earliest_possible, latest_kn
         return None
 
     # Check if earliest_possible has data (already at boundary)
-    time.sleep(0.5)  # Rate limiting
+    time.sleep(0.1)  # Rate limiting
     if has_data_on_date(collector, station_id, earliest_possible, parameter):
         print(f"    Data exists from earliest date {earliest_possible.date()}")
         return earliest_possible
@@ -122,8 +122,6 @@ def find_all_start_dates(test_single_station=None):
 
     # Initialize collector
     collector = MeteoGaliciaCollector()
-    collector.data_dir = 'test_data'  # Use test_data directory
-    collector.stations_file = 'test_data/stations_metadata.csv'
 
     # Load stations
     stations_df = pd.read_csv(collector.stations_file)
