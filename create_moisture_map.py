@@ -496,7 +496,8 @@ def create_moisture_map(
     model_path,
     target_date=None,
     output_file='galicia_moisture_map.png',
-    device='cuda'
+    device='cuda',
+    include_weather_maps=False
 ):
     """
     Create a beautiful moisture map of all Galicia
@@ -506,6 +507,7 @@ def create_moisture_map(
         target_date: Date to predict (default: most recent available)
         output_file: Path to save the visualization
         device: 'cuda' or 'cpu'
+        include_weather_maps: If True, also create cumulative precipitation and water balance maps
     """
     print("=" * 60)
     print("CREATING GALICIA SOIL MOISTURE MAP")
@@ -702,9 +704,258 @@ def create_moisture_map(
     create_visualization(results_df, target_date, output_file, coastline_points, galicia_land)
 
     print(f"\n✓ Map saved to {output_file}")
-    print("=" * 60)
+
+    # Create optional weather maps if requested
+    if include_weather_maps:
+        print("\n" + "=" * 60)
+        print("CREATING CUMULATIVE WEATHER MAPS")
+        print("=" * 60)
+
+        # Compute cumulative precipitation and water balance over the 64-day sequence
+        start_date = target_date - timedelta(days=63)  # 64 days total
+        weather_results = compute_cumulative_weather(
+            stations_df, timeseries_lookup, start_date, target_date
+        )
+
+        if not weather_results.empty:
+            # Create precipitation map
+            precip_file = output_file.replace('.png', '_precipitation.png')
+            print(f"\nCreating cumulative precipitation map...")
+            create_weather_visualization(
+                weather_results[weather_results['precipitation'].notna()],
+                'precipitation',
+                target_date,
+                precip_file,
+                coastline_points,
+                galicia_land,
+                title=f"Cumulative Precipitation (64 days)\n{start_date.date()} to {target_date.date()}",
+                unit="mm"
+            )
+            print(f"✓ Precipitation map saved to {precip_file}")
+
+            # Create water balance map
+            balance_file = output_file.replace('.png', '_water_balance.png')
+            print(f"\nCreating cumulative water balance map...")
+            create_weather_visualization(
+                weather_results[weather_results['water_balance'].notna()],
+                'water_balance',
+                target_date,
+                balance_file,
+                coastline_points,
+                galicia_land,
+                title=f"Cumulative Water Balance (64 days)\n{start_date.date()} to {target_date.date()}",
+                unit="mm"
+            )
+            print(f"✓ Water balance map saved to {balance_file}")
+        else:
+            print("⚠ No weather data available for the selected date range")
+
+    print("\n" + "=" * 60)
 
     return results_df
+
+
+def compute_cumulative_weather(stations_df, timeseries_lookup, start_date, end_date):
+    """
+    Compute cumulative precipitation and water balance for all stations over a date range.
+
+    Args:
+        stations_df: DataFrame of stations
+        timeseries_lookup: Pre-built dict {(station_id, date_str, parameter_code): value}
+        start_date: Start date for accumulation
+        end_date: End date for accumulation
+
+    Returns:
+        DataFrame with columns: station_id, latitude, longitude, precipitation, water_balance
+    """
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    results = []
+
+    for _, station in stations_df.iterrows():
+        station_id = station['station_id']
+        lat = station['latitude']
+        lon = station['longitude']
+
+        # Sum up precipitation over all days
+        precip_sum = 0
+        precip_count = 0
+        for date in date_range:
+            date_str = str(date.date())
+            key = (station_id, date_str, 'PP_SUM_1.5m')
+            if key in timeseries_lookup:
+                precip_sum += timeseries_lookup[key]
+                precip_count += 1
+
+        # Sum up water balance over all days
+        balance_sum = 0
+        balance_count = 0
+        for date in date_range:
+            date_str = str(date.date())
+            key = (station_id, date_str, 'BH_SUM_1.5m')
+            if key in timeseries_lookup:
+                balance_sum += timeseries_lookup[key]
+                balance_count += 1
+
+        # Only include if we have some data
+        if precip_count > 0 or balance_count > 0:
+            results.append({
+                'station_id': station_id,
+                'latitude': lat,
+                'longitude': lon,
+                'name': station.get('name', f'Station {station_id}'),
+                'precipitation': precip_sum if precip_count > 0 else np.nan,
+                'water_balance': balance_sum if balance_count > 0 else np.nan,
+                'precip_days': precip_count,
+                'balance_days': balance_count
+            })
+
+    return pd.DataFrame(results)
+
+
+def create_weather_visualization(results_df, value_column, target_date, output_file,
+                                 coastline_points=None, galicia_land=None, title="Weather Map", unit="mm"):
+    """Create weather map visualization (similar to moisture map but for precipitation/water balance)"""
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+    from scipy.interpolate import griddata
+    from scipy.spatial import cKDTree
+    import numpy as np
+    import contextily as ctx
+    from shapely.geometry import Point
+
+    fig, ax = plt.subplots(figsize=(16, 12))
+
+    # Custom colormap based on data type
+    if 'precipitation' in value_column:
+        # Blue-based for precipitation
+        colors = ['#FFFFFF', '#E0F3FF', '#A8DAFF', '#70C1FF', '#4A90E2', '#2E5FA8', '#1A3A6F']
+        cmap = LinearSegmentedColormap.from_list('precipitation', colors, N=100)
+    else:
+        # Green/blue for water balance (can be negative)
+        colors = ['#8B4513', '#D2691E', '#FFFFFF', '#90EE90', '#32CD32', '#228B22', '#4682B4']
+        cmap = LinearSegmentedColormap.from_list('water_balance', colors, N=100)
+
+    # Get coordinate bounds with padding
+    lon_min, lon_max = results_df['longitude'].min(), results_df['longitude'].max()
+    lat_min, lat_max = results_df['latitude'].min(), results_df['latitude'].max()
+
+    lon_pad = (lon_max - lon_min) * 0.15
+    lat_pad = (lat_max - lat_min) * 0.15
+
+    ax.set_xlim(lon_min - lon_pad, lon_max + lon_pad)
+    ax.set_ylim(lat_min - lat_pad, lat_max + lat_pad)
+
+    # Add OpenStreetMap basemap
+    ctx.add_basemap(
+        ax,
+        crs="EPSG:4326",
+        source=ctx.providers.OpenStreetMap.Mapnik,
+        alpha=0.5,
+        zoom=10
+    )
+
+    # Create interpolation grid
+    grid_lon = np.linspace(lon_min - lon_pad, lon_max + lon_pad, 400)
+    grid_lat = np.linspace(lat_min - lat_pad, lat_max + lat_pad, 400)
+    grid_lon_mesh, grid_lat_mesh = np.meshgrid(grid_lon, grid_lat)
+
+    # Prepare station points and values
+    station_points = results_df[['longitude', 'latitude']].values
+    station_values = results_df[value_column].values
+
+    # Add virtual stations along coastline if available
+    if coastline_points is not None and galicia_land is not None:
+        tree = cKDTree(station_points)
+        distances, indices = tree.query(coastline_points, k=2)
+
+        coastline_values = np.zeros(len(coastline_points))
+        for i in range(len(coastline_points)):
+            dists = distances[i]
+            idxs = indices[i]
+            if dists[0] < 1e-9:
+                coastline_values[i] = station_values[idxs[0]]
+            else:
+                weights = 1.0 / dists
+                weights = weights / weights.sum()
+                coastline_values[i] = np.sum(weights * station_values[idxs])
+
+        all_points = np.vstack([station_points, coastline_points])
+        all_values = np.concatenate([station_values, coastline_values])
+
+        # Create land mask
+        land_mask = np.zeros_like(grid_lon_mesh, dtype=bool)
+        for i in range(grid_lon_mesh.shape[0]):
+            for j in range(grid_lon_mesh.shape[1]):
+                point = Point(grid_lon_mesh[i, j], grid_lat_mesh[i, j])
+                if galicia_land.contains(point):
+                    land_mask[i, j] = True
+    else:
+        all_points = station_points
+        all_values = station_values
+        land_mask = None
+
+    # Interpolate
+    grid_values = griddata(all_points, all_values, (grid_lon_mesh, grid_lat_mesh), method='linear')
+
+    # Fill NaN at edges
+    mask_nan = np.isnan(grid_values)
+    if mask_nan.any():
+        grid_values_nearest = griddata(all_points, all_values, (grid_lon_mesh, grid_lat_mesh), method='nearest')
+        grid_values[mask_nan] = grid_values_nearest[mask_nan]
+
+    # Apply land mask
+    if land_mask is not None:
+        grid_values[~land_mask] = np.nan
+
+    # Plot contour
+    values_plot = ax.contourf(
+        grid_lon_mesh, grid_lat_mesh, grid_values,
+        levels=20, cmap=cmap, alpha=0.5, extend='both', zorder=2
+    )
+
+    # Plot station points
+    scatter = ax.scatter(
+        results_df['longitude'], results_df['latitude'],
+        c=results_df[value_column], s=150, cmap=cmap,
+        edgecolors='black', linewidths=2.5,
+        marker='o', label='Station data',
+        vmin=station_values.min(), vmax=station_values.max(), zorder=10
+    )
+
+    # Add colorbar
+    cbar = plt.colorbar(values_plot, ax=ax, pad=0.02, shrink=0.8)
+    cbar.set_label(f'{value_column.replace("_", " ").title()} ({unit})', fontsize=14, weight='bold')
+    cbar.ax.tick_params(labelsize=11)
+
+    # Labels and title
+    ax.set_xlabel('Longitude', fontsize=13, weight='bold')
+    ax.set_ylabel('Latitude', fontsize=13, weight='bold')
+    ax.set_title(title, fontsize=18, weight='bold', pad=20)
+
+    # Legend
+    legend = ax.legend(loc='upper right', fontsize=12, framealpha=0.95,
+                      edgecolor='black', fancybox=True, shadow=True)
+    legend.get_frame().set_facecolor('white')
+
+    # Grid
+    ax.grid(True, alpha=0.3, linestyle='--')
+
+    # Stats text box
+    stats_text = (
+        f"Stations: {len(results_df)} with data\n"
+        f"Range: {station_values.min():.1f} - {station_values.max():.1f} {unit}\n"
+        f"Mean: {station_values.mean():.1f} {unit}"
+    )
+    ax.text(
+        0.02, 0.98, stats_text,
+        transform=ax.transAxes,
+        fontsize=10, verticalalignment='top',
+        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
+    )
+
+    # Save
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.close()
 
 
 def create_visualization(results_df, target_date, output_file, coastline_points=None, galicia_land=None):
@@ -882,6 +1133,8 @@ if __name__ == "__main__":
     parser.add_argument('--date', type=str, default="2025-10-25", help='Target date (YYYY-MM-DD), default: most recent')
     parser.add_argument('--output', type=str, default='galicia_moisture_map.png', help='Output file path')
     parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'], help='Device to use')
+    parser.add_argument('--include-weather-maps', action='store_true',
+                       help='Also create cumulative precipitation and water balance maps')
 
     args = parser.parse_args()
 
@@ -889,5 +1142,6 @@ if __name__ == "__main__":
         model_path=args.model,
         target_date=args.date,
         output_file=args.output,
-        device=args.device
+        device=args.device,
+        include_weather_maps=args.include_weather_maps
     )
