@@ -1029,6 +1029,22 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 # Need seq_length days including this date
                 start_date = date - pd.Timedelta(days=self.seq_length - 1)
 
+                # CRITICAL: Verify that the target value at end_date is valid (not missing/invalid)
+                # Get the actual soil moisture value at this date
+                target_value_at_date = self.timeseries_df[
+                    (self.timeseries_df['station_id'] == target_id) &
+                    (self.timeseries_df['parameter_code'] == self.soil_moisture_param) &
+                    (self.timeseries_df['date'] == date)
+                    ]['value']
+
+                # Skip if no value or if value is invalid marker
+                if target_value_at_date.empty:
+                    continue
+
+                target_val = target_value_at_date.iloc[0]
+                if target_val == -9999.0 or target_val == self.missing_value or pd.isna(target_val):
+                    continue
+
                 # Check if we have data for the full sequence
                 date_range = pd.date_range(start=start_date, end=date, freq='D')
 
