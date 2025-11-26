@@ -825,15 +825,10 @@ def create_weather_visualization(results_df, value_column, target_date, output_f
 
     fig, ax = plt.subplots(figsize=(16, 12))
 
-    # Custom colormap based on data type
-    if 'precipitation' in value_column:
-        # Blue-based for precipitation
-        colors = ['#FFFFFF', '#E0F3FF', '#A8DAFF', '#70C1FF', '#4A90E2', '#2E5FA8', '#1A3A6F']
-        cmap = LinearSegmentedColormap.from_list('precipitation', colors, N=100)
-    else:
-        # Green/blue for water balance (can be negative)
-        colors = ['#8B4513', '#D2691E', '#FFFFFF', '#90EE90', '#32CD32', '#228B22', '#4682B4']
-        cmap = LinearSegmentedColormap.from_list('water_balance', colors, N=100)
+
+    # Green/blue for water balance (can be negative)
+    colors = ['#8B4513', '#D2691E', '#FFFFFF', '#90EE90', '#32CD32', '#228B22', '#4682B4']
+    cmap = LinearSegmentedColormap.from_list('water_balance', colors, N=100)
 
     # Get coordinate bounds with padding
     lon_min, lon_max = results_df['longitude'].min(), results_df['longitude'].max()
@@ -1133,7 +1128,7 @@ if __name__ == "__main__":
     parser.add_argument('--date', type=str, default="2025-10-25", help='Target date (YYYY-MM-DD), default: most recent')
     parser.add_argument('--output', type=str, default='galicia_moisture_map.png', help='Output file path')
     parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'], help='Device to use')
-    parser.add_argument('--include-weather-maps', action='store_true',
+    parser.add_argument('--include-weather-maps', action='store_false',
                        help='Also create cumulative precipitation and water balance maps')
 
     args = parser.parse_args()
