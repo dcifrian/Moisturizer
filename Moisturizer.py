@@ -904,18 +904,27 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
             # Still build timeseries index as fallback for edge cases
             print("  Building fallback index for edge cases...")
-            self.timeseries_index = {
-                (int(row.station_id), row.date, row.parameter_code): float(row.value)
-                for row in self.timeseries_df.itertuples(index=False)
-            }
+            # Use numpy arrays for fast dict building (100x faster than itertuples)
+            station_ids = self.timeseries_df['station_id'].astype(np.int32).values
+            dates = self.timeseries_df['date'].values
+            param_codes = self.timeseries_df['parameter_code'].values
+            values = self.timeseries_df['value'].astype(np.float32).values
+            self.timeseries_index = dict(zip(
+                zip(station_ids, dates, param_codes),
+                values
+            ))
         else:
             # Use dict lookup index
             print("Creating fast lookup index for timeseries...")
-            # Use itertuples() - 10x faster than iterrows()
-            self.timeseries_index = {
-                (int(row.station_id), row.date, row.parameter_code): float(row.value)
-                for row in self.timeseries_df.itertuples(index=False)
-            }
+            # Use numpy arrays for fast dict building (100x faster than itertuples)
+            station_ids = self.timeseries_df['station_id'].astype(np.int32).values
+            dates = self.timeseries_df['date'].values
+            param_codes = self.timeseries_df['parameter_code'].values
+            values = self.timeseries_df['value'].astype(np.float32).values
+            self.timeseries_index = dict(zip(
+                zip(station_ids, dates, param_codes),
+                values
+            ))
             print(f"  Indexed {len(self.timeseries_index):,} data points")
 
         # Determine target stations
@@ -1814,7 +1823,102 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             'nearby_data': nearby_df
         }
 
-def buildDataset():
+def build_dense_feature_array(
+    timeseries_df: pd.DataFrame,
+    stations_df: pd.DataFrame,
+    feature_params: List[str],
+    soil_moisture_param: str = "HS_CV_AVG_-0.2m",
+    missing_value: float = -1000.0
+) -> Tuple[np.ndarray, np.ndarray, List[int], pd.DatetimeIndex]:
+    """
+    Build dense feature array for all stations × all dates × all parameters
+
+    This is MUCH faster than building sequences one-by-one with dict lookups.
+
+    Args:
+        timeseries_df: Raw timeseries data
+        stations_df: Station metadata
+        feature_params: List of parameter codes to include (WITHOUT soil moisture)
+        soil_moisture_param: Soil moisture parameter to add separately
+        missing_value: Value for missing data
+
+    Returns:
+        features_array: [num_stations, num_dates, num_features] array
+        mask_array: [num_stations, num_dates, num_features] mask (1=valid, 0=missing)
+        station_ids: List of station IDs (index matches array)
+        date_index: DatetimeIndex of all dates
+    """
+    print("=" * 70)
+    print("BUILDING DENSE FEATURE ARRAY (ONE-TIME PREPROCESSING)")
+    print("=" * 70)
+
+    # Get all unique dates and stations
+    all_dates = sorted(timeseries_df['date'].unique())
+    date_index = pd.DatetimeIndex(all_dates)
+    station_ids = sorted(stations_df['station_id'].unique())
+
+    # Build combined parameter list: features + soil moisture
+    all_params = feature_params + [soil_moisture_param]
+
+    num_stations = len(station_ids)
+    num_dates = len(date_index)
+    num_features = len(all_params)
+
+    print(f"\nArray dimensions:")
+    print(f"  Stations: {num_stations}")
+    print(f"  Dates: {num_dates}")
+    print(f"  Features: {len(feature_params)} weather params + 1 soil moisture = {num_features} total")
+    print(f"  Total elements: {num_stations * num_dates * num_features:,}")
+    print(f"  Memory: ~{num_stations * num_dates * num_features * 4 / 1e6:.1f} MB")
+
+    # Initialize arrays
+    features_array = np.full((num_stations, num_dates, num_features), missing_value, dtype=np.float32)
+    mask_array = np.zeros((num_stations, num_dates, num_features), dtype=np.float32)
+
+    # Create mapping for fast indexing
+    station_to_idx = {sid: idx for idx, sid in enumerate(station_ids)}
+    date_to_idx = {date: idx for idx, date in enumerate(date_index)}
+    param_to_idx = {param: idx for idx, param in enumerate(all_params)}
+
+    print("\nFilling array with data...")
+    # Use numpy arrays for fast iteration
+    station_ids_np = timeseries_df['station_id'].values
+    dates_np = timeseries_df['date'].values
+    param_codes_np = timeseries_df['parameter_code'].values
+    values_np = timeseries_df['value'].values
+
+    # Fill the array - vectorized approach
+    for i in range(len(timeseries_df)):
+        if i % 100000 == 0:
+            print(f"  Processing row {i:,}/{len(timeseries_df):,} ({100*i/len(timeseries_df):.1f}%)")
+
+        station_idx = station_to_idx.get(station_ids_np[i])
+        date_idx = date_to_idx.get(dates_np[i])
+        param_idx = param_to_idx.get(param_codes_np[i])
+
+        if station_idx is not None and date_idx is not None and param_idx is not None:
+            features_array[station_idx, date_idx, param_idx] = values_np[i]
+            mask_array[station_idx, date_idx, param_idx] = 1.0
+
+    print(f"\n✓ Dense array built!")
+    print(f"  Valid data points: {mask_array.sum():,.0f}")
+    print(f"  Missing data points: {(mask_array == 0).sum():,.0f}")
+    print(f"  Coverage: {mask_array.sum() / mask_array.size * 100:.1f}%")
+
+    return features_array, mask_array, station_ids, date_index
+
+
+def buildDataset(seq_length: int = 64, days: int = 730):
+    """
+    Build the complete dataset with optimizations
+
+    Args:
+        seq_length: Number of days in each sequence (default: 64)
+        days: Number of days of historical data to collect (default: 730 = 2 years)
+
+    Returns:
+        Tuple of (train_dataset, val_dataset, test_dataset)
+    """
     collector = MeteoGaliciaCollector()
 
     # Step 1: Discover stations with soil moisture
@@ -1841,9 +1945,9 @@ def buildDataset():
     # This includes all 42 available parameters (temperature, humidity, wind, solar radiation, etc.)
     parameters = collector.ALL_SENSORS
 
-    # Collect 2 years of data
+    # Collect specified days of data
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=3705)
+    start_date = end_date - timedelta(days=days)
 
     timeseries_df = collector.build_historical_dataset(
         station_ids=all_station_ids,
@@ -1853,43 +1957,11 @@ def buildDataset():
         chunk_days=30
     )
 
-    # Step 4: Create ML-ready dataset
+    # Step 4: Get filtered parameters
     print("\n" + "=" * 60)
-    print("STEP 4: Creating ML-ready dataset")
+    print("STEP 4: Analyzing parameter coverage")
     print("=" * 60)
 
-    ml_df = collector.create_ml_ready_dataset(n_nearest=4)
-
-    # Step 5: Example of getting live data
-    print("\n" + "=" * 60)
-    print("STEP 5: Example - Getting live data for prediction")
-    print("=" * 60)
-
-    # Get a station with soil moisture for demo
-    soil_moisture_stations = stations_df[stations_df['has_soil_moisture']]['station_id'].tolist()
-    if soil_moisture_stations:
-        demo_station = soil_moisture_stations[0]
-
-        # Get live prediction data
-        live_data = collector.get_live_prediction_data(
-            target_station_id=demo_station,
-            n_nearest=4
-        )
-
-        print(f"\nTarget station: {live_data['target_station_id']}")
-        print(f"Target coordinates: {live_data['target_coordinates']}")
-        print(f"Nearby stations: {len(live_data['nearby_stations'])}")
-        print(f"\nTarget station data:")
-        print(live_data['target_data'].head() if not live_data['target_data'].empty else "No data")
-        print(f"\nNearby stations data:")
-        print(live_data['nearby_data'].head() if not live_data['nearby_data'].empty else "No data")
-
-    # Step 6: Create PyTorch Dataset
-    print("\n" + "=" * 60)
-    print("STEP 6: Creating PyTorch Dataset")
-    print("=" * 60)
-
-    # Get filtered parameters
     _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=0.25)
 
     if not filtered_params:
@@ -1898,26 +1970,64 @@ def buildDataset():
 
     print(f"\nUsing {len(filtered_params)} filtered parameters...")
 
+    # Step 5: Build dense feature arrays (FAST!)
+    print("\n" + "=" * 60)
+    print("STEP 5: Building dense feature arrays")
+    print("=" * 60)
+
+    features_array, mask_array, station_ids_list, date_index = build_dense_feature_array(
+        timeseries_df=timeseries_df,
+        stations_df=stations_df,
+        feature_params=filtered_params,
+        soil_moisture_param="HS_CV_AVG_-0.2m",
+        missing_value=-1000.0
+    )
+
+    # Save dense arrays
+    dense_array_path = collector.data_dir / "dense_features.npz"
+    print(f"\nSaving dense arrays to {dense_array_path}...")
+    all_params = filtered_params + ["HS_CV_AVG_-0.2m"]
+    np.savez_compressed(
+        dense_array_path,
+        features=features_array,
+        masks=mask_array,
+        station_ids=np.array(station_ids_list, dtype=np.int32),
+        dates=date_index.values.astype('datetime64[ns]').astype(np.int64),
+        feature_params=np.array(all_params, dtype='U50')
+    )
+    print(f"✓ Saved! File size: {dense_array_path.stat().st_size / 1e6:.1f} MB")
+
+    # Step 6: Create PyTorch Dataset with dense arrays
+    print("\n" + "=" * 60)
+    print("STEP 6: Creating PyTorch Dataset with dense arrays")
+    print("=" * 60)
+
     dataset = SoilMoistureSequenceDataset(
         timeseries=str(collector.timeseries_file),
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),
-        seq_length=64,
+        seq_length=seq_length,
         n_nearest=4,
-        feature_params=filtered_params
+        feature_params=filtered_params,
+        dense_array_path=str(dense_array_path)
     )
 
     print(f"\nFeature names: {dataset.get_feature_names()}")
 
     # Example sample
-    sample = dataset[0]
-    print(f"\nExample sample:")
-    print(f"  Features shape: {sample['features'].shape}")
-    print(f"  Target: {sample['target']}")
-    print(f"  Mask shape: {sample['mask'].shape}")
-    print(f"  Station ID: {sample['target_station_id']}")
+    if len(dataset) > 0:
+        sample = dataset[0]
+        print(f"\nExample sample:")
+        print(f"  Features shape: {sample['features'].shape}")
+        print(f"  Target: {sample['target']}")
+        print(f"  Mask shape: {sample['mask'].shape}")
+        print(f"  Station ID: {sample['target_station_id']}")
 
-    # Precompute and save
+    # Step 7: Precompute and save
+    print("\n" + "=" * 60)
+    print("STEP 7: Precomputing sequences")
+    print("=" * 60)
+
     precomputed_path = collector.data_dir / "precomputed_sequences.npz"
     norm_stats_path = collector.data_dir / "normalization_stats.npz"
 
@@ -1930,9 +2040,9 @@ def buildDataset():
     print(f"✓ Normalization stats saved to: {norm_stats_path}")
     print(f"\nYou can now use loadDataset() for fast loading!")
 
-    # Train/val/test split
+    # Step 8: Train/val/test split
     print("\n" + "=" * 60)
-    print("STEP 7: Creating train/val/test splits")
+    print("STEP 8: Creating train/val/test splits")
     print("=" * 60)
 
     train_ds, val_ds, test_ds = SoilMoistureSequenceDataset.train_val_test_split(
@@ -1940,7 +2050,7 @@ def buildDataset():
         val_stations_ratio=0.15,
         test_stations_ratio=0.0
     )
-    return train_ds,val_ds,test_ds
+    return train_ds, val_ds, test_ds
 
 def precomputeDataset():
     """Precompute dataset sequences and save to disk for fast loading"""
