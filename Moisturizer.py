@@ -1018,57 +1018,59 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         print(f"  Runtime normalization: {self.normalize}")
 
     def _build_sample_index(self):
-        """Build index of valid samples (target_station, end_date) pairs"""
+        """Build index of valid samples (target_station, end_date) pairs - OPTIMIZED"""
         self.sample_index = []
 
         print("Building sample index...")
 
-        for target_id in self.target_stations:
-            # Get all dates for this target station with soil moisture data
-            target_soil_data = self.timeseries_df[
-                (self.timeseries_df['station_id'] == target_id) &
-                (self.timeseries_df['parameter_code'] == self.soil_moisture_param)
-                ]['date'].unique()
+        # Pre-filter soil moisture data once (HUGE SPEEDUP!)
+        soil_moisture_df = self.timeseries_df[
+            self.timeseries_df['parameter_code'] == self.soil_moisture_param
+        ].copy()
+
+        # Build a lookup dict for fast value access
+        soil_moisture_lookup = {}
+        for _, row in soil_moisture_df.iterrows():
+            key = (int(row['station_id']), row['date'])
+            soil_moisture_lookup[key] = float(row['value'])
+
+        # Get all dates per station (vectorized)
+        station_dates = soil_moisture_df.groupby('station_id')['date'].apply(list).to_dict()
+
+        for idx, target_id in enumerate(self.target_stations):
+            if idx % 10 == 0:
+                print(f"  Processing station {idx+1}/{len(self.target_stations)}...")
+
+            # Get dates for this station
+            target_dates = station_dates.get(target_id, [])
+            if not target_dates:
+                continue
 
             # Sort dates
-            target_dates = sorted(target_soil_data)
+            target_dates = sorted(target_dates)
 
-            # For each date, check if we have enough history
+            # Vectorized validation check
             for date in target_dates:
                 # Need seq_length days including this date
                 start_date = date - pd.Timedelta(days=self.seq_length - 1)
 
-                # CRITICAL: Verify that the target value at end_date is valid (not missing/invalid)
-                # Get the actual soil moisture value at this date
-                target_value_at_date = self.timeseries_df[
-                    (self.timeseries_df['station_id'] == target_id) &
-                    (self.timeseries_df['parameter_code'] == self.soil_moisture_param) &
-                    (self.timeseries_df['date'] == date)
-                    ]['value']
+                # Fast lookup of soil moisture value
+                key = (target_id, date)
+                target_val = soil_moisture_lookup.get(key)
 
                 # Skip if no value or if value is invalid marker
-                if target_value_at_date.empty:
+                if target_val is None or target_val == -9999.0 or target_val == self.missing_value or pd.isna(target_val):
                     continue
 
-                target_val = target_value_at_date.iloc[0]
-                if target_val == -9999.0 or target_val == self.missing_value or pd.isna(target_val):
-                    continue
+                # Simplified check - just verify we have enough date range
+                # (we already know soil moisture exists for this date)
+                self.sample_index.append({
+                    'target_station': target_id,
+                    'end_date': date,
+                    'start_date': start_date
+                })
 
-                # Check if we have data for the full sequence
-                date_range = pd.date_range(start=start_date, end=date, freq='D')
-
-                # Check if target has at least one data point in the sequence
-                target_data_in_range = self.timeseries_df[
-                    (self.timeseries_df['station_id'] == target_id) &
-                    (self.timeseries_df['date'].isin(date_range))
-                    ]
-
-                if not target_data_in_range.empty:
-                    self.sample_index.append({
-                        'target_station': target_id,
-                        'end_date': date,
-                        'start_date': start_date
-                    })
+        print(f"  Built {len(self.sample_index)} valid samples")
 
     def _get_nearest_stations(self, target_station_id: int) -> List[Dict]:
         """Get n nearest stations with soil moisture for a target station"""
@@ -1881,24 +1883,22 @@ def build_dense_feature_array(
     param_to_idx = {param: idx for idx, param in enumerate(all_params)}
 
     print("\nFilling array with data...")
-    # Use numpy arrays for fast iteration
-    station_ids_np = timeseries_df['station_id'].values
-    dates_np = timeseries_df['date'].values
-    param_codes_np = timeseries_df['parameter_code'].values
-    values_np = timeseries_df['value'].values
+    # Fill the array - process parameter by parameter (more efficient and avoids type issues)
+    for param_idx, param in enumerate(all_params):
+        if param_idx % 5 == 0:
+            print(f"  Processing parameter {param_idx+1}/{num_features}: {param}")
 
-    # Fill the array - vectorized approach
-    for i in range(len(timeseries_df)):
-        if i % 100000 == 0:
-            print(f"  Processing row {i:,}/{len(timeseries_df):,} ({100*i/len(timeseries_df):.1f}%)")
+        # Get all data for this parameter at once
+        param_data = timeseries_df[timeseries_df['parameter_code'] == param]
 
-        station_idx = station_to_idx.get(station_ids_np[i])
-        date_idx = date_to_idx.get(dates_np[i])
-        param_idx = param_to_idx.get(param_codes_np[i])
+        # Fill in bulk using iterrows (ensures type compatibility)
+        for _, row in param_data.iterrows():
+            station_idx = station_to_idx.get(row['station_id'])
+            date_idx = date_to_idx.get(row['date'])
 
-        if station_idx is not None and date_idx is not None and param_idx is not None:
-            features_array[station_idx, date_idx, param_idx] = values_np[i]
-            mask_array[station_idx, date_idx, param_idx] = 1.0
+            if station_idx is not None and date_idx is not None:
+                features_array[station_idx, date_idx, param_idx] = row['value']
+                mask_array[station_idx, date_idx, param_idx] = 1.0
 
     print(f"\n✓ Dense array built!")
     print(f"  Valid data points: {mask_array.sum():,.0f}")
@@ -1908,13 +1908,14 @@ def build_dense_feature_array(
     return features_array, mask_array, station_ids, date_index
 
 
-def buildDataset(seq_length: int = 64, days: int = 730):
+def buildDataset(seq_length: int = 64, days: int = 3705):
     """
     Build the complete dataset with optimizations
 
     Args:
         seq_length: Number of days in each sequence (default: 64)
-        days: Number of days of historical data to collect (default: 730 = 2 years)
+        days: Number of days of historical data to collect (default: 3705 = ~10 years,
+              maximum range without losing stations with moisture data)
 
     Returns:
         Tuple of (train_dataset, val_dataset, test_dataset)
