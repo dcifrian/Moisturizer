@@ -1887,28 +1887,51 @@ def build_dense_feature_array(
     param_to_idx = {str(param): idx for idx, param in enumerate(all_params)}
 
     print("\nFilling array with data...")
-    # Fill the array - process parameter by parameter (more efficient and avoids type issues)
+    # Vectorized approach - MUCH faster than iterrows()
     from tqdm import tqdm
-    filled_count = 0
-    for param_idx, param in tqdm(enumerate(all_params), total=num_features, desc="Processing parameters"):
-        # Get all data for this parameter at once
-        param_data = timeseries_df[timeseries_df['parameter_code'] == param]
 
-        # Fill in bulk using iterrows (ensures type compatibility)
-        for _, row in param_data.iterrows():
-            station_idx = station_to_idx.get(int(row['station_id']))
-            # Convert date string to Timestamp for lookup
-            date_val = pd.to_datetime(row['date']) if isinstance(row['date'], str) else row['date']
-            date_idx = date_to_idx.get(date_val)
+    # Pre-filter to only include stations we care about (soil moisture stations)
+    timeseries_filtered = timeseries_df[
+        timeseries_df['station_id'].isin(station_ids)
+    ].copy()
 
-            # Only fill if station is in our optimized subset (soil moisture stations only)
-            if station_idx is not None and date_idx is not None:
-                features_array[station_idx, date_idx, param_idx] = row['value']
-                mask_array[station_idx, date_idx, param_idx] = 1.0
-                filled_count += 1
+    print(f"  Filtered to {len(timeseries_filtered):,} rows for {num_stations} stations")
+
+    # Map station_id, date, and parameter_code to indices using pandas .map() (fast!)
+    # This is vectorized C code, much faster than Python loops
+    timeseries_filtered['station_idx'] = timeseries_filtered['station_id'].map(station_to_idx)
+    timeseries_filtered['date_idx'] = timeseries_filtered['date'].map(date_to_idx)
+    timeseries_filtered['param_idx'] = timeseries_filtered['parameter_code'].map(param_to_idx)
+
+    # Drop rows where mapping failed (station/date/param not in our arrays)
+    before_drop = len(timeseries_filtered)
+    timeseries_filtered = timeseries_filtered.dropna(subset=['station_idx', 'date_idx', 'param_idx'])
+    after_drop = len(timeseries_filtered)
+    dropped = before_drop - after_drop
+
+    if dropped > 0:
+        print(f"  Dropped {dropped:,} rows with missing indices (expected for non-soil-moisture stations)")
+
+    # Convert index columns to integers
+    timeseries_filtered['station_idx'] = timeseries_filtered['station_idx'].astype(np.int32)
+    timeseries_filtered['date_idx'] = timeseries_filtered['date_idx'].astype(np.int32)
+    timeseries_filtered['param_idx'] = timeseries_filtered['param_idx'].astype(np.int32)
+
+    # Extract numpy arrays for vectorized assignment
+    station_indices = timeseries_filtered['station_idx'].values
+    date_indices = timeseries_filtered['date_idx'].values
+    param_indices = timeseries_filtered['param_idx'].values
+    values = timeseries_filtered['value'].values.astype(np.float32)
+
+    print(f"  Assigning {len(values):,} values using vectorized numpy indexing...")
+
+    # VECTORIZED ASSIGNMENT - this is the magic that makes it fast!
+    # Instead of looping through millions of rows, we do one bulk assignment
+    features_array[station_indices, date_indices, param_indices] = values
+    mask_array[station_indices, date_indices, param_indices] = 1.0
 
     print(f"\n✓ Dense array built!")
-    print(f"  Filled {filled_count:,} data points")
+    print(f"  Filled {len(values):,} data points")
     print(f"  Valid data: {mask_array.sum():,.0f} ({mask_array.sum() / mask_array.size * 100:.1f}% coverage)")
     print(f"  Missing data: {(mask_array == 0).sum():,.0f}")
 
