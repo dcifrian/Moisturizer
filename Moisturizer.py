@@ -1857,7 +1857,8 @@ def build_dense_feature_array(
     # Get all unique dates and stations
     all_dates = sorted(timeseries_df['date'].unique())
     date_index = pd.DatetimeIndex(all_dates)
-    station_ids = sorted(stations_df['station_id'].unique())
+    # Only include stations with soil moisture (they are both targets AND neighbors)
+    station_ids = sorted(stations_df[stations_df['has_soil_moisture']]['station_id'].unique())
 
     # Build combined parameter list: features + soil moisture
     all_params = feature_params + [soil_moisture_param]
@@ -1866,8 +1867,9 @@ def build_dense_feature_array(
     num_dates = len(date_index)
     num_features = len(all_params)
 
-    print(f"\nArray dimensions:")
-    print(f"  Stations: {num_stations}")
+    total_stations = len(stations_df)
+    print(f"\nArray dimensions (optimized - only soil moisture stations):")
+    print(f"  Stations: {num_stations} (out of {total_stations} total - {100 * (1 - num_stations/total_stations):.1f}% reduction)")
     print(f"  Dates: {num_dates}")
     print(f"  Features: {len(feature_params)} weather params + 1 soil moisture = {num_features} total")
     print(f"  Total elements: {num_stations * num_dates * num_features:,}")
@@ -1885,22 +1887,12 @@ def build_dense_feature_array(
     print("\nFilling array with data...")
     # Fill the array - process parameter by parameter (more efficient and avoids type issues)
     filled_count = 0
-    lookup_failures = 0
     for param_idx, param in enumerate(all_params):
         if param_idx % 5 == 0:
             print(f"  Processing parameter {param_idx+1}/{num_features}: {param}")
 
         # Get all data for this parameter at once
         param_data = timeseries_df[timeseries_df['parameter_code'] == param]
-
-        # Debug first parameter to check types
-        if param_idx == 0 and len(param_data) > 0:
-            first_row = param_data.iloc[0]
-            print(f"    DEBUG: First row station_id type: {type(first_row['station_id'])}, value: {first_row['station_id']}")
-            print(f"    DEBUG: First row date type: {type(first_row['date'])}, value: {first_row['date']}")
-            print(f"    DEBUG: station_to_idx first key type: {type(list(station_to_idx.keys())[0])}")
-            print(f"    DEBUG: date_to_idx first key type: {type(list(date_to_idx.keys())[0])}")
-            print(f"    DEBUG: Total rows for this param: {len(param_data)}")
 
         # Fill in bulk using iterrows (ensures type compatibility)
         for _, row in param_data.iterrows():
@@ -1909,31 +1901,16 @@ def build_dense_feature_array(
             date_val = pd.to_datetime(row['date']) if isinstance(row['date'], str) else row['date']
             date_idx = date_to_idx.get(date_val)
 
+            # Only fill if station is in our optimized subset (soil moisture stations only)
             if station_idx is not None and date_idx is not None:
                 features_array[station_idx, date_idx, param_idx] = row['value']
                 mask_array[station_idx, date_idx, param_idx] = 1.0
                 filled_count += 1
-            else:
-                lookup_failures += 1
-                if lookup_failures <= 5:  # Only print first few failures
-                    print(f"    DEBUG: Lookup failed - station_idx={station_idx}, date_idx={date_idx}")
 
     print(f"\n✓ Dense array built!")
-    print(f"  Filled {filled_count:,} data points successfully")
-    print(f"  Lookup failures: {lookup_failures:,}")
-    print(f"  Valid data points: {mask_array.sum():,.0f}")
-    print(f"  Missing data points: {(mask_array == 0).sum():,.0f}")
-    print(f"  Overall coverage: {mask_array.sum() / mask_array.size * 100:.1f}% (all {num_stations} stations)")
-
-    # Report coverage for soil moisture stations specifically (the ones that matter for training)
-    if 'has_soil_moisture' in stations_df.columns:
-        soil_moisture_stations = stations_df[stations_df['has_soil_moisture']]['station_id'].tolist()
-        soil_station_indices = [station_to_idx[sid] for sid in soil_moisture_stations if sid in station_to_idx]
-        if soil_station_indices:
-            soil_mask = mask_array[soil_station_indices, :, :]
-            soil_total = soil_mask.size
-            soil_valid = soil_mask.sum()
-            print(f"  Coverage for soil moisture stations: {soil_valid / soil_total * 100:.1f}% ({len(soil_station_indices)} stations)")
+    print(f"  Filled {filled_count:,} data points")
+    print(f"  Valid data: {mask_array.sum():,.0f} ({mask_array.sum() / mask_array.size * 100:.1f}% coverage)")
+    print(f"  Missing data: {(mask_array == 0).sum():,.0f}")
 
     return features_array, mask_array, station_ids, date_index
 
