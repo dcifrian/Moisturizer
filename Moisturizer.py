@@ -1958,12 +1958,41 @@ def buildDataset(seq_length: int = 64, days: int = 3705):
         chunk_days=30
     )
 
-    # Step 4: Get filtered parameters
+    # Step 4: Analyze parameter coverage from timeseries
     print("\n" + "=" * 60)
     print("STEP 4: Analyzing parameter coverage")
     print("=" * 60)
 
-    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=0.25)
+    # Analyze directly from timeseries_df (ml_ready_dataset doesn't exist yet)
+    soil_moisture_stations = stations_df[stations_df['has_soil_moisture']]['station_id'].tolist()
+    all_params = timeseries_df['parameter_code'].unique()
+    soil_moisture_param = "HS_CV_AVG_-0.2m"
+    coverage_threshold = 0.25
+    filtered_params = []
+
+    print(f"\nAnalyzing {len(all_params)} parameters on {len(soil_moisture_stations)} stations with soil moisture...")
+    print(f"Coverage threshold: {coverage_threshold * 100:.0f}%\n")
+
+    for param in all_params:
+        if param == soil_moisture_param:
+            continue  # Skip soil moisture - it's the target
+
+        # Count how many soil moisture stations have this parameter
+        param_data = timeseries_df[
+            (timeseries_df['parameter_code'] == param) &
+            (timeseries_df['station_id'].isin(soil_moisture_stations))
+        ]
+
+        stations_with_param = param_data['station_id'].nunique()
+        coverage = stations_with_param / len(soil_moisture_stations) if soil_moisture_stations else 0
+
+        status = "✓" if coverage >= coverage_threshold else "✗"
+        print(f"{status} {param:30s}: {coverage*100:5.1f}% ({stations_with_param}/{len(soil_moisture_stations)} stations)")
+
+        if coverage >= coverage_threshold:
+            filtered_params.append(param)
+
+    print(f"\n✓ Selected {len(filtered_params)} parameters above {coverage_threshold*100:.0f}% threshold")
 
     if not filtered_params:
         print("\n✗ No parameters passed the threshold!")
