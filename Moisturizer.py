@@ -1905,7 +1905,9 @@ def build_dense_feature_array(
         # Fill in bulk using iterrows (ensures type compatibility)
         for _, row in param_data.iterrows():
             station_idx = station_to_idx.get(int(row['station_id']))
-            date_idx = date_to_idx.get(row['date'])
+            # Convert date string to Timestamp for lookup
+            date_val = pd.to_datetime(row['date']) if isinstance(row['date'], str) else row['date']
+            date_idx = date_to_idx.get(date_val)
 
             if station_idx is not None and date_idx is not None:
                 features_array[station_idx, date_idx, param_idx] = row['value']
