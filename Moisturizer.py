@@ -1023,6 +1023,10 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
         print("Building sample index...")
 
+        # Get the first available date in the dataset (needed for history check)
+        first_available_date = self.timeseries_df['date'].min()
+        print(f"  First available date: {first_available_date.date()}")
+
         # Pre-filter soil moisture data once (HUGE SPEEDUP!)
         soil_moisture_df = self.timeseries_df[
             self.timeseries_df['parameter_code'] == self.soil_moisture_param
@@ -1054,6 +1058,10 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 # Need seq_length days including this date
                 start_date = date - pd.Timedelta(days=self.seq_length - 1)
 
+                # Skip if we don't have enough historical data
+                if start_date < first_available_date:
+                    continue
+
                 # Fast lookup of soil moisture value
                 key = (target_id, date)
                 target_val = soil_moisture_lookup.get(key)
@@ -1062,8 +1070,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 if target_val is None or target_val == -9999.0 or target_val == self.missing_value or pd.isna(target_val):
                     continue
 
-                # Simplified check - just verify we have enough date range
-                # (we already know soil moisture exists for this date)
+                # This sample has valid target and enough historical data
                 self.sample_index.append({
                     'target_station': target_id,
                     'end_date': date,
