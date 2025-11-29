@@ -1407,11 +1407,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         all_masks[0] = mask0.numpy()
 
         # Precompute all samples
+        from tqdm import tqdm
         total = len(self.sample_index)
-        for idx in range(1, total):
-            if idx % 1000 == 0 or idx == total - 1:
-                print(f"  Progress: {idx}/{total} ({100*idx/total:.1f}%)")
-
+        for idx in tqdm(range(1, total), desc="Building sequences", initial=1, total=total):
             sample = self.sample_index[idx]
             features, target, mask = build_method(
                 sample['target_station'],
@@ -1436,10 +1434,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
             print(f"Normalizing all data...")
             # Normalize all samples in-place
-            for idx in range(len(self.sample_index)):
-                if idx % 1000 == 0 or idx == total - 1:
-                    print(f"  Normalizing: {idx}/{total} ({100*idx/total:.1f}%)")
-
+            for idx in tqdm(range(len(self.sample_index)), desc="Normalizing data"):
                 all_features[idx], all_targets[idx] = self._apply_normalization(
                     all_features[idx],
                     all_targets[idx],
@@ -1893,11 +1888,9 @@ def build_dense_feature_array(
 
     print("\nFilling array with data...")
     # Fill the array - process parameter by parameter (more efficient and avoids type issues)
+    from tqdm import tqdm
     filled_count = 0
-    for param_idx, param in enumerate(all_params):
-        if param_idx % 5 == 0:
-            print(f"  Processing parameter {param_idx+1}/{num_features}: {param}")
-
+    for param_idx, param in tqdm(enumerate(all_params), total=num_features, desc="Processing parameters"):
         # Get all data for this parameter at once
         param_data = timeseries_df[timeseries_df['parameter_code'] == param]
 
