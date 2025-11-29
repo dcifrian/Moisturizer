@@ -40,6 +40,10 @@ for param in sorted(all_params):
     if coverage >= coverage_threshold:
         filtered_params_method1.append(param)
 
+# Add coordinate features - all stations have these (matching buildDataset)
+coordinate_features = ['altitude', 'utmx', 'utmy']
+filtered_params_method1.extend(coordinate_features)
+
 print(f"Found {len(filtered_params_method1)} parameters")
 print(f"Parameters: {sorted(filtered_params_method1)}")
 

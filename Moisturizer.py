@@ -1862,6 +1862,10 @@ def build_dense_feature_array(
     # Only include stations with soil moisture (they are both targets AND neighbors)
     station_ids = sorted(stations_df[stations_df['has_soil_moisture']]['station_id'].unique())
 
+    # Separate coordinate features from timeseries parameters
+    coordinate_features = ['altitude', 'utmx', 'utmy']
+    timeseries_params = [p for p in feature_params if p not in coordinate_features]
+
     # Build combined parameter list: features + soil moisture
     all_params = feature_params + [soil_moisture_param]
 
@@ -1873,7 +1877,7 @@ def build_dense_feature_array(
     print(f"\nArray dimensions (optimized - only soil moisture stations):")
     print(f"  Stations: {num_stations} (out of {total_stations} total - {100 * (1 - num_stations/total_stations):.1f}% reduction)")
     print(f"  Dates: {num_dates}")
-    print(f"  Features: {len(feature_params)} weather params + 1 soil moisture = {num_features} total")
+    print(f"  Features: {len(timeseries_params)} weather params + {len(coordinate_features)} coordinates + 1 soil moisture = {num_features} total")
     print(f"  Total elements: {num_stations * num_dates * num_features:,}")
     print(f"  Memory: ~{num_stations * num_dates * num_features * 4 / 1e6:.1f} MB")
 
@@ -1887,6 +1891,29 @@ def build_dense_feature_array(
     param_to_idx = {str(param): idx for idx, param in enumerate(all_params)}
 
     print("\nFilling array with data...")
+
+    # Fill coordinate features (static - same for all dates)
+    if coordinate_features:
+        print(f"  Filling {len(coordinate_features)} coordinate features (static)...")
+        stations_with_coords = stations_df[stations_df['station_id'].isin(station_ids)].copy()
+
+        for coord_feat in coordinate_features:
+            if coord_feat in all_params and coord_feat in stations_with_coords.columns:
+                coord_idx = all_params.index(coord_feat)
+
+                # Fill for each station
+                for _, station_row in stations_with_coords.iterrows():
+                    sid = int(station_row['station_id'])
+                    if sid in station_to_idx:
+                        station_idx = station_to_idx[sid]
+                        coord_value = station_row[coord_feat]
+
+                        if pd.notna(coord_value):
+                            # Fill for ALL dates (static feature)
+                            features_array[station_idx, :, coord_idx] = float(coord_value)
+                            mask_array[station_idx, :, coord_idx] = 1.0
+
+        print(f"    ✓ Filled coordinate features")
     # Vectorized approach - MUCH faster than iterrows()
     from tqdm import tqdm
 
@@ -2023,6 +2050,11 @@ def buildDataset(seq_length: int = 64, days: int = 3705):
             filtered_params.append(param)
 
     print(f"\n✓ Selected {len(filtered_params)} parameters above {coverage_threshold*100:.0f}% threshold")
+
+    # Add coordinate features - all stations have these (static features)
+    coordinate_features = ['altitude', 'utmx', 'utmy']
+    filtered_params.extend(coordinate_features)
+    print(f"✓ Added {len(coordinate_features)} coordinate features: {coordinate_features}")
 
     if not filtered_params:
         print("\n✗ No parameters passed the threshold!")
