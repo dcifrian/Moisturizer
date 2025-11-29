@@ -1877,13 +1877,15 @@ def build_dense_feature_array(
     features_array = np.full((num_stations, num_dates, num_features), missing_value, dtype=np.float32)
     mask_array = np.zeros((num_stations, num_dates, num_features), dtype=np.float32)
 
-    # Create mapping for fast indexing
-    station_to_idx = {sid: idx for idx, sid in enumerate(station_ids)}
+    # Create mapping for fast indexing - ensure consistent types
+    station_to_idx = {int(sid): idx for idx, sid in enumerate(station_ids)}
     date_to_idx = {date: idx for idx, date in enumerate(date_index)}
-    param_to_idx = {param: idx for idx, param in enumerate(all_params)}
+    param_to_idx = {str(param): idx for idx, param in enumerate(all_params)}
 
     print("\nFilling array with data...")
     # Fill the array - process parameter by parameter (more efficient and avoids type issues)
+    filled_count = 0
+    lookup_failures = 0
     for param_idx, param in enumerate(all_params):
         if param_idx % 5 == 0:
             print(f"  Processing parameter {param_idx+1}/{num_features}: {param}")
@@ -1891,16 +1893,32 @@ def build_dense_feature_array(
         # Get all data for this parameter at once
         param_data = timeseries_df[timeseries_df['parameter_code'] == param]
 
+        # Debug first parameter to check types
+        if param_idx == 0 and len(param_data) > 0:
+            first_row = param_data.iloc[0]
+            print(f"    DEBUG: First row station_id type: {type(first_row['station_id'])}, value: {first_row['station_id']}")
+            print(f"    DEBUG: First row date type: {type(first_row['date'])}, value: {first_row['date']}")
+            print(f"    DEBUG: station_to_idx first key type: {type(list(station_to_idx.keys())[0])}")
+            print(f"    DEBUG: date_to_idx first key type: {type(list(date_to_idx.keys())[0])}")
+            print(f"    DEBUG: Total rows for this param: {len(param_data)}")
+
         # Fill in bulk using iterrows (ensures type compatibility)
         for _, row in param_data.iterrows():
-            station_idx = station_to_idx.get(row['station_id'])
+            station_idx = station_to_idx.get(int(row['station_id']))
             date_idx = date_to_idx.get(row['date'])
 
             if station_idx is not None and date_idx is not None:
                 features_array[station_idx, date_idx, param_idx] = row['value']
                 mask_array[station_idx, date_idx, param_idx] = 1.0
+                filled_count += 1
+            else:
+                lookup_failures += 1
+                if lookup_failures <= 5:  # Only print first few failures
+                    print(f"    DEBUG: Lookup failed - station_idx={station_idx}, date_idx={date_idx}")
 
     print(f"\n✓ Dense array built!")
+    print(f"  Filled {filled_count:,} data points successfully")
+    print(f"  Lookup failures: {lookup_failures:,}")
     print(f"  Valid data points: {mask_array.sum():,.0f}")
     print(f"  Missing data points: {(mask_array == 0).sum():,.0f}")
     print(f"  Overall coverage: {mask_array.sum() / mask_array.size * 100:.1f}% (all {num_stations} stations)")
