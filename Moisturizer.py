@@ -1903,7 +1903,17 @@ def build_dense_feature_array(
     print(f"\n✓ Dense array built!")
     print(f"  Valid data points: {mask_array.sum():,.0f}")
     print(f"  Missing data points: {(mask_array == 0).sum():,.0f}")
-    print(f"  Coverage: {mask_array.sum() / mask_array.size * 100:.1f}%")
+    print(f"  Overall coverage: {mask_array.sum() / mask_array.size * 100:.1f}% (all {num_stations} stations)")
+
+    # Report coverage for soil moisture stations specifically (the ones that matter for training)
+    if 'has_soil_moisture' in stations_df.columns:
+        soil_moisture_stations = stations_df[stations_df['has_soil_moisture']]['station_id'].tolist()
+        soil_station_indices = [station_to_idx[sid] for sid in soil_moisture_stations if sid in station_to_idx]
+        if soil_station_indices:
+            soil_mask = mask_array[soil_station_indices, :, :]
+            soil_total = soil_mask.size
+            soil_valid = soil_mask.sum()
+            print(f"  Coverage for soil moisture stations: {soil_valid / soil_total * 100:.1f}% ({len(soil_station_indices)} stations)")
 
     return features_array, mask_array, station_ids, date_index
 
