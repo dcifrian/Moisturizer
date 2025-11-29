@@ -556,81 +556,145 @@ class MeteoGaliciaCollector:
 
     def analyze_parameter_coverage(
             self,
+            timeseries_df: Optional[pd.DataFrame] = None,
+            stations_df: Optional[pd.DataFrame] = None,
             ml_dataset_file: Optional[str] = None,
             coverage_threshold: float = 0.25,
-            soil_moisture_param: str = "HS_CV_AVG_-0.2m"
+            soil_moisture_param: str = "HS_CV_AVG_-0.2m",
+            add_coordinate_features: bool = True
     ) -> Tuple[Dict[str, float], List[str]]:
         """
-        Analyze parameter coverage in the ML-ready dataset and return parameters above threshold
+        Analyze parameter coverage and return parameters above threshold.
+
+        Can analyze from either:
+        1. timeseries_df + stations_df (for buildDataset - before ml_ready_dataset exists)
+        2. ml_ready_dataset.csv (existing functionality)
 
         Args:
-            ml_dataset_file: Path to ml_ready_dataset.csv (if None, uses default location)
+            timeseries_df: Timeseries data (for Method 1). If provided, stations_df is required.
+            stations_df: Stations data (for Method 1)
+            ml_dataset_file: Path to ml_ready_dataset.csv (for Method 2)
             coverage_threshold: Minimum fraction of stations that must have data (0.0 to 1.0)
             soil_moisture_param: Soil moisture parameter to exclude (it's the target, not a feature!)
+            add_coordinate_features: If True, add altitude/utmx/utmy to filtered params
 
         Returns:
             Tuple of (coverage_dict, filtered_params):
             - coverage_dict: Dictionary mapping parameter_code to coverage percentage
             - filtered_params: List of parameters that meet the coverage threshold (excluding soil moisture)
         """
-        if ml_dataset_file is None:
-            ml_dataset_file = self.data_dir / "ml_ready_dataset.csv"
+        # Method 1: Analyze from timeseries_df (for buildDataset - before ml_ready_dataset exists)
+        if timeseries_df is not None:
+            if stations_df is None:
+                raise ValueError("stations_df is required when analyzing from timeseries_df")
 
-        print(f"\nAnalyzing parameter coverage in {ml_dataset_file}...")
+            print(f"\nAnalyzing parameter coverage from timeseries data...")
 
-        # Load ML-ready dataset
-        ml_df = pd.read_csv(ml_dataset_file)
+            # Get stations with soil moisture
+            soil_moisture_stations = stations_df[stations_df['has_soil_moisture']]['station_id'].tolist()
+            all_params = timeseries_df['parameter_code'].unique()
 
-        # Get all parameter columns (those starting with 'target_' or 'nearby')
-        param_columns = [col for col in ml_df.columns if col.startswith('target_') or col.startswith('nearby')]
+            print(f"Analyzing {len(all_params)} parameters on {len(soil_moisture_stations)} stations with soil moisture...")
+            print(f"Coverage threshold: {coverage_threshold * 100:.0f}%")
+            print(f"\nParameter coverage:")
+            print("-" * 70)
 
-        # Extract unique parameter names
-        # For 'target_PARAM' or 'nearby1_PARAM', extract 'PARAM'
-        param_names = set()
-        for col in param_columns:
-            if col.startswith('target_'):
-                param_name = col.replace('target_', '')
-                param_names.add(param_name)
-            elif '_' in col:  # nearby1_PARAM format
-                parts = col.split('_', 1)
-                if len(parts) == 2:
-                    param_name = parts[1]
-                    # Skip distance and has_soil_moisture columns
-                    if param_name not in ['distance', 'has_soil_moisture', 'id']:
-                        param_names.add(param_name)
+            coverage = {}
+            filtered_params = []
 
-        # Calculate coverage for each parameter
-        coverage = {}
-        total_rows = len(ml_df)
+            for param in all_params:
+                if param == soil_moisture_param:
+                    continue  # Skip soil moisture - it's the target
 
-        print(f"\nTotal stations in dataset: {total_rows}")
-        print(f"Coverage threshold: {coverage_threshold * 100:.0f}%")
-        print(f"\nParameter coverage:")
-        print("-" * 70)
+                # Count how many soil moisture stations have this parameter
+                param_data = timeseries_df[
+                    (timeseries_df['parameter_code'] == param) &
+                    (timeseries_df['station_id'].isin(soil_moisture_stations))
+                ]
 
-        for param in sorted(param_names):
-            # Count rows where this parameter has non-null data in target column
-            target_col = f'target_{param}'
-            if target_col in ml_df.columns:
-                non_null_count = ml_df[target_col].notna().sum()
-                coverage_pct = non_null_count / total_rows if total_rows > 0 else 0
+                stations_with_param = param_data['station_id'].nunique()
+                coverage_pct = stations_with_param / len(soil_moisture_stations) if soil_moisture_stations else 0
                 coverage[param] = coverage_pct
+
                 status = "✓" if coverage_pct >= coverage_threshold else "✗"
-                print(f"{status} {param:25s}: {coverage_pct*100:5.1f}% ({non_null_count}/{total_rows} stations)")
+                print(f"{status} {param:30s}: {coverage_pct*100:5.1f}% ({stations_with_param}/{len(soil_moisture_stations)} stations)")
 
-        # Filter parameters that meet threshold (excluding soil moisture - it's the target!)
-        filtered_params = [
-            param for param, cov in coverage.items()
-            if cov >= coverage_threshold and param != soil_moisture_param
-        ]
+                if coverage_pct >= coverage_threshold:
+                    filtered_params.append(param)
 
-        print("-" * 70)
-        print(f"\nParameters passing {coverage_threshold*100:.0f}% threshold: {len(filtered_params)}/{len(param_names)}")
-        if soil_moisture_param in coverage:
-            print(f"  (Excluded {soil_moisture_param} - it's the target variable)")
-        print(f"Filtered parameters: {sorted(filtered_params)}")
+            print("-" * 70)
+            print(f"\nParameters passing {coverage_threshold*100:.0f}% threshold: {len(filtered_params)}/{len(all_params)}")
 
-        return coverage, filtered_params
+            # Add coordinate features if requested
+            if add_coordinate_features:
+                coordinate_features = ['altitude', 'utmx', 'utmy']
+                filtered_params.extend(coordinate_features)
+                print(f"✓ Added {len(coordinate_features)} coordinate features: {coordinate_features}")
+
+            print(f"\nTotal filtered parameters: {len(filtered_params)}")
+
+            return coverage, filtered_params
+
+        # Method 2: Analyze from ml_ready_dataset.csv (existing functionality)
+        else:
+            if ml_dataset_file is None:
+                ml_dataset_file = self.data_dir / "ml_ready_dataset.csv"
+
+            print(f"\nAnalyzing parameter coverage in {ml_dataset_file}...")
+
+            # Load ML-ready dataset
+            ml_df = pd.read_csv(ml_dataset_file)
+
+            # Get all parameter columns (those starting with 'target_' or 'nearby')
+            param_columns = [col for col in ml_df.columns if col.startswith('target_') or col.startswith('nearby')]
+
+            # Extract unique parameter names
+            # For 'target_PARAM' or 'nearby1_PARAM', extract 'PARAM'
+            param_names = set()
+            for col in param_columns:
+                if col.startswith('target_'):
+                    param_name = col.replace('target_', '')
+                    param_names.add(param_name)
+                elif '_' in col:  # nearby1_PARAM format
+                    parts = col.split('_', 1)
+                    if len(parts) == 2:
+                        param_name = parts[1]
+                        # Skip distance and has_soil_moisture columns
+                        if param_name not in ['distance', 'has_soil_moisture', 'id']:
+                            param_names.add(param_name)
+
+            # Calculate coverage for each parameter
+            coverage = {}
+            total_rows = len(ml_df)
+
+            print(f"\nTotal stations in dataset: {total_rows}")
+            print(f"Coverage threshold: {coverage_threshold * 100:.0f}%")
+            print(f"\nParameter coverage:")
+            print("-" * 70)
+
+            for param in sorted(param_names):
+                # Count rows where this parameter has non-null data in target column
+                target_col = f'target_{param}'
+                if target_col in ml_df.columns:
+                    non_null_count = ml_df[target_col].notna().sum()
+                    coverage_pct = non_null_count / total_rows if total_rows > 0 else 0
+                    coverage[param] = coverage_pct
+                    status = "✓" if coverage_pct >= coverage_threshold else "✗"
+                    print(f"{status} {param:25s}: {coverage_pct*100:5.1f}% ({non_null_count}/{total_rows} stations)")
+
+            # Filter parameters that meet threshold (excluding soil moisture - it's the target!)
+            filtered_params = [
+                param for param, cov in coverage.items()
+                if cov >= coverage_threshold and param != soil_moisture_param
+            ]
+
+            print("-" * 70)
+            print(f"\nParameters passing {coverage_threshold*100:.0f}% threshold: {len(filtered_params)}/{len(param_names)}")
+            if soil_moisture_param in coverage:
+                print(f"  (Excluded {soil_moisture_param} - it's the target variable)")
+            print(f"Filtered parameters: {sorted(filtered_params)}")
+
+            return coverage, filtered_params
 
     def get_live_prediction_data(
             self,
@@ -931,26 +995,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         else:
             self.target_stations = target_stations
 
-        # Determine feature parameters
-        if feature_params is None:
-            # Use all parameters except soil moisture
-            all_params = self.timeseries_df['parameter_code'].unique()
-            self.feature_params = [p for p in all_params if p != soil_moisture_param]
-        else:
-            self.feature_params = feature_params
-
         # Track if data is already normalized in precomputed file
         self.is_prenormalized = False
-
-        # Check if soil moisture is in feature_params (data leakage!)
-        self.soil_in_features = self.soil_moisture_param in self.feature_params if feature_params else False
-        if self.soil_in_features:
-            print(f"⚠ WARNING: Soil moisture ({self.soil_moisture_param}) found in feature_params!")
-            print(f"  This will be filtered out from target station features to prevent data leakage.")
-            print(f"  Nearby stations will still have soil moisture as context.")
-            self.soil_feature_idx = self.feature_params.index(self.soil_moisture_param)
-        else:
-            self.soil_feature_idx = None
 
         # Load precomputed data if available
         if precomputed_path and os.path.exists(precomputed_path):
@@ -958,6 +1004,39 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             # Use the new loading function that supports both .npy directories and .npz files
             self.precomputed_data = _load_precomputed_data(precomputed_path)
             print(f"  Using memory-mapped arrays (dataset will not be loaded into RAM)")
+
+            # Validate feature_params match precomputed data
+            if 'feature_params' in self.precomputed_data:
+                precomputed_params = self.precomputed_data['feature_params'].tolist()
+                print(f"  Precomputed with {len(precomputed_params)} feature parameters")
+
+                if feature_params is not None:
+                    # User specified feature_params - must match precomputed
+                    if feature_params != precomputed_params:
+                        raise ValueError(
+                            f"Feature parameters mismatch!\n"
+                            f"  Precomputed dataset was built with {len(precomputed_params)} parameters:\n"
+                            f"    {precomputed_params}\n"
+                            f"  But you requested {len(feature_params)} parameters:\n"
+                            f"    {feature_params}\n"
+                            f"  You must either:\n"
+                            f"    1. Use feature_params=None to load with precomputed parameters, or\n"
+                            f"    2. Rebuild the precomputed dataset with the desired parameters"
+                        )
+                    print(f"  ✓ Feature parameters match precomputed dataset")
+                    self.feature_params = feature_params
+                else:
+                    # User didn't specify - use precomputed params
+                    print(f"  Using precomputed feature parameters")
+                    self.feature_params = precomputed_params
+            else:
+                # No feature_params in precomputed data (old format)
+                if feature_params is None:
+                    # Use all parameters except soil moisture
+                    all_params = self.timeseries_df['parameter_code'].unique()
+                    self.feature_params = [p for p in all_params if p != soil_moisture_param]
+                else:
+                    self.feature_params = feature_params
 
             # Check if data is already normalized
             if 'is_normalized' in self.precomputed_data:
@@ -983,9 +1062,27 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             # No index mapping for original dataset (only used in splits)
             self._indices = None
         else:
+            # Determine feature parameters (not using precomputed data)
+            if feature_params is None:
+                # Use all parameters except soil moisture
+                all_params = self.timeseries_df['parameter_code'].unique()
+                self.feature_params = [p for p in all_params if p != soil_moisture_param]
+            else:
+                self.feature_params = feature_params
+
             # Build index of valid samples
             self._build_sample_index()
             self._indices = None
+
+        # Check if soil moisture is in feature_params (data leakage!)
+        self.soil_in_features = self.soil_moisture_param in self.feature_params
+        if self.soil_in_features:
+            print(f"⚠ WARNING: Soil moisture ({self.soil_moisture_param}) found in feature_params!")
+            print(f"  This will be filtered out from target station features to prevent data leakage.")
+            print(f"  Nearby stations will still have soil moisture as context.")
+            self.soil_feature_idx = self.feature_params.index(self.soil_moisture_param)
+        else:
+            self.soil_feature_idx = None
 
         # Load normalization statistics (only needed for reference or if not pre-normalized)
         if normalize and not self.is_prenormalized:
@@ -1471,6 +1568,10 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         np.save(output_dir / 'end_dates.npy', end_dates)
         np.save(output_dir / 'start_dates.npy', start_dates)
         np.save(output_dir / 'is_normalized.npy', np.array([is_normalized], dtype=bool))
+
+        # Save feature_params so we can validate when loading
+        if self.feature_params is not None:
+            np.save(output_dir / 'feature_params.npy', np.array(self.feature_params, dtype='U50'))
 
         print(f"  Saved {len(self.sample_index)} sequences to {output_dir}/")
         print(f"  Shape: features={all_features.shape}, targets={all_targets.shape}")
@@ -2019,41 +2120,14 @@ def buildDataset(seq_length: int = 64, days: int = 3705):
     print("STEP 4: Analyzing parameter coverage")
     print("=" * 60)
 
-    # Analyze directly from timeseries_df (ml_ready_dataset doesn't exist yet)
-    soil_moisture_stations = stations_df[stations_df['has_soil_moisture']]['station_id'].tolist()
-    all_params = timeseries_df['parameter_code'].unique()
-    soil_moisture_param = "HS_CV_AVG_-0.2m"
-    coverage_threshold = 0.25
-    filtered_params = []
-
-    print(f"\nAnalyzing {len(all_params)} parameters on {len(soil_moisture_stations)} stations with soil moisture...")
-    print(f"Coverage threshold: {coverage_threshold * 100:.0f}%\n")
-
-    for param in all_params:
-        if param == soil_moisture_param:
-            continue  # Skip soil moisture - it's the target
-
-        # Count how many soil moisture stations have this parameter
-        param_data = timeseries_df[
-            (timeseries_df['parameter_code'] == param) &
-            (timeseries_df['station_id'].isin(soil_moisture_stations))
-        ]
-
-        stations_with_param = param_data['station_id'].nunique()
-        coverage = stations_with_param / len(soil_moisture_stations) if soil_moisture_stations else 0
-
-        status = "✓" if coverage >= coverage_threshold else "✗"
-        print(f"{status} {param:30s}: {coverage*100:5.1f}% ({stations_with_param}/{len(soil_moisture_stations)} stations)")
-
-        if coverage >= coverage_threshold:
-            filtered_params.append(param)
-
-    print(f"\n✓ Selected {len(filtered_params)} parameters above {coverage_threshold*100:.0f}% threshold")
-
-    # Add coordinate features - all stations have these (static features)
-    coordinate_features = ['altitude', 'utmx', 'utmy']
-    filtered_params.extend(coordinate_features)
-    print(f"✓ Added {len(coordinate_features)} coordinate features: {coordinate_features}")
+    # Use analyze_parameter_coverage() method to get filtered parameters
+    coverage_dict, filtered_params = collector.analyze_parameter_coverage(
+        timeseries_df=timeseries_df,
+        stations_df=stations_df,
+        coverage_threshold=0.25,
+        soil_moisture_param="HS_CV_AVG_-0.2m",
+        add_coordinate_features=True
+    )
 
     if not filtered_params:
         print("\n✗ No parameters passed the threshold!")
