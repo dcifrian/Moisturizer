@@ -772,44 +772,40 @@ def _decompress_npz_if_needed(npz_path: str) -> str:
 
 def _load_precomputed_data(precomputed_path: str):
     """
-    Load precomputed data with true memory-mapping support.
+    Load precomputed data from directory of .npy files with true memory-mapping.
 
-    Supports two formats:
-    1. Directory of .npy files (RECOMMENDED - true memory-mapping)
-    2. .npz file (fallback - will warn about memory issues)
+    Args:
+        precomputed_path: Path to directory containing features.npy, targets.npy, etc.
 
-    Returns dict-like object with array access.
+    Returns dict with memory-mapped array access.
     """
     precomputed_path = Path(precomputed_path)
 
-    # Check if it's a directory of .npy files
-    if precomputed_path.is_dir():
-        print(f"  Loading from directory of .npy files (true memory-mapping)")
-        # Load each .npy file individually with mmap_mode
-        npy_files = list(precomputed_path.glob("*.npy"))
-        if not npy_files:
-            raise ValueError(f"No .npy files found in {precomputed_path}")
+    # Must be a directory of .npy files
+    if not precomputed_path.is_dir():
+        raise ValueError(f"Precomputed path must be a directory: {precomputed_path}\n"
+                         f"Expected structure: {precomputed_path}/features.npy, targets.npy, etc.")
 
-        data_dict = {}
-        for npy_file in npy_files:
-            key = npy_file.stem  # filename without .npy
-            data_dict[key] = np.load(npy_file, mmap_mode='r')
-            print(f"    Loaded {key}: shape={data_dict[key].shape}")
+    # Check for features.npy as indicator that directory has data
+    features_file = precomputed_path / 'features.npy'
+    if not features_file.exists():
+        raise ValueError(f"No features.npy found in {precomputed_path}\n"
+                         f"Directory must contain features.npy, targets.npy, masks.npy, etc.")
 
-        return data_dict
+    print(f"  Loading from directory of .npy files (true memory-mapping)")
 
-    # Otherwise treat as .npz file
-    else:
-        print(f"  ⚠ WARNING: NPZ files cannot be truly memory-mapped!")
-        print(f"  ⚠ This will load the entire dataset into RAM on first access")
-        print(f"  ⚠ Recommend converting to .npy directory format:")
-        print(f"  ⚠   python convert_npz_to_memmap.py {precomputed_path}")
+    # Load each .npy file individually with mmap_mode
+    npy_files = list(precomputed_path.glob("*.npy"))
+    if not npy_files:
+        raise ValueError(f"No .npy files found in {precomputed_path}")
 
-        # Try to decompress if needed
-        if precomputed_path.suffix == '.npz':
-            precomputed_path = _decompress_npz_if_needed(str(precomputed_path))
+    data_dict = {}
+    for npy_file in npy_files:
+        key = npy_file.stem  # filename without .npy
+        data_dict[key] = np.load(npy_file, mmap_mode='r')
+        print(f"    Loaded {key}: shape={data_dict[key].shape}")
 
-        return np.load(precomputed_path, mmap_mode='r')
+    return data_dict
 
 
 class SoilMoistureSequenceDataset(_BaseDataset):
@@ -1454,26 +1450,29 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                     target_max=self.norm_stats['target_max']
                 )
 
-        # Save to disk
+        # Save to disk as individual .npy files (memory-mappable)
         print(f"Saving to {output_path}...")
+
+        # Create directory if it doesn't exist
+        from pathlib import Path
+        output_dir = Path(output_path)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         # Extract sample_index components to avoid pickle requirement
         target_stations = np.array([s['target_station'] for s in self.sample_index], dtype=np.int32)
         end_dates = np.array([s['end_date'].timestamp() for s in self.sample_index], dtype=np.float64)
         start_dates = np.array([s['start_date'].timestamp() for s in self.sample_index], dtype=np.float64)
 
-        np.savez_compressed(
-            output_path,
-            features=all_features,
-            targets=all_targets,
-            masks=all_masks,
-            target_stations=target_stations,
-            end_dates=end_dates,
-            start_dates=start_dates,
-            is_normalized=np.array([is_normalized], dtype=bool)
-        )
+        # Save each array as a separate .npy file
+        np.save(output_dir / 'features.npy', all_features)
+        np.save(output_dir / 'targets.npy', all_targets)
+        np.save(output_dir / 'masks.npy', all_masks)
+        np.save(output_dir / 'target_stations.npy', target_stations)
+        np.save(output_dir / 'end_dates.npy', end_dates)
+        np.save(output_dir / 'start_dates.npy', start_dates)
+        np.save(output_dir / 'is_normalized.npy', np.array([is_normalized], dtype=bool))
 
-        print(f"  Saved {len(self.sample_index)} sequences")
+        print(f"  Saved {len(self.sample_index)} sequences to {output_dir}/")
         print(f"  Shape: features={all_features.shape}, targets={all_targets.shape}")
         print(f"  Data is {'normalized' if is_normalized else 'not normalized'}")
 
@@ -2120,7 +2119,7 @@ def buildDataset(seq_length: int = 64, days: int = 3705):
     print("STEP 7: Precomputing sequences")
     print("=" * 60)
 
-    precomputed_path = collector.data_dir / "precomputed_sequences.npz"
+    precomputed_path = collector.data_dir / "precomputed_sequences"  # Directory, not .npz
     norm_stats_path = collector.data_dir / "normalization_stats.npz"
 
     dataset.precompute_and_save(
@@ -2176,7 +2175,7 @@ def precomputeDataset():
     )
 
     # Precompute and save
-    precomputed_path = collector.data_dir / "precomputed_sequences.npz"
+    precomputed_path = collector.data_dir / "precomputed_sequences"  # Directory, not .npz
     norm_stats_path = collector.data_dir / "normalization_stats.npz"
 
     dataset.precompute_and_save(
@@ -2184,7 +2183,7 @@ def precomputeDataset():
         norm_stats_path=str(norm_stats_path)
     )
 
-    print(f"\n✓ Precomputed sequences saved to: {precomputed_path}")
+    print(f"\n✓ Precomputed sequences saved to: {precomputed_path}/")
     print(f"✓ Normalization stats saved to: {norm_stats_path}")
     print(f"\nYou can now use loadDataset() for fast loading!")
 
@@ -2262,9 +2261,10 @@ if __name__ == "__main__":
 if __name__ == "__main2__":
     # Check if precomputed data exists
     collector = MeteoGaliciaCollector()
-    precomputed_path = collector.data_dir / "precomputed_sequences.npz"
+    precomputed_path = collector.data_dir / "precomputed_sequences"
+    features_file = precomputed_path / "features.npy"
 
-    if not precomputed_path.exists():
+    if not features_file.exists():
         print("\n" + "=" * 60)
         print("FIRST TIME SETUP: Precomputing dataset sequences")
         print("=" * 60)
