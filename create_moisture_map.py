@@ -298,7 +298,7 @@ def build_sequence_for_any_station(
 
     # Initialize arrays
     features = np.full((seq_length, total_features), missing_value, dtype=np.float32)
-    mask = np.zeros((seq_length, total_features), dtype=np.float32)
+    mask = np.zeros((seq_length, total_features), dtype=bool)
 
     # Get station metadata for coordinate features
     target_station_row = stations_df[stations_df['station_id'] == station_id]
@@ -326,13 +326,13 @@ def build_sequence_for_any_station(
                     coord_value = target_station_row.get(param)
                     if pd.notna(coord_value):
                         features[:, f_idx] = float(coord_value)  # Fill ALL timesteps
-                        mask[:, f_idx] = 1.0
+                        mask[:, f_idx] = True
             else:
                 # Fill from timeseries lookup
                 key = (station_id, date_str, param)
                 if key in timeseries_lookup:
                     features[t, f_idx] = timeseries_lookup[key]
-                    mask[t, f_idx] = 1.0
+                    mask[t, f_idx] = True
             f_idx += 1
 
         # Fill nearby stations features
@@ -341,7 +341,7 @@ def build_sequence_for_any_station(
 
             # Distance (constant across time)
             features[t, nearby_offset] = nearby['distance']
-            mask[t, nearby_offset] = 1.0
+            mask[t, nearby_offset] = True
 
             # Features
             f_idx_nearby = 0
@@ -355,13 +355,13 @@ def build_sequence_for_any_station(
                         coord_value = nearby_row.get(param)
                         if pd.notna(coord_value):
                             features[:, feat_idx] = float(coord_value)  # Fill ALL timesteps
-                            mask[:, feat_idx] = 1.0
+                            mask[:, feat_idx] = True
                 else:
                     # Fill from timeseries lookup
                     key = (nearby['station_id'], date_str, param)
                     if key in timeseries_lookup:
                         features[t, feat_idx] = timeseries_lookup[key]
-                        mask[t, feat_idx] = 1.0
+                        mask[t, feat_idx] = True
                 f_idx_nearby += 1
 
             # Soil moisture for nearby station
@@ -369,7 +369,7 @@ def build_sequence_for_any_station(
             soil_idx = nearby_offset + 1 + len(feature_params)
             if key in timeseries_lookup:
                 features[t, soil_idx] = timeseries_lookup[key]
-                mask[t, soil_idx] = 1.0
+                mask[t, soil_idx] = True
 
     # Apply normalization
     features_normalized = apply_normalization_to_features(features, mask, norm_stats, missing_value)

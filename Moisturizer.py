@@ -1157,7 +1157,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
         # Initialize tensors
         features = np.full((self.seq_length, total_features), self.missing_value, dtype=np.float32)
-        mask = np.zeros((self.seq_length, total_features), dtype=np.float32)
+        mask = np.zeros((self.seq_length, total_features), dtype=bool)
 
         # Fill target station features using FAST DICT LOOKUP
         for t, date in enumerate(date_range):
@@ -1166,7 +1166,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 key = (target_station_id, date, param)
                 if key in self.timeseries_index:
                     features[t, f_idx] = self.timeseries_index[key]
-                    mask[t, f_idx] = 1.0
+                    mask[t, f_idx] = True
 
             # Fill nearby stations features using FAST DICT LOOKUP
             for n_idx, nearby in enumerate(nearby_stations):
@@ -1175,7 +1175,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
                 # Distance (constant across time)
                 features[t, nearby_offset] = nearby['distance']
-                mask[t, nearby_offset] = 1.0
+                mask[t, nearby_offset] = True
 
                 # Features
                 for f_idx, param in enumerate(self.feature_params):
@@ -1183,14 +1183,14 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                     feat_idx = nearby_offset + 1 + f_idx
                     if key in self.timeseries_index:
                         features[t, feat_idx] = self.timeseries_index[key]
-                        mask[t, feat_idx] = 1.0
+                        mask[t, feat_idx] = True
 
                 # Soil moisture for nearby station
                 key = (nearby_station_id, date, self.soil_moisture_param)
                 soil_idx = nearby_offset + 1 + len(self.feature_params)
                 if key in self.timeseries_index:
                     features[t, soil_idx] = self.timeseries_index[key]
-                    mask[t, soil_idx] = 1.0
+                    mask[t, soil_idx] = True
 
         # Get target (soil moisture at end_date for target station)
         target_key = (target_station_id, end_date, self.soil_moisture_param)
@@ -1249,7 +1249,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
         # Initialize output arrays
         features = np.full((self.seq_length, total_features), self.missing_value, dtype=np.float32)
-        mask = np.zeros((self.seq_length, total_features), dtype=np.float32)
+        mask = np.zeros((self.seq_length, total_features), dtype=bool)
 
         # VECTORIZED: Slice target station data for all dates at once
         target_slice = self.dense_arrays['features'][target_idx, date_indices, :]  # [seq_length, num_features]
@@ -1265,7 +1265,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
             # Distance (constant across time)
             features[:, nearby_offset] = distance
-            mask[:, nearby_offset] = 1.0
+            mask[:, nearby_offset] = True
 
             # Slice all nearby station data at once
             nearby_slice = self.dense_arrays['features'][nearby_idx, date_indices, :]  # [seq_length, num_features]
@@ -1323,7 +1323,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 feat_mask = masks_batch[:, :, feat_idx]
 
                 # Get valid data (masked and not invalid marker)
-                valid_mask = feat_mask > 0
+                valid_mask = feat_mask  # Now boolean, no need for > 0
                 for marker in invalid_markers:
                     valid_mask &= (feat_data != marker)
 
@@ -1429,7 +1429,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         # Preallocate arrays
         all_features = np.zeros((len(self.sample_index), seq_length, n_features), dtype=np.float32)
         all_targets = np.zeros((len(self.sample_index), 1), dtype=np.float32)
-        all_masks = np.zeros((len(self.sample_index), seq_length, n_features), dtype=np.float32)
+        all_masks = np.zeros((len(self.sample_index), seq_length, n_features), dtype=bool)
 
         # Store first sample
         all_features[0] = features0.numpy()
@@ -1920,7 +1920,7 @@ def build_dense_feature_array(
 
     # Initialize arrays
     features_array = np.full((num_stations, num_dates, num_features), missing_value, dtype=np.float32)
-    mask_array = np.zeros((num_stations, num_dates, num_features), dtype=np.float32)
+    mask_array = np.zeros((num_stations, num_dates, num_features), dtype=bool)
 
     # Create mapping for fast indexing - ensure consistent types
     station_to_idx = {int(sid): idx for idx, sid in enumerate(station_ids)}
@@ -1948,7 +1948,7 @@ def build_dense_feature_array(
                         if pd.notna(coord_value):
                             # Fill for ALL dates (static feature)
                             features_array[station_idx, :, coord_idx] = float(coord_value)
-                            mask_array[station_idx, :, coord_idx] = 1.0
+                            mask_array[station_idx, :, coord_idx] = True
 
         print(f"    ✓ Filled coordinate features")
     # Vectorized approach - MUCH faster than iterrows()
@@ -1992,7 +1992,7 @@ def build_dense_feature_array(
     # VECTORIZED ASSIGNMENT - this is the magic that makes it fast!
     # Instead of looping through millions of rows, we do one bulk assignment
     features_array[station_indices, date_indices, param_indices] = values
-    mask_array[station_indices, date_indices, param_indices] = 1.0
+    mask_array[station_indices, date_indices, param_indices] = True
 
     print(f"\n✓ Dense array built!")
     print(f"  Filled {len(values):,} data points")
