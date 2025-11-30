@@ -689,7 +689,7 @@ def generate_all_augmentations_batched(
         'target_features': target_features,
         'nearby_features_per_station': nearby_features_per_station,
         'total_features': total_features,
-        'debug': False  # Set to True to enable debug logging
+        'debug': True  # ENABLED for debugging data corruption
     }
     # Calculate number of batches from dataset size (reliable!)
     num_batches = (len(base_dataset.sample_index) + batch_size - 1) // batch_size
