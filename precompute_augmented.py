@@ -800,8 +800,8 @@ def generate_all_augmentations_batched(
             feat_data = features_batch[:, :, feat_idx]
             feat_mask = masks_batch[:, :, feat_idx]
 
-            # Mask is now boolean, no need for > 0 comparison
-            valid_mask = feat_mask
+            # Create a copy for modification (masks are read-only)
+            valid_mask = feat_mask.copy()
             for marker in invalid_markers:
                 valid_mask &= (feat_data != marker)
 
