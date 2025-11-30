@@ -23,6 +23,16 @@ from functools import partial
 from tqdm import tqdm
 
 
+# Global queue for worker→writer communication (set by pool initializer)
+_write_queue = None
+
+
+def _init_worker_with_queue(queue):
+    """Initialize worker with access to the write queue."""
+    global _write_queue
+    _write_queue = queue
+
+
 def _writer_process(write_queue, output_path, total_samples, seq_length, n_features, total_batches):
     """
     Dedicated writer process that reads from queue and writes to memmap files.
@@ -121,12 +131,13 @@ def _process_batch_to_queue(args):
     Worker function that generates augmented data and sends to queue (no file I/O!).
 
     Args:
-        args: Tuple of (batch_num, start_idx, batch_samples_data, aug_params, write_queue)
+        args: Tuple of (batch_num, start_idx, batch_samples_data, aug_params)
 
     Returns:
         batch_num (for tracking completion)
     """
-    batch_num, start_idx, batch_samples_data, aug_params, write_queue = args
+    global _write_queue
+    batch_num, start_idx, batch_samples_data, aug_params = args
 
     # Unpack parameters
     seq_length, n_nearby_available, n_nearby_in_features = aug_params['dimensions']
@@ -196,7 +207,7 @@ def _process_batch_to_queue(args):
                 aug_idx += 1
 
     # Put batch data in queue for writer process (no file I/O!)
-    write_queue.put((
+    _write_queue.put((
         start_idx,  # Where to write in the memmap
         batch_features,
         batch_targets,
@@ -751,10 +762,11 @@ def generate_all_augmentations_batched(
             start_idx_aug = current_aug_idx
             current_aug_idx += len(batch_samples_data) * total_augmentations
 
-            yield (batch_num, start_idx_aug, batch_samples_data, aug_params, write_queue)
+            yield (batch_num, start_idx_aug, batch_samples_data, aug_params)
 
     # Process batches in parallel (workers write to queue, writer reads and writes to memmap)
-    with mp.Pool(processes=num_workers) as pool:
+    # Initialize workers with the write queue
+    with mp.Pool(processes=num_workers, initializer=_init_worker_with_queue, initargs=(write_queue,)) as pool:
         for _ in tqdm(pool.imap_unordered(_process_batch_to_queue, batch_generator(), chunksize=1),
                       total=num_batches,
                       desc="      Processing batches",
