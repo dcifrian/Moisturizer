@@ -20,6 +20,7 @@ import tempfile
 import shutil
 import multiprocessing as mp
 from functools import partial
+from tqdm import tqdm
 
 
 # Global variable to hold the dataset in each worker process
@@ -299,16 +300,17 @@ def generate_all_augmentations_batched(
         print(f"   Starting parallel processing...")
         print(f"   Each worker will load the dataset once, then process multiple batches...")
         with mp.Pool(processes=num_workers, initializer=_init_worker, initargs=(dataset_params, aug_params)) as pool:
-            # Use imap to get progress updates as batches complete
+            # Use imap with tqdm for progress tracking
             batch_files = []
             batch_sizes = []
-            for i, (batch_file, batch_size) in enumerate(pool.imap(_process_batch_worker, batch_infos)):
+            for batch_file, batch_size in tqdm(pool.imap(_process_batch_worker, batch_infos),
+                                                total=num_batches,
+                                                desc="      Processing batches",
+                                                unit="batch"):
                 batch_files.append(batch_file)
                 batch_sizes.append(batch_size)
-                if (i + 1) % max(1, num_batches // 20) == 0 or (i + 1) == num_batches:
-                    print(f"      Progress: {i+1}/{num_batches} batches complete ({100*(i+1)/num_batches:.1f}%)")
 
-        print(f"   All {num_batches} batches processed!")
+        print(f"   ✓ All {num_batches} batches processed!")
 
         # Save batch sizes metadata to avoid re-loading files later
         batch_sizes_file = batch_dir / "_batch_sizes.npy"
@@ -358,9 +360,18 @@ def generate_all_augmentations_batched(
 
     # Create memory-mapped arrays on disk (these don't consume RAM!)
     print(f"   Pass 2/2: Creating memory-mapped arrays and copying batch data...")
-    mode = 'w+'
-    if (output_path / "features.npy").exists():
-        mode = 'r+'
+
+    # Ensure output directory exists
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Check if ALL required memmap files exist (not just features.npy!)
+    required_files = ["features.npy", "targets.npy", "masks.npy", "target_stations.npy",
+                      "skip_pattern.npy", "permutation.npy", "end_dates.npy", "start_dates.npy"]
+    all_files_exist = all((output_path / f).exists() for f in required_files)
+
+    mode = 'r+' if all_files_exist else 'w+'
+    print(f"   Mode: {'Updating existing' if mode == 'r+' else 'Creating new'} memmap files")
+
     all_features = np.memmap(
         str(output_path / "features.npy"), dtype=np.float32, mode=mode,
         shape=(total_samples, seq_length, n_features)
@@ -397,9 +408,7 @@ def generate_all_augmentations_batched(
     if mode == 'w+':
         # Copy batch data into memory-mapped arrays
         current_idx = 0
-        for i, batch_file in enumerate(batch_files):
-            if i % 10 == 0:
-                print(f"      Batch {i+1}/{len(batch_files)} (progress: {current_idx:,}/{total_samples:,})...")
+        for batch_file in tqdm(batch_files, desc="      Copying batches", unit="batch"):
             batch_data = np.load(batch_file)
 
             batch_size = len(batch_data['features'])
@@ -448,7 +457,10 @@ def generate_all_augmentations_batched(
 
     # Sample-based statistics computation (memory efficient)
     sample_batch_size = 10000
-    for i in range(0, len(all_features), sample_batch_size):
+    for i in tqdm(range(0, len(all_features), sample_batch_size),
+                  desc="   Computing stats",
+                  unit="batch",
+                  total=(len(all_features) + sample_batch_size - 1) // sample_batch_size):
         end_i = min(i + sample_batch_size, len(all_features))
         features_batch = all_features[i:end_i]
         masks_batch = all_masks[i:end_i]
@@ -481,10 +493,11 @@ def generate_all_augmentations_batched(
 
     normalized_invalid_marker = -2.0
 
-    for idx in range(0, len(all_features), sample_batch_size):
+    for idx in tqdm(range(0, len(all_features), sample_batch_size),
+                    desc="   Normalizing",
+                    unit="batch",
+                    total=(len(all_features) + sample_batch_size - 1) // sample_batch_size):
         end_idx = min(idx + sample_batch_size, len(all_features))
-        if idx % 50000 == 0:
-            print(f"   Progress: {idx}/{len(all_features)} ({100*idx/len(all_features):.1f}%)")
 
         # Load batch into memory for fast vectorized operations
         features_batch = all_features[idx:end_idx]  # Shape: [batch_size, seq_length, n_features]
