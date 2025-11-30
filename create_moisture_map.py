@@ -242,6 +242,7 @@ def build_sequence_for_any_station(
     end_date,
     timeseries_lookup,
     nearest_df,
+    stations_df,
     feature_params,
     norm_stats,
     seq_length=64,
@@ -256,6 +257,7 @@ def build_sequence_for_any_station(
 
     Args:
         timeseries_lookup: Pre-built dict from build_fast_timeseries_lookup
+        stations_df: DataFrame with station metadata (for coordinate features)
     """
     import numpy as np
 
@@ -285,6 +287,10 @@ def build_sequence_for_any_station(
     if len(nearby_stations) < n_nearest:
         return None
 
+    # Separate coordinate features from timeseries parameters (CRITICAL FIX!)
+    coordinate_features = ['altitude', 'utmx', 'utmy']
+    timeseries_params = [p for p in feature_params if p not in coordinate_features]
+
     # Calculate feature dimensions
     target_features_per_timestep = len(feature_params)
     nearby_features_per_timestep = (len(feature_params) + 1 + 1)  # features + soil moisture + distance
@@ -294,15 +300,40 @@ def build_sequence_for_any_station(
     features = np.full((seq_length, total_features), missing_value, dtype=np.float32)
     mask = np.zeros((seq_length, total_features), dtype=np.float32)
 
+    # Get station metadata for coordinate features
+    target_station_row = stations_df[stations_df['station_id'] == station_id]
+    if target_station_row.empty:
+        return None
+    target_station_row = target_station_row.iloc[0]
+
+    # Build station lookup for nearby stations
+    nearby_station_rows = {}
+    for nearby in nearby_stations:
+        nearby_row = stations_df[stations_df['station_id'] == nearby['station_id']]
+        if not nearby_row.empty:
+            nearby_station_rows[nearby['station_id']] = nearby_row.iloc[0]
+
     # Fill target station features using fast lookup
     for t, date in enumerate(date_range):
         date_str = str(date.date())
 
-        for f_idx, param in enumerate(feature_params):
-            key = (station_id, date_str, param)
-            if key in timeseries_lookup:
-                features[t, f_idx] = timeseries_lookup[key]
-                mask[t, f_idx] = 1.0
+        # Fill timeseries parameters from lookup
+        f_idx = 0
+        for param in feature_params:
+            if param in coordinate_features:
+                # Fill coordinate feature from station metadata (SAME for all dates)
+                if t == 0:  # Only need to fill once, will broadcast to all timesteps below
+                    coord_value = target_station_row.get(param)
+                    if pd.notna(coord_value):
+                        features[:, f_idx] = float(coord_value)  # Fill ALL timesteps
+                        mask[:, f_idx] = 1.0
+            else:
+                # Fill from timeseries lookup
+                key = (station_id, date_str, param)
+                if key in timeseries_lookup:
+                    features[t, f_idx] = timeseries_lookup[key]
+                    mask[t, f_idx] = 1.0
+            f_idx += 1
 
         # Fill nearby stations features
         for n_idx, nearby in enumerate(nearby_stations):
@@ -313,12 +344,25 @@ def build_sequence_for_any_station(
             mask[t, nearby_offset] = 1.0
 
             # Features
-            for f_idx, param in enumerate(feature_params):
-                key = (nearby['station_id'], date_str, param)
-                feat_idx = nearby_offset + 1 + f_idx
-                if key in timeseries_lookup:
-                    features[t, feat_idx] = timeseries_lookup[key]
-                    mask[t, feat_idx] = 1.0
+            f_idx_nearby = 0
+            for param in feature_params:
+                feat_idx = nearby_offset + 1 + f_idx_nearby
+
+                if param in coordinate_features:
+                    # Fill coordinate feature from station metadata
+                    if t == 0 and nearby['station_id'] in nearby_station_rows:
+                        nearby_row = nearby_station_rows[nearby['station_id']]
+                        coord_value = nearby_row.get(param)
+                        if pd.notna(coord_value):
+                            features[:, feat_idx] = float(coord_value)  # Fill ALL timesteps
+                            mask[:, feat_idx] = 1.0
+                else:
+                    # Fill from timeseries lookup
+                    key = (nearby['station_id'], date_str, param)
+                    if key in timeseries_lookup:
+                        features[t, feat_idx] = timeseries_lookup[key]
+                        mask[t, feat_idx] = 1.0
+                f_idx_nearby += 1
 
             # Soil moisture for nearby station
             key = (nearby['station_id'], date_str, 'HS_CV_AVG_-0.2m')
@@ -524,6 +568,7 @@ def create_moisture_map(
                     end_date=target_date,
                     timeseries_lookup=timeseries_lookup,
                     nearest_df=nearest_df,
+                    stations_df=stations_df,
                     feature_params=filtered_params,
                     norm_stats=norm_stats,
                     seq_length=64,
