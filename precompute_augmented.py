@@ -23,121 +23,20 @@ from functools import partial
 from tqdm import tqdm
 
 
-# Global queue for worker→writer communication (set by pool initializer)
-_write_queue = None
-
-
-def _init_worker_with_queue(queue):
-    """Initialize worker with access to the write queue."""
-    global _write_queue
-    _write_queue = queue
-
-
-def _writer_process(write_queue, output_path, total_samples, seq_length, n_features, total_batches):
+def _process_batch_direct_write(args):
     """
-    Dedicated writer process that reads from queue and writes to memmap files.
+    Worker function that writes DIRECTLY to memmap files (no queue, no pickling!).
 
-    This eliminates the need for temporary .npz files and the batch copying phase.
-    Workers generate data → queue → writer writes directly to final memmap files.
+    Each worker receives paths to memmap files and writes to its assigned slice.
+    No serialization of large arrays - just writes directly to disk.
 
     Args:
-        write_queue: Queue to read data from workers
-        output_path: Directory for output files
-        total_samples: Total number of samples
-        seq_length: Sequence length
-        n_features: Number of features
-        total_batches: Expected number of batches (for progress tracking)
-    """
-    # Create memmap files
-    all_features = np.lib.format.open_memmap(
-        str(output_path / "features.npy"), dtype=np.float32, mode='w+',
-        shape=(total_samples, seq_length, n_features)
-    )
-    all_targets = np.lib.format.open_memmap(
-        str(output_path / "targets.npy"), dtype=np.float32, mode='w+',
-        shape=(total_samples, 1)
-    )
-    all_masks = np.lib.format.open_memmap(
-        str(output_path / "masks.npy"), dtype=bool, mode='w+',
-        shape=(total_samples, seq_length, n_features)
-    )
-    all_target_stations = np.lib.format.open_memmap(
-        str(output_path / "target_stations.npy"), dtype=np.int32, mode='w+',
-        shape=(total_samples,)
-    )
-    all_skip_pattern = np.lib.format.open_memmap(
-        str(output_path / "skip_pattern.npy"), dtype=np.int32, mode='w+',
-        shape=(total_samples,)
-    )
-    all_permutation = np.lib.format.open_memmap(
-        str(output_path / "permutation.npy"), dtype=np.int32, mode='w+',
-        shape=(total_samples,)
-    )
-    all_end_dates = np.zeros(total_samples, dtype=np.float64)
-    all_start_dates = np.zeros(total_samples, dtype=np.float64)
-
-    batches_written = 0
-    pbar = tqdm(total=total_batches, desc="      Writing to memmap", unit="batch", position=1)
-
-    while True:
-        item = write_queue.get()
-
-        # Sentinel value to stop
-        if item is None:
-            break
-
-        # Unpack batch data
-        start_idx, batch_features, batch_targets, batch_masks, batch_stations, \
-            batch_end_dates, batch_start_dates, batch_skip, batch_perm = item
-
-        end_idx = start_idx + len(batch_features)
-
-        # Write to memmap
-        all_features[start_idx:end_idx] = batch_features
-        all_targets[start_idx:end_idx] = batch_targets
-        all_masks[start_idx:end_idx] = batch_masks
-        all_target_stations[start_idx:end_idx] = batch_stations
-        all_end_dates[start_idx:end_idx] = batch_end_dates
-        all_start_dates[start_idx:end_idx] = batch_start_dates
-        all_skip_pattern[start_idx:end_idx] = batch_skip
-        all_permutation[start_idx:end_idx] = batch_perm
-
-        batches_written += 1
-        pbar.update(1)
-
-        # Flush periodically
-        if batches_written % 50 == 0:
-            all_features.flush()
-            all_targets.flush()
-            all_masks.flush()
-
-    pbar.close()
-
-    # Final flush
-    all_features.flush()
-    all_targets.flush()
-    all_masks.flush()
-    all_target_stations.flush()
-    all_skip_pattern.flush()
-    all_permutation.flush()
-
-    # Save date arrays
-    np.save(output_path / 'end_dates.npy', all_end_dates)
-    np.save(output_path / 'start_dates.npy', all_start_dates)
-
-
-def _process_batch_to_queue(args):
-    """
-    Worker function that generates augmented data and sends to queue (no file I/O!).
-
-    Args:
-        args: Tuple of (batch_num, start_idx, batch_samples_data, aug_params)
+        args: Tuple of (batch_num, start_idx, batch_samples_data, aug_params, memmap_paths)
 
     Returns:
         batch_num (for tracking completion)
     """
-    global _write_queue
-    batch_num, start_idx, batch_samples_data, aug_params = args
+    batch_num, start_idx, batch_samples_data, aug_params, memmap_paths = args
 
     # Unpack parameters
     seq_length, n_nearby_available, n_nearby_in_features = aug_params['dimensions']
@@ -147,22 +46,45 @@ def _process_batch_to_queue(args):
     target_features = aug_params['target_features']
     nearby_features_per_station = aug_params['nearby_features_per_station']
     total_features = aug_params['total_features']
+    total_samples = aug_params['total_samples']
 
     batch_actual_size = len(batch_samples_data)
     batch_aug_size = batch_actual_size * total_augmentations
+    end_idx = start_idx + batch_aug_size
 
-    # Allocate arrays for this batch
-    batch_features = np.zeros((batch_aug_size, seq_length, total_features), dtype=np.float32)
-    batch_targets = np.zeros((batch_aug_size, 1), dtype=np.float32)
-    batch_masks = np.zeros((batch_aug_size, seq_length, total_features), dtype=bool)
-    batch_target_stations = np.zeros(batch_aug_size, dtype=np.int32)
-    batch_end_dates = np.zeros(batch_aug_size, dtype=np.float64)
-    batch_start_dates = np.zeros(batch_aug_size, dtype=np.float64)
-    batch_skip_pattern = np.zeros(batch_aug_size, dtype=np.int32)
-    batch_permutation = np.zeros(batch_aug_size, dtype=np.int32)
+    # Open memmap files in read-write mode (workers write to their assigned slices)
+    all_features = np.lib.format.open_memmap(
+        memmap_paths['features'], mode='r+',
+        shape=(total_samples, seq_length, total_features)
+    )
+    all_targets = np.lib.format.open_memmap(
+        memmap_paths['targets'], mode='r+',
+        shape=(total_samples, 1)
+    )
+    all_masks = np.lib.format.open_memmap(
+        memmap_paths['masks'], mode='r+',
+        shape=(total_samples, seq_length, total_features)
+    )
+    all_target_stations = np.lib.format.open_memmap(
+        memmap_paths['target_stations'], mode='r+',
+        shape=(total_samples,)
+    )
+    all_skip_pattern = np.lib.format.open_memmap(
+        memmap_paths['skip_pattern'], mode='r+',
+        shape=(total_samples,)
+    )
+    all_permutation = np.lib.format.open_memmap(
+        memmap_paths['permutation'], mode='r+',
+        shape=(total_samples,)
+    )
 
-    aug_idx = 0
+    # Load end/start dates (opened as regular arrays in worker, will be aggregated later)
+    # For now, we'll return these to be collected by main process
+    batch_end_dates = []
+    batch_start_dates = []
 
+    # Process augmentations
+    current_idx = start_idx
     for sample_data in batch_samples_data:
         # Unpack pre-fetched sample
         base_features = sample_data['features']
@@ -194,32 +116,37 @@ def _process_batch_to_queue(args):
                 aug_features = np.concatenate([target_feat, perm_nearby_features], axis=1)
                 aug_mask = np.concatenate([target_mask, perm_nearby_mask], axis=1)
 
-                batch_features[aug_idx] = aug_features
-                batch_targets[aug_idx] = base_target
-                batch_masks[aug_idx] = aug_mask
+                # Write DIRECTLY to memmap (no intermediate storage!)
+                all_features[current_idx] = aug_features
+                all_targets[current_idx] = base_target
+                all_masks[current_idx] = aug_mask
+                all_target_stations[current_idx] = sample_info['target_station']
+                all_skip_pattern[current_idx] = skip_idx
+                all_permutation[current_idx] = perm_idx
 
-                batch_target_stations[aug_idx] = sample_info['target_station']
-                batch_end_dates[aug_idx] = sample_info['end_date'].timestamp()
-                batch_start_dates[aug_idx] = sample_info['start_date'].timestamp()
-                batch_skip_pattern[aug_idx] = skip_idx
-                batch_permutation[aug_idx] = perm_idx
+                # Collect dates (will save at the end)
+                batch_end_dates.append(sample_info['end_date'].timestamp())
+                batch_start_dates.append(sample_info['start_date'].timestamp())
 
-                aug_idx += 1
+                current_idx += 1
 
-    # Put batch data in queue for writer process (no file I/O!)
-    _write_queue.put((
-        start_idx,  # Where to write in the memmap
-        batch_features,
-        batch_targets,
-        batch_masks,
-        batch_target_stations,
-        batch_end_dates,
-        batch_start_dates,
-        batch_skip_pattern,
-        batch_permutation
-    ))
+    # Flush this worker's writes to disk
+    all_features.flush()
+    all_targets.flush()
+    all_masks.flush()
+    all_target_stations.flush()
+    all_skip_pattern.flush()
+    all_permutation.flush()
 
-    return batch_num
+    # Return batch info and dates (dates are small, safe to pickle)
+    return (batch_num, start_idx, np.array(batch_end_dates, dtype=np.float64),
+            np.array(batch_start_dates, dtype=np.float64))
+
+
+# Remove old queue-based functions
+# def _init_worker_with_queue(queue):
+# def _writer_process(write_queue, ...):
+# def _process_batch_to_queue(args):
 
 
 def _process_samples_worker_v2(args):
@@ -717,7 +644,7 @@ def generate_all_augmentations_batched(
         num_workers = max(1, (logical_cores // 2) - 1)
         print(f"   Auto-detected {num_workers} workers (physical cores - 1)")
 
-    print(f"\n4. Processing with queue-based approach (no temp files!)...")
+    print(f"\n4. Creating memmap files and processing in parallel (direct write, no serialization!)...")
     print(f"   Total batches: {num_batches}")
     print(f"   Estimated memory: ~4GB (dataset) + ~{num_workers * 0.5:.1f}GB (workers) = ~{4 + num_workers * 0.5:.1f}GB total")
     print(f"   Estimated speedup: ~{num_workers}x faster than sequential")
@@ -725,18 +652,48 @@ def generate_all_augmentations_batched(
     # Create output directory
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Create queue for worker→writer communication
-    write_queue = mp.Queue(maxsize=num_workers * 2)  # Buffer 2 batches per worker
+    # Create memmap files FIRST (before workers start)
+    print(f"   Creating memmap files...")
+    memmap_paths = {
+        'features': str(output_path / "features.npy"),
+        'targets': str(output_path / "targets.npy"),
+        'masks': str(output_path / "masks.npy"),
+        'target_stations': str(output_path / "target_stations.npy"),
+        'skip_pattern': str(output_path / "skip_pattern.npy"),
+        'permutation': str(output_path / "permutation.npy")
+    }
 
-    # Start dedicated writer process
-    writer_proc = mp.Process(
-        target=_writer_process,
-        args=(write_queue, output_path, total_samples, seq_length, total_features, num_batches)
+    # Create all memmap files with 'w+' mode
+    np.lib.format.open_memmap(
+        memmap_paths['features'], dtype=np.float32, mode='w+',
+        shape=(total_samples, seq_length, total_features)
     )
-    writer_proc.start()
+    np.lib.format.open_memmap(
+        memmap_paths['targets'], dtype=np.float32, mode='w+',
+        shape=(total_samples, 1)
+    )
+    np.lib.format.open_memmap(
+        memmap_paths['masks'], dtype=bool, mode='w+',
+        shape=(total_samples, seq_length, total_features)
+    )
+    np.lib.format.open_memmap(
+        memmap_paths['target_stations'], dtype=np.int32, mode='w+',
+        shape=(total_samples,)
+    )
+    np.lib.format.open_memmap(
+        memmap_paths['skip_pattern'], dtype=np.int32, mode='w+',
+        shape=(total_samples,)
+    )
+    np.lib.format.open_memmap(
+        memmap_paths['permutation'], dtype=np.int32, mode='w+',
+        shape=(total_samples,)
+    )
+
+    # Add total_samples to aug_params for workers
+    aug_params['total_samples'] = total_samples
 
     # Process batches in parallel with lazy sample fetching
-    print(f"   Starting parallel processing (workers → queue → writer)...")
+    print(f"   Starting parallel processing (workers write directly to memmap)...")
 
     def batch_generator():
         """Generator that fetches samples on-demand and tracks augmented sample positions"""
@@ -762,21 +719,27 @@ def generate_all_augmentations_batched(
             start_idx_aug = current_aug_idx
             current_aug_idx += len(batch_samples_data) * total_augmentations
 
-            yield (batch_num, start_idx_aug, batch_samples_data, aug_params)
+            yield (batch_num, start_idx_aug, batch_samples_data, aug_params, memmap_paths)
 
-    # Process batches in parallel (workers write to queue, writer reads and writes to memmap)
-    # Initialize workers with the write queue
-    with mp.Pool(processes=num_workers, initializer=_init_worker_with_queue, initargs=(write_queue,)) as pool:
-        for _ in tqdm(pool.imap_unordered(_process_batch_to_queue, batch_generator(), chunksize=1),
-                      total=num_batches,
-                      desc="      Processing batches",
-                      unit="batch",
-                      position=0):
-            pass  # Workers put data in queue, writer handles writing
+    # Process batches in parallel (workers write DIRECTLY to memmap, no pickling!)
+    all_end_dates = np.zeros(total_samples, dtype=np.float64)
+    all_start_dates = np.zeros(total_samples, dtype=np.float64)
 
-    # Signal writer to stop
-    write_queue.put(None)
-    writer_proc.join()
+    with mp.Pool(processes=num_workers) as pool:
+        for batch_num, start_idx, end_dates, start_dates in tqdm(
+            pool.imap(_process_batch_direct_write, batch_generator(), chunksize=1),
+            total=num_batches,
+            desc="      Processing batches",
+            unit="batch"
+        ):
+            # Collect dates from workers
+            end_idx = start_idx + len(end_dates)
+            all_end_dates[start_idx:end_idx] = end_dates
+            all_start_dates[start_idx:end_idx] = start_dates
+
+    # Save date arrays
+    np.save(output_path / 'end_dates.npy', all_end_dates)
+    np.save(output_path / 'start_dates.npy', all_start_dates)
 
     print(f"   ✓ All {num_batches} batches processed and written!")
 
