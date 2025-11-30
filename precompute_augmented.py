@@ -30,6 +30,8 @@ def _process_batch_direct_write(args):
     Each worker receives paths to memmap files and writes to its assigned slice.
     No serialization of large arrays - just writes directly to disk.
 
+    Can optionally normalize data using provided stats before writing.
+
     Args:
         args: Tuple of (batch_num, start_idx, batch_samples_data, aug_params, memmap_paths)
 
@@ -47,6 +49,16 @@ def _process_batch_direct_write(args):
     nearby_features_per_station = aug_params['nearby_features_per_station']
     total_features = aug_params['total_features']
     total_samples = aug_params['total_samples']
+
+    # Normalization parameters (if provided)
+    should_normalize = aug_params.get('normalize', False)
+    if should_normalize:
+        feature_mins = aug_params['feature_mins']
+        feature_maxs = aug_params['feature_maxs']
+        target_min = aug_params['target_min']
+        target_max = aug_params['target_max']
+        invalid_markers = aug_params.get('invalid_markers', [-9999.0, -1000.0])
+        normalized_invalid_marker = -2.0
 
     batch_actual_size = len(batch_samples_data)
     batch_aug_size = batch_actual_size * total_augmentations
@@ -116,7 +128,34 @@ def _process_batch_direct_write(args):
                 aug_features = np.concatenate([target_feat, perm_nearby_features], axis=1)
                 aug_mask = np.concatenate([target_mask, perm_nearby_mask], axis=1)
 
-                # Write DIRECTLY to memmap (no intermediate storage!)
+                # Normalize if stats provided (saves 2 hours!)
+                if should_normalize:
+                    # Normalize features (vectorized across timesteps)
+                    for feat_idx in range(total_features):
+                        feat_min = feature_mins[feat_idx]
+                        feat_max = feature_maxs[feat_idx]
+                        feat_data = aug_features[:, feat_idx]
+
+                        # Find invalid markers
+                        invalid_mask = np.zeros(len(feat_data), dtype=bool)
+                        for marker in invalid_markers:
+                            invalid_mask |= (feat_data == marker)
+
+                        # Normalize valid values
+                        if feat_max > feat_min:
+                            aug_features[:, feat_idx] = 2.0 * (feat_data - feat_min) / (feat_max - feat_min) - 1.0
+
+                        # Set invalid values
+                        aug_features[invalid_mask, feat_idx] = normalized_invalid_marker
+
+                    # Normalize target
+                    if base_target not in invalid_markers:
+                        if target_max > target_min:
+                            base_target = 2.0 * (base_target - target_min) / (target_max - target_min) - 1.0
+                    else:
+                        base_target = normalized_invalid_marker
+
+                # Write DIRECTLY to memmap (already normalized if requested!)
                 all_features[current_idx] = aug_features
                 all_targets[current_idx] = base_target
                 all_masks[current_idx] = aug_mask
@@ -544,7 +583,8 @@ def generate_all_augmentations_batched(
     coverage_threshold: float = 0.25,
     seq_length: int = 64,
     batch_size: int = 1000,
-    num_workers: int = None  # Auto-detect: physical cores (avoids hyperthreading)
+    num_workers: int = None,  # Auto-detect: physical cores (avoids hyperthreading)
+    use_base_stats: bool = False  # Use base dataset stats (saves ~2 hours!)
 ):
     """
     Pre-compute ALL augmented samples with batched processing (memory efficient!)
@@ -562,6 +602,8 @@ def generate_all_augmentations_batched(
         seq_length: Sequence length (default 64)
         batch_size: Number of base samples to process per batch
         num_workers: Number of parallel workers (None = auto-detect physical cores)
+        use_base_stats: If True, use base dataset normalization stats and normalize
+                        in workers during generation (saves ~2 hours!)
     """
     print("=" * 70)
     print("PRE-COMPUTING AUGMENTED DATASET (MEMORY EFFICIENT)")
@@ -644,7 +686,31 @@ def generate_all_augmentations_batched(
         num_workers = max(1, (logical_cores // 2) - 1)
         print(f"   Auto-detected {num_workers} workers (physical cores - 1)")
 
-    print(f"\n4. Creating memmap files and processing in parallel (direct write, no serialization!)...")
+    # Load base dataset stats if requested (saves ~2 hours!)
+    base_stats = None
+    if use_base_stats:
+        base_norm_stats_path = Path(data_dir) / "normalization_stats.npz"
+        if not base_norm_stats_path.exists():
+            print(f"\n   ERROR: --use-base-stats requested but base stats not found at {base_norm_stats_path}")
+            print(f"   Please run normalization on the base dataset first, or run without --use-base-stats")
+            return
+
+        print(f"\n4. Loading base dataset normalization stats...")
+        base_stats = np.load(base_norm_stats_path)
+        print(f"   ✓ Loaded stats from {base_norm_stats_path}")
+        print(f"   Feature range: [{base_stats['feature_mins'].min():.2f}, {base_stats['feature_maxs'].max():.2f}]")
+        print(f"   Target range: [{float(base_stats['target_min']):.2f}, {float(base_stats['target_max']):.2f}]")
+        print(f"   → Workers will normalize data during generation (saves ~2 hours!)")
+
+        # Add stats to aug_params for workers
+        aug_params['normalize'] = True
+        aug_params['feature_mins'] = base_stats['feature_mins']
+        aug_params['feature_maxs'] = base_stats['feature_maxs']
+        aug_params['target_min'] = float(base_stats['target_min'])
+        aug_params['target_max'] = float(base_stats['target_max'])
+        aug_params['invalid_markers'] = [-9999.0, -1000.0]
+
+    print(f"\n{'5' if use_base_stats else '4'}. Creating memmap files and processing in parallel (direct write, no serialization!)...")
     print(f"   Total batches: {num_batches}")
     print(f"   Estimated memory: ~4GB (dataset) + ~{num_workers * 0.5:.1f}GB (workers) = ~{4 + num_workers * 0.5:.1f}GB total")
     print(f"   Estimated speedup: ~{num_workers}x faster than sequential")
@@ -746,12 +812,48 @@ def generate_all_augmentations_batched(
     # Calculate memory requirements (bool masks = 1 byte, float32 = 4 bytes)
     features_size_gb = total_samples * seq_length * total_features * 4 / 1e9
     masks_size_gb = total_samples * seq_length * total_features * 1 / 1e9  # bool = 1 byte!
-    print(f"\n5. Data written to memmap files:")
+    step_num = 6 if use_base_stats else 5
+    print(f"\n{step_num}. Data written to memmap files:")
     print(f"   Dataset size: {features_size_gb:.1f}GB features + {masks_size_gb:.1f}GB masks = {features_size_gb + masks_size_gb:.1f}GB total")
     print(f"   Masks using bool dtype (75% smaller than float32!)")
 
+    # If using base stats, skip statistics computation and normalization (already done in workers!)
+    if use_base_stats:
+        print(f"\n{step_num + 1}. Skipping statistics computation (using base dataset stats)")
+        print(f"   ✓ Data already normalized by workers")
+
+        # Save normalization flag
+        np.save(output_path / "is_normalized.npy", np.array([True], dtype=bool))
+
+        # Save normalization stats (copy from base dataset)
+        np.savez(
+            norm_stats_path,
+            feature_mins=base_stats['feature_mins'],
+            feature_maxs=base_stats['feature_maxs'],
+            target_min=base_stats['target_min'],
+            target_max=base_stats['target_max']
+        )
+        print(f"   ✓ Saved normalization stats (copied from base dataset)")
+        print(f"   ✓ Saved to: {output_path}")
+
+        print("\n" + "=" * 70)
+        print("✓ AUGMENTED DATASET COMPLETE!")
+        print("=" * 70)
+        print(f"Base samples: {len(base_dataset.sample_index):,}")
+        print(f"Augmented samples: {total_samples:,}")
+        print(f"Augmentation factor: {total_samples / len(base_dataset.sample_index):.0f}x")
+        print(f"\nMemory usage:")
+        print(f"  - Dataset (main process): ~4 GB")
+        print(f"  - Workers: ~{num_workers * 0.5:.1f} GB")
+        print(f"  - Total peak RAM: ~{4 + num_workers * 0.5:.1f} GB")
+        print(f"  - Disk space: ~{(features_size_gb + masks_size_gb):.1f} GB")
+        print(f"\nPerformance:")
+        print(f"  - Normalization: Done in workers (SAVED ~2 hours!)")
+        print("=" * 70)
+        return
+
     # Load memmap files for statistics and normalization
-    print(f"\n6. Loading memmap files for statistics...")
+    print(f"\n{step_num + 1}. Loading memmap files for statistics...")
     all_features = np.lib.format.open_memmap(
         str(output_path / "features.npy"), mode='r+'  # Read-write for normalization
     )
@@ -763,23 +865,23 @@ def generate_all_augmentations_batched(
     )
 
     # Try to load base dataset normalization stats for comparison
-    print(f"\n7. Comparing with base dataset normalization stats...")
+    print(f"\n{step_num + 2}. Comparing with base dataset normalization stats...")
     base_norm_stats_path = Path(data_dir) / "normalization_stats.npz"
 
     if base_norm_stats_path.exists():
         print(f"   Found base dataset stats, comparing...")
-        base_stats = np.load(base_norm_stats_path)
-        base_feature_mins = base_stats['feature_mins']
-        base_feature_maxs = base_stats['feature_maxs']
-        base_target_min = float(base_stats['target_min'])
-        base_target_max = float(base_stats['target_max'])
+        base_stats_for_comparison = np.load(base_norm_stats_path)
+        base_feature_mins = base_stats_for_comparison['feature_mins']
+        base_feature_maxs = base_stats_for_comparison['feature_maxs']
+        base_target_min = float(base_stats_for_comparison['target_min'])
+        base_target_max = float(base_stats_for_comparison['target_max'])
     else:
         print(f"   Base dataset stats not found, will compute from scratch")
         base_feature_mins = None
         base_feature_maxs = None
 
     # Compute augmented dataset statistics
-    print(f"\n8. Computing augmented dataset normalization statistics...")
+    print(f"\n{step_num + 3}. Computing augmented dataset normalization statistics...")
 
     n_features = all_features.shape[2]
     feature_mins = np.full(n_features, np.inf, dtype=np.float32)
@@ -854,7 +956,7 @@ def generate_all_augmentations_batched(
 
     # Normalize in batches (working with memory-mapped arrays)
     # VECTORIZED VERSION - much faster than sample-by-sample loops!
-    print(f"\n9. Normalizing augmented samples (vectorized)...")
+    print(f"\n{step_num + 4}. Normalizing augmented samples (vectorized)...")
 
     normalized_invalid_marker = -2.0
 
@@ -910,7 +1012,7 @@ def generate_all_augmentations_batched(
             all_targets.flush()
 
     # Save final dataset
-    print(f"\n10. Flushing all changes to disk...")
+    print(f"\n{step_num + 5}. Flushing all changes to disk...")
     all_features.flush()
     all_targets.flush()
 
@@ -945,13 +1047,28 @@ def generate_all_augmentations_batched(
 if __name__ == "__main__":
     import sys
 
-    # Choose mode based on memory constraints
-    if len(sys.argv) > 1 and sys.argv[1] == "--sequential":
+    # Parse command-line arguments
+    use_sequential = False
+    use_base_stats = False
+
+    for arg in sys.argv[1:]:
+        if arg == "--sequential":
+            use_sequential = True
+        elif arg == "--use-base-stats":
+            use_base_stats = True
+
+    # Choose mode based on arguments
+    if use_sequential:
         # Sequential mode: ~5GB RAM (slow but minimal memory)
         print("Using SEQUENTIAL mode (minimal memory)")
+        if use_base_stats:
+            print("WARNING: --use-base-stats is not supported in sequential mode (ignored)")
         generate_all_augmentations_sequential()
     else:
         # Batched mode: auto-detects CPU cores (faster)
         print("Using BATCHED mode (parallel, auto-detect workers)")
+        if use_base_stats:
+            print("Using base dataset stats (saves ~2 hours!)")
         print("Tip: Use --sequential for systems with <8GB RAM")
-        generate_all_augmentations_batched(batch_size=100)
+        print("Tip: Use --use-base-stats to skip statistics computation and normalization")
+        generate_all_augmentations_batched(batch_size=100, use_base_stats=use_base_stats)
