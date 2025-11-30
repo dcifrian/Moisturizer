@@ -86,7 +86,7 @@ def _process_batch_worker(batch_info):
     # Allocate arrays for this batch
     batch_features = np.zeros((batch_aug_size, seq_length, total_features), dtype=np.float32)
     batch_targets = np.zeros((batch_aug_size, 1), dtype=np.float32)
-    batch_masks = np.zeros((batch_aug_size, seq_length, total_features), dtype=np.float32)
+    batch_masks = np.zeros((batch_aug_size, seq_length, total_features), dtype=bool)
     batch_target_stations = []
     batch_end_dates = []
     batch_start_dates = []
@@ -248,11 +248,18 @@ def generate_all_augmentations_batched(
         'nearby_features_per_station': nearby_features_per_station,
         'total_features': total_features
     }
-    num_batches = None
+    # Calculate number of batches from dataset size (reliable!)
+    num_batches = (len(base_dataset.sample_index) + batch_size - 1) // batch_size
+
+    # If resuming from existing batches, verify count matches
     if batch_dir.exists():
-        num_batches =  len(list(batch_dir.glob('*.npz')))
-    if num_batches == 0 or num_batches is None:
-        num_batches = (len(base_dataset.sample_index) + batch_size - 1) // batch_size
+        existing_batch_files = list(batch_dir.glob('batch_*.npz'))  # Only count batch_XXXX.npz files
+        if existing_batch_files:
+            existing_count = len(existing_batch_files)
+            if existing_count != num_batches:
+                print(f"   ⚠ Warning: Found {existing_count} existing batches, but expected {num_batches}")
+                print(f"   Using existing batches count: {existing_count}")
+                num_batches = existing_count
 
     batch_infos = []
     for batch_num in range(num_batches):
@@ -342,10 +349,11 @@ def generate_all_augmentations_batched(
     n_features = first_batch['features'].shape[2]
     first_batch.close()
 
-    # Calculate memory requirements
+    # Calculate memory requirements (bool masks = 1 byte, float32 = 4 bytes)
     features_size_gb = total_samples * seq_length * n_features * 4 / 1e9
-    masks_size_gb = total_samples * seq_length * n_features * 4 / 1e9
+    masks_size_gb = total_samples * seq_length * n_features * 1 / 1e9  # bool = 1 byte!
     print(f"   Dataset size: {features_size_gb:.1f}GB features + {masks_size_gb:.1f}GB masks = {features_size_gb + masks_size_gb:.1f}GB total")
+    print(f"   Masks using bool dtype (75% smaller than float32!)")
     print(f"   Using disk-backed memory-mapped arrays (won't consume RAM)")
 
     # Create memory-mapped arrays on disk (these don't consume RAM!)
@@ -362,7 +370,7 @@ def generate_all_augmentations_batched(
         shape=(total_samples, 1)
     )
     all_masks = np.memmap(
-        str(output_path / "masks.npy"), dtype=np.float32, mode=mode,
+        str(output_path / "masks.npy"), dtype=bool, mode=mode,
         shape=(total_samples, seq_length, n_features)
     )
     all_target_stations = np.memmap(
@@ -377,8 +385,14 @@ def generate_all_augmentations_batched(
         str(output_path / "permutation.npy"), dtype=np.int32, mode=mode,
         shape=(total_samples,)
     )
-    all_end_dates = []
-    all_start_dates = []
+    all_end_dates = np.memmap(
+        str(output_path / "end_dates.npy"), dtype=np.float64, mode=mode,
+        shape=(total_samples,)
+    )
+    all_start_dates = np.memmap(
+        str(output_path / "start_dates.npy"), dtype=np.float64, mode=mode,
+        shape=(total_samples,)
+    )
 
     if mode == 'w+':
         # Copy batch data into memory-mapped arrays
@@ -396,8 +410,8 @@ def generate_all_augmentations_batched(
             all_targets[current_idx:end_idx] = batch_data['targets']
             all_masks[current_idx:end_idx] = batch_data['masks']
             all_target_stations[current_idx:end_idx] = batch_data['target_stations']
-            all_end_dates.extend(batch_data['end_dates'])
-            all_start_dates.extend(batch_data['start_dates'])
+            all_end_dates[current_idx:end_idx] = batch_data['end_dates']
+            all_start_dates[current_idx:end_idx] = batch_data['start_dates']
             all_skip_pattern[current_idx:end_idx] = batch_data['skip_pattern']
             all_permutation[current_idx:end_idx] = batch_data['permutation']
 
@@ -443,15 +457,16 @@ def generate_all_augmentations_batched(
             feat_data = features_batch[:, :, feat_idx]
             feat_mask = masks_batch[:, :, feat_idx]
 
-            valid_mask = feat_mask > 0
+            # Mask is now boolean, no need for > 0 comparison
+            valid_mask = feat_mask
             for marker in invalid_markers:
                 valid_mask &= (feat_data != marker)
 
             valid_data = feat_data[valid_mask]
 
             if len(valid_data) > 0:
-                feature_mins[feat_idx] = np.min(feature_mins[feat_idx], valid_data.min())
-                feature_maxs[feat_idx] = np.max(feature_maxs[feat_idx], valid_data.max())
+                feature_mins[feat_idx] = min(feature_mins[feat_idx], valid_data.min())
+                feature_maxs[feat_idx] = max(feature_maxs[feat_idx], valid_data.max())
 
     valid_targets = all_targets[~np.isin(all_targets, invalid_markers)]
     target_min = valid_targets.min() if len(valid_targets) > 0 else 0.0
@@ -461,7 +476,8 @@ def generate_all_augmentations_batched(
     print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
 
     # Normalize in batches (working with memory-mapped arrays)
-    print(f"\n7. Normalizing augmented samples...")
+    # VECTORIZED VERSION - much faster than sample-by-sample loops!
+    print(f"\n7. Normalizing augmented samples (vectorized)...")
 
     normalized_invalid_marker = -2.0
 
@@ -470,29 +486,47 @@ def generate_all_augmentations_batched(
         if idx % 50000 == 0:
             print(f"   Progress: {idx}/{len(all_features)} ({100*idx/len(all_features):.1f}%)")
 
-        for sample_idx in range(idx, end_idx):
-            # Normalize features
-            for feat_idx in range(n_features):
-                feat_min = feature_mins[feat_idx]
-                feat_max = feature_maxs[feat_idx]
+        # Load batch into memory for fast vectorized operations
+        features_batch = all_features[idx:end_idx]  # Shape: [batch_size, seq_length, n_features]
+        targets_batch = all_targets[idx:end_idx]    # Shape: [batch_size, 1]
 
-                invalid_mask = np.zeros(all_features[sample_idx].shape[0], dtype=bool)
-                for marker in invalid_markers:
-                    invalid_mask |= (all_features[sample_idx][:, feat_idx] == marker)
+        # Normalize features - VECTORIZED across all samples and timesteps for each feature
+        for feat_idx in range(n_features):
+            feat_min = feature_mins[feat_idx]
+            feat_max = feature_maxs[feat_idx]
 
-                if feat_max > feat_min:
-                    all_features[sample_idx][:, feat_idx] = 2.0 * (all_features[sample_idx][:, feat_idx] - feat_min) / (feat_max - feat_min) - 1.0
+            # Get all data for this feature across batch
+            feat_data = features_batch[:, :, feat_idx]  # Shape: [batch_size, seq_length]
 
-                all_features[sample_idx][invalid_mask, feat_idx] = normalized_invalid_marker
+            # Find invalid markers (vectorized!)
+            invalid_mask = np.zeros_like(feat_data, dtype=bool)
+            for marker in invalid_markers:
+                invalid_mask |= (feat_data == marker)
 
-            # Normalize target
-            target_invalid = np.any(np.isin(all_targets[sample_idx], invalid_markers))
-            if target_invalid:
-                all_targets[sample_idx][:] = normalized_invalid_marker
-            elif target_max > target_min:
-                all_targets[sample_idx][:] = 2.0 * (all_targets[sample_idx] - target_min) / (target_max - target_min) - 1.0
+            # Normalize all valid values at once (vectorized!)
+            if feat_max > feat_min:
+                features_batch[:, :, feat_idx] = 2.0 * (feat_data - feat_min) / (feat_max - feat_min) - 1.0
 
-        # Flush normalized data to disk periodically
+            # Set invalid values to marker (vectorized!)
+            features_batch[invalid_mask, feat_idx] = normalized_invalid_marker
+
+        # Normalize targets (vectorized across batch!)
+        target_invalid_mask = np.zeros(len(targets_batch), dtype=bool)
+        for marker in invalid_markers:
+            target_invalid_mask |= (targets_batch == marker).flatten()
+
+        # Normalize valid targets
+        if target_max > target_min:
+            targets_batch[:] = 2.0 * (targets_batch - target_min) / (target_max - target_min) - 1.0
+
+        # Set invalid targets
+        targets_batch[target_invalid_mask] = normalized_invalid_marker
+
+        # Write normalized batch back to memmap (this is the only slow part - disk I/O)
+        all_features[idx:end_idx] = features_batch
+        all_targets[idx:end_idx] = targets_batch
+
+        # Flush to disk periodically (less frequently since we're faster)
         if (end_idx % 100000) < sample_batch_size:
             all_features.flush()
             all_targets.flush()
@@ -505,9 +539,9 @@ def generate_all_augmentations_batched(
     all_target_stations.flush()
     all_skip_pattern.flush()
     all_permutation.flush()
-    np.save(output_path / "end_dates.npy",np.array(all_end_dates, dtype=np.float64))
-    np.save(output_path / "start_dates.npy",np.array(all_start_dates, dtype=np.float64))
-    np.save(output_path / "is_normalized.npy",np.array([True], dtype=bool))
+    all_end_dates.flush()
+    all_start_dates.flush()
+    np.save(output_path / "is_normalized.npy", np.array([True], dtype=bool))
 
     np.savez(
         norm_stats_path,
@@ -538,44 +572,6 @@ def generate_all_augmentations_batched(
     print(f"  - Disk space used: ~{(features_size_gb + masks_size_gb):.1f} GB temporary + {output_path.stat().st_size / 1e9:.1f} GB final")
     print("=" * 70)
 
-
-    def get_numsaples(timeseries_path,stations_path,soil_moisture_param,seq_length):
-        sample_index = []
-        timeseries_df = pd.read_csv(timeseries_path)
-        stations_df = pd.read_csv(stations_path)
-        target_stations = stations_df[stations_df['has_soil_moisture']]['station_id'].tolist()
-
-        for target_id in target_stations:
-            # Get all dates for this target station with soil moisture data
-            target_soil_data = timeseries_df[
-                (timeseries_df['station_id'] == target_id) &
-                (timeseries_df['parameter_code'] == soil_moisture_param)
-                ]['date'].unique()
-
-            # Sort dates
-            target_dates = sorted(target_soil_data)
-
-            # For each date, check if we have enough history
-            for date in target_dates:
-                # Need seq_length days including this date
-                start_date = date - pd.Timedelta(days=seq_length - 1)
-
-                # Check if we have data for the full sequence
-                date_range = pd.date_range(start=start_date, end=date, freq='D')
-
-                # Check if target has at least one data point in the sequence
-                target_data_in_range = timeseries_df[
-                    (timeseries_df['station_id'] == target_id) &
-                    (timeseries_df['date'].isin(date_range))
-                    ]
-
-                if not target_data_in_range.empty:
-                    sample_index.append({
-                        'target_station': target_id,
-                        'end_date': date,
-                        'start_date': start_date
-                    })
-        return len(sample_index)
 
 if __name__ == "__main__":
     generate_all_augmentations_batched(batch_size=100)
