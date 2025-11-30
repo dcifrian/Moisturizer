@@ -416,7 +416,7 @@ def generate_all_augmentations_batched(
     coverage_threshold: float = 0.25,
     seq_length: int = 64,
     batch_size: int = 1000,
-    num_workers: int = 4  # Reduced default: 4 workers × ~500MB = ~2GB total
+    num_workers: int = None  # Auto-detect: physical cores (avoids hyperthreading)
 ):
     """
     Pre-compute ALL augmented samples with batched processing (memory efficient!)
@@ -424,7 +424,7 @@ def generate_all_augmentations_batched(
     Uses multiprocessing with PRE-FETCHED SAMPLES (no dataset in workers!):
     - Main process loads dataset ONCE and fetches samples
     - Workers receive pre-fetched samples (no dataset loading)
-    - Memory usage: ~4GB (main dataset) + ~500MB per worker = ~6GB total for 4 workers
+    - Memory usage: ~4GB (main dataset) + ~500MB per worker
 
     Args:
         data_dir: Directory containing the MeteoGalicia dataset
@@ -433,7 +433,7 @@ def generate_all_augmentations_batched(
         coverage_threshold: Minimum coverage to include a parameter (0.25 = 25%)
         seq_length: Sequence length (default 64)
         batch_size: Number of base samples to process per batch
-        num_workers: Number of parallel workers (default 4 for low memory)
+        num_workers: Number of parallel workers (None = auto-detect physical cores)
     """
     print("=" * 70)
     print("PRE-COMPUTING AUGMENTED DATASET (MEMORY EFFICIENT)")
@@ -532,6 +532,13 @@ def generate_all_augmentations_batched(
 
         batch_dir.mkdir(exist_ok=True)
 
+        # Auto-detect number of workers (avoid hyperthreading)
+        if num_workers is None:
+            # mp.cpu_count() returns logical cores (includes hyperthreading)
+            # Divide by 2 to get physical cores, then subtract 1 for breathing room
+            logical_cores = mp.cpu_count()
+            num_workers = max(1, (logical_cores // 2) - 1)
+            print(f"   Auto-detected {num_workers} workers (physical cores - 1)")
 
         print(f"\n4. Processing in batches of {batch_size} using {num_workers} CPU cores...")
         print(f"   Batch directory: {batch_dir}")
@@ -671,7 +678,7 @@ def generate_all_augmentations_batched(
     if mode == 'w+':
         # Copy batch data into memory-mapped arrays
         current_idx = 0
-        for batch_file in tqdm(batch_files, desc="      Copying batches", unit="batch"):
+        for i, batch_file in enumerate(tqdm(batch_files, desc="      Copying batches", unit="batch")):
             batch_data = np.load(batch_file)
 
             batch_size = len(batch_data['features'])
@@ -860,7 +867,7 @@ if __name__ == "__main__":
         print("Using SEQUENTIAL mode (minimal memory)")
         generate_all_augmentations_sequential()
     else:
-        # Batched mode: ~6GB RAM with 4 workers (faster)
-        print("Using BATCHED mode (faster, moderate memory)")
+        # Batched mode: auto-detects CPU cores (faster)
+        print("Using BATCHED mode (parallel, auto-detect workers)")
         print("Tip: Use --sequential for systems with <8GB RAM")
-        generate_all_augmentations_batched(batch_size=100, num_workers=4)
+        generate_all_augmentations_batched(batch_size=100)
