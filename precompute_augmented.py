@@ -95,14 +95,27 @@ def _process_batch_direct_write(args):
     batch_end_dates = []
     batch_start_dates = []
 
+    # DEBUG: Track what we're writing
+    debug_mode = aug_params.get('debug', False)
+    if debug_mode and batch_num == 0:
+        print(f"\n[Worker Debug] Batch {batch_num}:")
+        print(f"  start_idx={start_idx}, batch_samples={len(batch_samples_data)}")
+        print(f"  total_augmentations={total_augmentations}")
+        print(f"  expected end_idx={end_idx}")
+
     # Process augmentations
     current_idx = start_idx
-    for sample_data in batch_samples_data:
+    for sample_i, sample_data in enumerate(batch_samples_data):
         # Unpack pre-fetched sample
         base_features = sample_data['features']
         base_mask = sample_data['mask']
         base_target = sample_data['target']
         sample_info = sample_data['sample_info']
+
+        if debug_mode and batch_num == 0 and sample_i == 0:
+            print(f"  Sample 0 base_target: {base_target} (type: {type(base_target)}, shape: {getattr(base_target, 'shape', 'N/A')}, dtype: {getattr(base_target, 'dtype', 'N/A')})")
+            print(f"  Sample 0 base_features shape: {base_features.shape}")
+            print(f"  Sample 0 base_mask shape: {base_mask.shape}")
 
         # Extract target and nearby features
         target_feat = base_features[:, :target_features]
@@ -129,6 +142,7 @@ def _process_batch_direct_write(args):
                 aug_mask = np.concatenate([target_mask, perm_nearby_mask], axis=1)
 
                 # Normalize if stats provided (saves 2 hours!)
+                normalized_target = base_target  # Use temp variable to avoid modifying base_target!
                 if should_normalize:
                     # Normalize features (vectorized across timesteps)
                     for feat_idx in range(total_features):
@@ -148,20 +162,25 @@ def _process_batch_direct_write(args):
                         # Set invalid values
                         aug_features[invalid_mask, feat_idx] = normalized_invalid_marker
 
-                    # Normalize target
+                    # Normalize target (use temp variable!)
                     if base_target not in invalid_markers:
                         if target_max > target_min:
-                            base_target = 2.0 * (base_target - target_min) / (target_max - target_min) - 1.0
+                            normalized_target = 2.0 * (base_target - target_min) / (target_max - target_min) - 1.0
                     else:
-                        base_target = normalized_invalid_marker
+                        normalized_target = normalized_invalid_marker
 
                 # Write DIRECTLY to memmap (already normalized if requested!)
                 all_features[current_idx] = aug_features
-                all_targets[current_idx] = base_target
+                all_targets[current_idx] = normalized_target
                 all_masks[current_idx] = aug_mask
                 all_target_stations[current_idx] = sample_info['target_station']
                 all_skip_pattern[current_idx] = skip_idx
                 all_permutation[current_idx] = perm_idx
+
+                # DEBUG: Check first few writes
+                if debug_mode and batch_num == 0 and sample_i == 0 and perm_idx < 2:
+                    print(f"    Aug {skip_idx},{perm_idx}: base_target={base_target}, normalized_target={normalized_target}, writing to idx={current_idx}")
+                    print(f"      Verification: all_targets[{current_idx}] = {all_targets[current_idx]}")
 
                 # Collect dates (will save at the end)
                 batch_end_dates.append(sample_info['end_date'].timestamp())
@@ -669,7 +688,8 @@ def generate_all_augmentations_batched(
         'total_augmentations': total_augmentations,
         'target_features': target_features,
         'nearby_features_per_station': nearby_features_per_station,
-        'total_features': total_features
+        'total_features': total_features,
+        'debug': False  # Set to True to enable debug logging
     }
     # Calculate number of batches from dataset size (reliable!)
     num_batches = (len(base_dataset.sample_index) + batch_size - 1) // batch_size
