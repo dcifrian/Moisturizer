@@ -63,7 +63,7 @@ def _process_batch_worker(batch_info):
         batch_info: Tuple of (batch_num, start_idx, end_idx, aug_params, batch_dir)
 
     Returns:
-        Path to saved batch file
+        Tuple of (batch_file_path, batch_size) to avoid re-loading later
     """
     global _worker_dataset
     batch_num, start_idx, end_idx, aug_params, batch_dir = batch_info
@@ -153,7 +153,7 @@ def _process_batch_worker(batch_info):
         permutation=np.array(batch_permutation, dtype=np.int32)
     )
 
-    return batch_file
+    return (batch_file, batch_aug_size)
 
 
 def generate_all_augmentations_batched(
@@ -294,24 +294,46 @@ def generate_all_augmentations_batched(
         with mp.Pool(processes=num_workers, initializer=_init_worker, initargs=(dataset_params, aug_params)) as pool:
             # Use imap to get progress updates as batches complete
             batch_files = []
-            for i, batch_file in enumerate(pool.imap(_process_batch_worker, batch_infos)):
+            batch_sizes = []
+            for i, (batch_file, batch_size) in enumerate(pool.imap(_process_batch_worker, batch_infos)):
                 batch_files.append(batch_file)
+                batch_sizes.append(batch_size)
                 if (i + 1) % max(1, num_batches // 20) == 0 or (i + 1) == num_batches:
                     print(f"      Progress: {i+1}/{num_batches} batches complete ({100*(i+1)/num_batches:.1f}%)")
 
         print(f"   All {num_batches} batches processed!")
 
+        # Save batch sizes metadata to avoid re-loading files later
+        batch_sizes_file = batch_dir / "_batch_sizes.npy"
+        np.save(batch_sizes_file, np.array(batch_sizes, dtype=np.int32))
+
     # Merge all batches - TRULY MEMORY EFFICIENT VERSION using memory-mapped arrays
-    print(f"\n5. Merging {len(batch_files)} batches...")
+    print(f"\n5. Merging batches...")
     print(f"   Using memory-mapped arrays to avoid loading everything into RAM...")
 
-    # First pass: Calculate total size
-    print(f"   Pass 1/3: Calculating total size...")
-    total_samples = 0
-    for batch_file in batch_files:
-        batch_data = np.load(batch_file)
-        total_samples += len(batch_data['features'])
-        batch_data.close()
+    # Load batch files list if resuming
+    if not batch_dir.exists():
+        raise RuntimeError("Batch directory not found - cannot merge without batches!")
+
+    batch_files = sorted(batch_dir.glob("batch_*.npz"))
+
+    # Calculate total size from saved metadata (avoids re-loading files!)
+    print(f"   Pass 1/2: Calculating total size from metadata...")
+    batch_sizes_file = batch_dir / "_batch_sizes.npy"
+
+    if batch_sizes_file.exists():
+        # Use saved batch sizes (FAST!)
+        batch_sizes = np.load(batch_sizes_file)
+        total_samples = int(batch_sizes.sum())
+        print(f"   ✓ Loaded batch sizes from metadata (avoided loading {len(batch_files)} files!)")
+    else:
+        # Fallback: Load files to count (SLOW - only for old batch directories)
+        print(f"   ⚠ Batch sizes metadata not found, loading files to count (slow)...")
+        total_samples = 0
+        for batch_file in batch_files:
+            batch_data = np.load(batch_file)
+            total_samples += len(batch_data['features'])
+            batch_data.close()
 
     print(f"   Total samples to merge: {total_samples:,}")
 
@@ -327,7 +349,7 @@ def generate_all_augmentations_batched(
     print(f"   Using disk-backed memory-mapped arrays (won't consume RAM)")
 
     # Create memory-mapped arrays on disk (these don't consume RAM!)
-    print(f"   Pass 2/3: Creating memory-mapped arrays...")
+    print(f"   Pass 2/2: Creating memory-mapped arrays and copying batch data...")
     mode = 'w+'
     if (output_path / "features.npy").exists():
         mode = 'r+'
@@ -360,7 +382,6 @@ def generate_all_augmentations_batched(
 
     if mode == 'w+':
         # Copy batch data into memory-mapped arrays
-        print(f"   Pass 3/3: Copying batch data into memory-mapped arrays...")
         current_idx = 0
         for i, batch_file in enumerate(batch_files):
             if i % 10 == 0:
