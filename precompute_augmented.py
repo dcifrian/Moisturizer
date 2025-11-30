@@ -208,27 +208,29 @@ def generate_all_augmentations_sequential(
     print(f"\n4. Creating memory-mapped arrays...")
     output_path.mkdir(parents=True, exist_ok=True)
 
-    all_features = np.memmap(
+    # Use np.lib.format.open_memmap() to create proper .npy files with headers
+    # (unlike np.memmap which creates raw binary files)
+    all_features = np.lib.format.open_memmap(
         str(output_path / "features.npy"), dtype=np.float32, mode='w+',
         shape=(total_samples, seq_length, total_features)
     )
-    all_targets = np.memmap(
+    all_targets = np.lib.format.open_memmap(
         str(output_path / "targets.npy"), dtype=np.float32, mode='w+',
         shape=(total_samples, 1)
     )
-    all_masks = np.memmap(
+    all_masks = np.lib.format.open_memmap(
         str(output_path / "masks.npy"), dtype=bool, mode='w+',
         shape=(total_samples, seq_length, total_features)
     )
-    all_target_stations = np.memmap(
+    all_target_stations = np.lib.format.open_memmap(
         str(output_path / "target_stations.npy"), dtype=np.int32, mode='w+',
         shape=(total_samples,)
     )
-    all_skip_pattern = np.memmap(
+    all_skip_pattern = np.lib.format.open_memmap(
         str(output_path / "skip_pattern.npy"), dtype=np.int32, mode='w+',
         shape=(total_samples,)
     )
-    all_permutation = np.memmap(
+    all_permutation = np.lib.format.open_memmap(
         str(output_path / "permutation.npy"), dtype=np.int32, mode='w+',
         shape=(total_samples,)
     )
@@ -546,39 +548,38 @@ def generate_all_augmentations_batched(
         print(f"   Estimated memory: ~4GB (dataset) + ~{num_workers * 0.5:.1f}GB (workers) = ~{4 + num_workers * 0.5:.1f}GB total")
         print(f"   Estimated speedup: ~{num_workers}x faster than sequential")
 
-        # Process batches in parallel with pre-fetched samples
-        print(f"   Starting parallel processing (main process fetches samples)...")
+        # Process batches in parallel with lazy sample fetching (overlaps fetch + process!)
+        print(f"   Starting parallel processing (fetch overlapped with processing)...")
 
-        # Prepare batch arguments with pre-fetched samples
-        batch_args_list = []
-        for batch_num in tqdm(range(num_batches), desc="   Fetching samples", unit="batch"):
-            start_idx = batch_num * batch_size
-            end_idx = min(start_idx + batch_size, len(base_dataset.sample_index))
+        def batch_generator():
+            """Generator that fetches samples on-demand, overlapping with worker processing"""
+            for batch_num in range(num_batches):
+                start_idx = batch_num * batch_size
+                end_idx = min(start_idx + batch_size, len(base_dataset.sample_index))
 
-            # Pre-fetch samples for this batch in main process
-            batch_samples_data = []
-            for idx in range(start_idx, end_idx):
-                sample = base_dataset[idx]
-                sample_info = base_dataset.sample_index[idx]
+                # Fetch samples for this batch (done lazily as workers request work)
+                batch_samples_data = []
+                for idx in range(start_idx, end_idx):
+                    sample = base_dataset[idx]
+                    sample_info = base_dataset.sample_index[idx]
 
-                # Store as numpy arrays (will be pickled when sent to worker)
-                batch_samples_data.append({
-                    'features': sample['features'].numpy(),
-                    'mask': sample['mask'].numpy(),
-                    'target': sample['target'].numpy(),
-                    'sample_info': sample_info
-                })
+                    # Store as numpy arrays (will be pickled when sent to worker)
+                    batch_samples_data.append({
+                        'features': sample['features'].numpy(),
+                        'mask': sample['mask'].numpy(),
+                        'target': sample['target'].numpy(),
+                        'sample_info': sample_info
+                    })
 
-            batch_args_list.append((batch_num, batch_samples_data, aug_params, str(batch_dir)))
+                yield (batch_num, batch_samples_data, aug_params, str(batch_dir))
 
-        # Now process batches in parallel (workers only do augmentation, no dataset loading!)
-        print(f"   Processing augmentations in parallel...")
+        # Process batches in parallel (fetching overlaps with processing!)
         with mp.Pool(processes=num_workers) as pool:
             batch_files = []
             batch_sizes = []
-            for batch_file, batch_aug_size in tqdm(pool.imap(_process_samples_worker_v2, batch_args_list),
+            for batch_file, batch_aug_size in tqdm(pool.imap(_process_samples_worker_v2, batch_generator(), chunksize=1),
                                                      total=num_batches,
-                                                     desc="      Augmenting batches",
+                                                     desc="      Processing (fetch+augment)",
                                                      unit="batch"):
                 batch_files.append(batch_file)
                 batch_sizes.append(batch_aug_size)
@@ -645,27 +646,29 @@ def generate_all_augmentations_batched(
     mode = 'r+' if all_files_exist else 'w+'
     print(f"   Mode: {'Updating existing' if mode == 'r+' else 'Creating new'} memmap files")
 
-    all_features = np.memmap(
+    # Use np.lib.format.open_memmap() to create proper .npy files with headers
+    # (unlike np.memmap which creates raw binary files that can't be loaded with np.load)
+    all_features = np.lib.format.open_memmap(
         str(output_path / "features.npy"), dtype=np.float32, mode=mode,
         shape=(total_samples, seq_length, n_features)
     )
-    all_targets = np.memmap(
+    all_targets = np.lib.format.open_memmap(
         str(output_path / "targets.npy"), dtype=np.float32, mode=mode,
         shape=(total_samples, 1)
     )
-    all_masks = np.memmap(
+    all_masks = np.lib.format.open_memmap(
         str(output_path / "masks.npy"), dtype=bool, mode=mode,
         shape=(total_samples, seq_length, n_features)
     )
-    all_target_stations = np.memmap(
+    all_target_stations = np.lib.format.open_memmap(
         str(output_path / "target_stations.npy"), dtype=np.int32, mode=mode,
         shape=(total_samples,)
     )
-    all_skip_pattern = np.memmap(
+    all_skip_pattern = np.lib.format.open_memmap(
         str(output_path / "skip_pattern.npy"), dtype=np.int32, mode=mode,
         shape=(total_samples,)
     )
-    all_permutation = np.memmap(
+    all_permutation = np.lib.format.open_memmap(
         str(output_path / "permutation.npy"), dtype=np.int32, mode=mode,
         shape=(total_samples,)
     )
