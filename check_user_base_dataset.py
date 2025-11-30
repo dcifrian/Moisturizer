@@ -30,7 +30,6 @@ base_dataset = SoilMoistureSequenceDataset(
 
 print(f"\nBase dataset: {len(base_dataset.sample_index)} samples")
 print(f"Is normalized: {base_dataset.normalize}")
-print(f"Using precomputed: {base_dataset.use_precomputed}")
 print()
 
 if len(base_dataset.sample_index) > 0:
