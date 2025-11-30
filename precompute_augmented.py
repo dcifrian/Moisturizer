@@ -23,51 +23,18 @@ from functools import partial
 from tqdm import tqdm
 
 
-# Global variable to hold the dataset in each worker process
-_worker_dataset = None
-
-
-def _init_worker(dataset_params, aug_params):
+def _process_samples_worker_v2(args):
     """
-    Initializer function called once when each worker process starts.
-    Loads the dataset once per worker (not per batch!).
+    Worker function that receives PRE-FETCHED samples (no dataset loading!)
 
     Args:
-        dataset_params: Tuple of (timeseries_path, stations_path, nearest_path, dense_path)
-        aug_params: Dict with augmentation parameters including dimensions and filtered_params
-    """
-    global _worker_dataset
-
-    timeseries_path, stations_path, nearest_path, dense_path = dataset_params
-    seq_length, n_nearby_available, _ = aug_params['dimensions']
-    filtered_params = aug_params['filtered_params']
-
-    # Load dataset ONCE for this worker
-    _worker_dataset = SoilMoistureSequenceDataset(
-        timeseries=str(timeseries_path),
-        stations=str(stations_path),
-        nearest=str(nearest_path),
-        seq_length=seq_length,
-        n_nearest=n_nearby_available,
-        feature_params=filtered_params,
-        dense_array_path=str(dense_path) if Path(dense_path).exists() else None,
-        normalize=False
-    )
-
-
-def _process_batch_worker(batch_info):
-    """
-    Worker function for parallel batch processing.
-    Uses the globally loaded dataset (loaded once per worker).
-
-    Args:
-        batch_info: Tuple of (batch_num, start_idx, end_idx, aug_params, batch_dir)
+        args: Tuple of (batch_num, batch_samples_data, aug_params, batch_dir)
+            batch_samples_data: List of dicts with 'features', 'mask', 'target', 'sample_info'
 
     Returns:
-        Tuple of (batch_file_path, batch_size) to avoid re-loading later
+        Tuple of (batch_file_path, batch_size)
     """
-    global _worker_dataset
-    batch_num, start_idx, end_idx, aug_params, batch_dir = batch_info
+    batch_num, batch_samples_data, aug_params, batch_dir = args
 
     # Unpack parameters
     seq_length, n_nearby_available, n_nearby_in_features = aug_params['dimensions']
@@ -78,10 +45,7 @@ def _process_batch_worker(batch_info):
     nearby_features_per_station = aug_params['nearby_features_per_station']
     total_features = aug_params['total_features']
 
-    # Use the pre-loaded dataset
-    dataset = _worker_dataset
-
-    batch_actual_size = end_idx - start_idx
+    batch_actual_size = len(batch_samples_data)
     batch_aug_size = batch_actual_size * total_augmentations
 
     # Allocate arrays for this batch
@@ -96,12 +60,12 @@ def _process_batch_worker(batch_info):
 
     aug_idx = 0
 
-    for base_idx in range(start_idx, end_idx):
-        # Get base sample
-        sample = dataset[base_idx]
-        base_features = sample['features'].numpy()
-        base_mask = sample['mask'].numpy()
-        base_target = sample['target'].numpy()
+    for sample_data in batch_samples_data:
+        # Unpack pre-fetched sample
+        base_features = sample_data['features']
+        base_mask = sample_data['mask']
+        base_target = sample_data['target']
+        sample_info = sample_data['sample_info']
 
         # Extract target and nearby features
         target_feat = base_features[:, :target_features]
@@ -131,7 +95,6 @@ def _process_batch_worker(batch_info):
                 batch_targets[aug_idx] = base_target
                 batch_masks[aug_idx] = aug_mask
 
-                sample_info = dataset.sample_index[base_idx]
                 batch_target_stations.append(sample_info['target_station'])
                 batch_end_dates.append(sample_info['end_date'].timestamp())
                 batch_start_dates.append(sample_info['start_date'].timestamp())
@@ -157,30 +120,320 @@ def _process_batch_worker(batch_info):
     return (batch_file, batch_aug_size)
 
 
-def generate_all_augmentations_batched(
+def generate_all_augmentations_sequential(
     data_dir: str = "./meteogalicia_data",
     n_nearby_available: int = 5,
     n_nearby_in_features: int = 4,
     coverage_threshold: float = 0.25,
-    seq_length: int = 64,
-    batch_size: int = 1000,  # Process 100 base samples at a time
-    num_workers: int = 15  # Number of worker processes (None = min(8, cpu_count))
+    seq_length: int = 64
 ):
     """
-    Pre-compute ALL augmented samples with batched processing (memory efficient!)
+    Pre-compute ALL augmented samples SEQUENTIALLY (minimal memory!)
 
-    Uses multiprocessing with worker initializers to parallelize augmentation:
-    - Each worker loads the dataset ONCE when it starts
-    - Workers then process multiple batches without reloading
-    - Memory usage: ~2-3GB per worker (instead of per batch!)
+    No multiprocessing, no temp batches - writes directly to memory-mapped arrays.
+
+    Memory usage: ~5GB (1 dataset + processing buffers)
+    Speed: Slower than parallel, but no memory overhead
 
     Args:
         data_dir: Directory containing the MeteoGalicia dataset
         n_nearby_available: Number of nearby stations in base dataset (5)
         n_nearby_in_features: Number of nearby stations in augmented samples (4)
         coverage_threshold: Minimum coverage to include a parameter (0.25 = 25%)
+        seq_length: Sequence length (default 64)
+    """
+    print("=" * 70)
+    print("PRE-COMPUTING AUGMENTED DATASET (SEQUENTIAL - LOW MEMORY)")
+    print("=" * 70)
+
+    collector = MeteoGaliciaCollector(data_dir=data_dir)
+    output_path = Path(data_dir) / "precomputed_sequences_augmented"
+    norm_stats_path = Path(data_dir) / "normalization_stats_augmented.npz"
+
+    # Get filtered parameters
+    print("\n1. Analyzing parameter coverage...")
+    coverage, filtered_params = collector.analyze_parameter_coverage(
+        coverage_threshold=coverage_threshold
+    )
+    print(f"   Selected {len(filtered_params)} parameters")
+
+    # Load base dataset with n_nearest=5
+    print(f"\n2. Loading base dataset with {n_nearby_available} nearby stations...")
+    dense_path = Path(data_dir) / "dense_features.npz"
+
+    base_dataset = SoilMoistureSequenceDataset(
+        timeseries=str(collector.timeseries_file),
+        stations=str(collector.stations_file),
+        nearest=str(collector.nearest_file),
+        seq_length=seq_length,
+        n_nearest=n_nearby_available,
+        feature_params=filtered_params,
+        precomputed_path=None,
+        dense_array_path=str(dense_path) if dense_path.exists() else None,
+        normalize=False
+    )
+
+    print(f"   Base dataset: {len(base_dataset.sample_index)} samples")
+
+    # Generate augmentation combinations
+    print(f"\n3. Generating augmentation combinations...")
+    available_indices = list(range(n_nearby_available))
+    skip_patterns = []
+    for skip_idx in range(n_nearby_available):
+        keep_indices = [i for i in available_indices if i != skip_idx][:n_nearby_in_features]
+        skip_patterns.append(keep_indices)
+
+    all_permutations = list(permutations(range(n_nearby_in_features)))
+    total_augmentations = len(skip_patterns) * len(all_permutations)
+
+    print(f"   Skip patterns: {len(skip_patterns)}")
+    print(f"   Permutations per skip: {len(all_permutations)}")
+    print(f"   Total augmentations per base: {total_augmentations}")
+
+    # Calculate dimensions
+    target_features = len(filtered_params)
+    nearby_features_per_station = 1 + len(filtered_params) + 1
+    total_features = target_features + (nearby_features_per_station * n_nearby_in_features)
+    total_samples = len(base_dataset.sample_index) * total_augmentations
+
+    print(f"   Total augmented samples: {total_samples:,}")
+    print(f"   Sample shape: [{seq_length}, {total_features}]")
+
+    # Calculate memory requirements
+    features_size_gb = total_samples * seq_length * total_features * 4 / 1e9
+    masks_size_gb = total_samples * seq_length * total_features * 1 / 1e9
+    print(f"   Dataset size: {features_size_gb:.1f}GB features + {masks_size_gb:.1f}GB masks = {features_size_gb + masks_size_gb:.1f}GB total")
+
+    # Create memory-mapped arrays (write directly, no temp batches!)
+    print(f"\n4. Creating memory-mapped arrays...")
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    all_features = np.memmap(
+        str(output_path / "features.npy"), dtype=np.float32, mode='w+',
+        shape=(total_samples, seq_length, total_features)
+    )
+    all_targets = np.memmap(
+        str(output_path / "targets.npy"), dtype=np.float32, mode='w+',
+        shape=(total_samples, 1)
+    )
+    all_masks = np.memmap(
+        str(output_path / "masks.npy"), dtype=bool, mode='w+',
+        shape=(total_samples, seq_length, total_features)
+    )
+    all_target_stations = np.memmap(
+        str(output_path / "target_stations.npy"), dtype=np.int32, mode='w+',
+        shape=(total_samples,)
+    )
+    all_skip_pattern = np.memmap(
+        str(output_path / "skip_pattern.npy"), dtype=np.int32, mode='w+',
+        shape=(total_samples,)
+    )
+    all_permutation = np.memmap(
+        str(output_path / "permutation.npy"), dtype=np.int32, mode='w+',
+        shape=(total_samples,)
+    )
+
+    # Use regular arrays for dates (small enough, will save with np.save later)
+    all_end_dates = np.zeros(total_samples, dtype=np.float64)
+    all_start_dates = np.zeros(total_samples, dtype=np.float64)
+
+    # Process samples sequentially
+    print(f"\n5. Generating augmentations (sequential)...")
+    current_idx = 0
+
+    for base_idx in tqdm(range(len(base_dataset.sample_index)), desc="   Processing", unit="sample"):
+        # Get base sample
+        sample = base_dataset[base_idx]
+        base_features = sample['features'].numpy()
+        base_mask = sample['mask'].numpy()
+        base_target = sample['target'].numpy()
+        sample_info = base_dataset.sample_index[base_idx]
+
+        # Extract target and nearby features
+        target_feat = base_features[:, :target_features]
+        target_mask = base_mask[:, :target_features]
+
+        nearby_start = target_features
+        nearby_features_5 = base_features[:, nearby_start:].reshape(
+            seq_length, n_nearby_available, nearby_features_per_station
+        )
+        nearby_mask_5 = base_mask[:, nearby_start:].reshape(
+            seq_length, n_nearby_available, nearby_features_per_station
+        )
+
+        # Generate all augmentations for this base sample
+        for skip_idx, keep_indices in enumerate(skip_patterns):
+            nearby_features_4 = nearby_features_5[:, keep_indices, :]
+            nearby_mask_4 = nearby_mask_5[:, keep_indices, :]
+
+            for perm_idx, perm in enumerate(all_permutations):
+                perm_nearby_features = nearby_features_4[:, perm, :].reshape(seq_length, -1)
+                perm_nearby_mask = nearby_mask_4[:, perm, :].reshape(seq_length, -1)
+
+                aug_features = np.concatenate([target_feat, perm_nearby_features], axis=1)
+                aug_mask = np.concatenate([target_mask, perm_nearby_mask], axis=1)
+
+                # Write directly to memmap
+                all_features[current_idx] = aug_features
+                all_targets[current_idx] = base_target
+                all_masks[current_idx] = aug_mask
+                all_target_stations[current_idx] = sample_info['target_station']
+                all_end_dates[current_idx] = sample_info['end_date'].timestamp()
+                all_start_dates[current_idx] = sample_info['start_date'].timestamp()
+                all_skip_pattern[current_idx] = skip_idx
+                all_permutation[current_idx] = perm_idx
+
+                current_idx += 1
+
+        # Flush periodically to avoid buffer buildup
+        if (base_idx + 1) % 1000 == 0:
+            all_features.flush()
+            all_targets.flush()
+            all_masks.flush()
+
+    print(f"   ✓ Generated {current_idx:,} augmented samples")
+
+    # Compute normalization statistics
+    print(f"\n6. Computing normalization statistics...")
+    feature_mins = np.full(total_features, np.inf, dtype=np.float32)
+    feature_maxs = np.full(total_features, -np.inf, dtype=np.float32)
+    invalid_markers = [-9999.0, -1000.0]
+
+    sample_batch_size = 10000
+    for i in tqdm(range(0, len(all_features), sample_batch_size),
+                  desc="   Computing stats",
+                  unit="batch",
+                  total=(len(all_features) + sample_batch_size - 1) // sample_batch_size):
+        end_i = min(i + sample_batch_size, len(all_features))
+        features_batch = all_features[i:end_i]
+        masks_batch = all_masks[i:end_i]
+
+        for feat_idx in range(total_features):
+            feat_data = features_batch[:, :, feat_idx]
+            feat_mask = masks_batch[:, :, feat_idx]
+
+            valid_mask = feat_mask
+            for marker in invalid_markers:
+                valid_mask &= (feat_data != marker)
+
+            valid_data = feat_data[valid_mask]
+
+            if len(valid_data) > 0:
+                feature_mins[feat_idx] = min(feature_mins[feat_idx], valid_data.min())
+                feature_maxs[feat_idx] = max(feature_maxs[feat_idx], valid_data.max())
+
+    valid_targets = all_targets[~np.isin(all_targets, invalid_markers)]
+    target_min = valid_targets.min() if len(valid_targets) > 0 else 0.0
+    target_max = valid_targets.max() if len(valid_targets) > 0 else 1.0
+
+    print(f"   Feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
+    print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
+
+    # Normalize
+    print(f"\n7. Normalizing augmented samples (vectorized)...")
+    normalized_invalid_marker = -2.0
+
+    for idx in tqdm(range(0, len(all_features), sample_batch_size),
+                    desc="   Normalizing",
+                    unit="batch",
+                    total=(len(all_features) + sample_batch_size - 1) // sample_batch_size):
+        end_idx = min(idx + sample_batch_size, len(all_features))
+
+        features_batch = all_features[idx:end_idx]
+        targets_batch = all_targets[idx:end_idx]
+
+        for feat_idx in range(total_features):
+            feat_min = feature_mins[feat_idx]
+            feat_max = feature_maxs[feat_idx]
+
+            feat_data = features_batch[:, :, feat_idx]
+
+            invalid_mask = np.zeros_like(feat_data, dtype=bool)
+            for marker in invalid_markers:
+                invalid_mask |= (feat_data == marker)
+
+            if feat_max > feat_min:
+                features_batch[:, :, feat_idx] = 2.0 * (feat_data - feat_min) / (feat_max - feat_min) - 1.0
+
+            features_batch[invalid_mask, feat_idx] = normalized_invalid_marker
+
+        target_invalid_mask = np.zeros(len(targets_batch), dtype=bool)
+        for marker in invalid_markers:
+            target_invalid_mask |= (targets_batch == marker).flatten()
+
+        if target_max > target_min:
+            targets_batch[:] = 2.0 * (targets_batch - target_min) / (target_max - target_min) - 1.0
+
+        targets_batch[target_invalid_mask] = normalized_invalid_marker
+
+        all_features[idx:end_idx] = features_batch
+        all_targets[idx:end_idx] = targets_batch
+
+        if (end_idx % 100000) < sample_batch_size:
+            all_features.flush()
+            all_targets.flush()
+
+    # Flush and save
+    print(f"\n8. Saving dataset...")
+    all_features.flush()
+    all_targets.flush()
+    all_masks.flush()
+    all_target_stations.flush()
+    all_skip_pattern.flush()
+    all_permutation.flush()
+
+    # Save dates with np.save() (matches non-augmented dataset format)
+    np.save(output_path / 'end_dates.npy', all_end_dates)
+    np.save(output_path / 'start_dates.npy', all_start_dates)
+    np.save(output_path / 'is_normalized.npy', np.array([True], dtype=bool))
+
+    np.savez(
+        norm_stats_path,
+        feature_mins=feature_mins,
+        feature_maxs=feature_maxs,
+        target_min=target_min,
+        target_max=target_max
+    )
+
+    print(f"\n   ✓ Saved to: {output_path}")
+
+    print("\n" + "=" * 70)
+    print("✓ AUGMENTED DATASET COMPLETE!")
+    print("=" * 70)
+    print(f"Base samples: {len(base_dataset.sample_index):,}")
+    print(f"Augmented samples: {total_samples:,}")
+    print(f"Augmentation factor: {total_samples / len(base_dataset.sample_index):.0f}x")
+    print(f"\nMemory usage:")
+    print(f"  - Peak RAM: ~5 GB (sequential processing)")
+    print(f"  - Disk space: {(features_size_gb + masks_size_gb):.1f} GB")
+    print("=" * 70)
+
+
+def generate_all_augmentations_batched(
+    data_dir: str = "./meteogalicia_data",
+    n_nearby_available: int = 5,
+    n_nearby_in_features: int = 4,
+    coverage_threshold: float = 0.25,
+    seq_length: int = 64,
+    batch_size: int = 1000,
+    num_workers: int = 4  # Reduced default: 4 workers × ~500MB = ~2GB total
+):
+    """
+    Pre-compute ALL augmented samples with batched processing (memory efficient!)
+
+    Uses multiprocessing with PRE-FETCHED SAMPLES (no dataset in workers!):
+    - Main process loads dataset ONCE and fetches samples
+    - Workers receive pre-fetched samples (no dataset loading)
+    - Memory usage: ~4GB (main dataset) + ~500MB per worker = ~6GB total for 4 workers
+
+    Args:
+        data_dir: Directory containing the MeteoGalicia dataset
+        n_nearby_available: Number of nearby stations in base dataset (5)
+        n_nearby_in_features: Number of nearby stations in augmented samples (4)
+        coverage_threshold: Minimum coverage to include a parameter (0.25 = 25%)
+        seq_length: Sequence length (default 64)
         batch_size: Number of base samples to process per batch
-        num_workers: Number of parallel workers (default: min(8, cpu_count) for memory efficiency)
+        num_workers: Number of parallel workers (default 4 for low memory)
     """
     print("=" * 70)
     print("PRE-COMPUTING AUGMENTED DATASET (MEMORY EFFICIENT)")
@@ -199,24 +452,23 @@ def generate_all_augmentations_batched(
 
     print(f"   Selected {len(filtered_params)} parameters")
 
-    # Load base dataset with n_nearest=5
+    # Load base dataset (in main process only!)
     print(f"\n2. Loading base dataset with {n_nearby_available} nearby stations...")
-    if not batch_dir.exists():
-        dense_path = Path(data_dir) / "dense_features.npz"
+    dense_path = Path(data_dir) / "dense_features.npz"
 
-        base_dataset = SoilMoistureSequenceDataset(
-            timeseries=str(collector.timeseries_file),
-            stations=str(collector.stations_file),
-            nearest=str(collector.nearest_file),
-            seq_length=seq_length,
-            n_nearest=n_nearby_available,
-            feature_params=filtered_params,
-            precomputed_path=None,
-            dense_array_path=str(dense_path) if dense_path.exists() else None,
-            normalize=False
-        )
+    base_dataset = SoilMoistureSequenceDataset(
+        timeseries=str(collector.timeseries_file),
+        stations=str(collector.stations_file),
+        nearest=str(collector.nearest_file),
+        seq_length=seq_length,
+        n_nearest=n_nearby_available,
+        feature_params=filtered_params,
+        precomputed_path=None,
+        dense_array_path=str(dense_path) if dense_path.exists() else None,
+        normalize=False
+    )
 
-        print(f"   Base dataset: {len(base_dataset.sample_index)} samples")
+    print(f"   Base dataset: {len(base_dataset.sample_index)} samples")
 
     # Generate augmentation combinations
     print(f"\n3. Generating augmentation combinations...")
@@ -281,34 +533,48 @@ def generate_all_augmentations_batched(
         batch_dir.mkdir(exist_ok=True)
 
 
-        # Use conservative default for workers to avoid excessive memory usage
-        # Each worker loads ~2-3GB, so 8 workers = ~16-24GB total
-        if num_workers is None:
-            num_workers = min(8, mp.cpu_count())
-
         print(f"\n4. Processing in batches of {batch_size} using {num_workers} CPU cores...")
         print(f"   Batch directory: {batch_dir}")
         print(f"   Total batches: {num_batches}")
-        print(f"   Estimated memory per worker: ~2-3GB")
-        print(f"   Total estimated memory: ~{num_workers * 2.5:.1f}GB")
+        print(f"   Estimated memory: ~4GB (dataset) + ~{num_workers * 0.5:.1f}GB (workers) = ~{4 + num_workers * 0.5:.1f}GB total")
         print(f"   Estimated speedup: ~{num_workers}x faster than sequential")
 
-        # Prepare parameters for workers
-        dataset_params = (collector.timeseries_file, collector.stations_file, collector.nearest_file, dense_path)
+        # Process batches in parallel with pre-fetched samples
+        print(f"   Starting parallel processing (main process fetches samples)...")
 
-        # Process batches in parallel with worker initializer
-        print(f"   Starting parallel processing...")
-        print(f"   Each worker will load the dataset once, then process multiple batches...")
-        with mp.Pool(processes=num_workers, initializer=_init_worker, initargs=(dataset_params, aug_params)) as pool:
-            # Use imap with tqdm for progress tracking
+        # Prepare batch arguments with pre-fetched samples
+        batch_args_list = []
+        for batch_num in tqdm(range(num_batches), desc="   Fetching samples", unit="batch"):
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, len(base_dataset.sample_index))
+
+            # Pre-fetch samples for this batch in main process
+            batch_samples_data = []
+            for idx in range(start_idx, end_idx):
+                sample = base_dataset[idx]
+                sample_info = base_dataset.sample_index[idx]
+
+                # Store as numpy arrays (will be pickled when sent to worker)
+                batch_samples_data.append({
+                    'features': sample['features'].numpy(),
+                    'mask': sample['mask'].numpy(),
+                    'target': sample['target'].numpy(),
+                    'sample_info': sample_info
+                })
+
+            batch_args_list.append((batch_num, batch_samples_data, aug_params, str(batch_dir)))
+
+        # Now process batches in parallel (workers only do augmentation, no dataset loading!)
+        print(f"   Processing augmentations in parallel...")
+        with mp.Pool(processes=num_workers) as pool:
             batch_files = []
             batch_sizes = []
-            for batch_file, batch_size in tqdm(pool.imap(_process_batch_worker, batch_infos),
-                                                total=num_batches,
-                                                desc="      Processing batches",
-                                                unit="batch"):
+            for batch_file, batch_aug_size in tqdm(pool.imap(_process_samples_worker_v2, batch_args_list),
+                                                     total=num_batches,
+                                                     desc="      Augmenting batches",
+                                                     unit="batch"):
                 batch_files.append(batch_file)
-                batch_sizes.append(batch_size)
+                batch_sizes.append(batch_aug_size)
 
         print(f"   ✓ All {num_batches} batches processed!")
 
@@ -364,9 +630,9 @@ def generate_all_augmentations_batched(
     # Ensure output directory exists
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Check if ALL required memmap files exist (not just features.npy!)
+    # Check if ALL required memmap files exist (dates are not memmap - saved with np.save)
     required_files = ["features.npy", "targets.npy", "masks.npy", "target_stations.npy",
-                      "skip_pattern.npy", "permutation.npy", "end_dates.npy", "start_dates.npy"]
+                      "skip_pattern.npy", "permutation.npy"]
     all_files_exist = all((output_path / f).exists() for f in required_files)
 
     mode = 'r+' if all_files_exist else 'w+'
@@ -396,14 +662,11 @@ def generate_all_augmentations_batched(
         str(output_path / "permutation.npy"), dtype=np.int32, mode=mode,
         shape=(total_samples,)
     )
-    all_end_dates = np.memmap(
-        str(output_path / "end_dates.npy"), dtype=np.float64, mode=mode,
-        shape=(total_samples,)
-    )
-    all_start_dates = np.memmap(
-        str(output_path / "start_dates.npy"), dtype=np.float64, mode=mode,
-        shape=(total_samples,)
-    )
+
+    # Use regular arrays for dates (small enough - ~256MB for 16M samples)
+    # Will save with np.save() at the end to match non-augmented dataset format
+    all_end_dates = np.zeros(total_samples, dtype=np.float64)
+    all_start_dates = np.zeros(total_samples, dtype=np.float64)
 
     if mode == 'w+':
         # Copy batch data into memory-mapped arrays
@@ -552,8 +815,10 @@ def generate_all_augmentations_batched(
     all_target_stations.flush()
     all_skip_pattern.flush()
     all_permutation.flush()
-    all_end_dates.flush()
-    all_start_dates.flush()
+
+    # Save dates with np.save() (matches non-augmented dataset format)
+    np.save(output_path / 'end_dates.npy', all_end_dates)
+    np.save(output_path / 'start_dates.npy', all_start_dates)
     np.save(output_path / "is_normalized.npy", np.array([True], dtype=bool))
 
     np.savez(
@@ -579,12 +844,23 @@ def generate_all_augmentations_batched(
     print(f"Augmented samples: {total_samples:,}")
     print(f"Augmentation factor: {total_samples / len(base_dataset.sample_index):.0f}x")
     print(f"\nMemory usage:")
-    print(f"  - Per batch processing: ~{batch_size * total_augmentations * seq_length * total_features * 4 / 1e9:.1f} GB")
-    print(f"  - Total worker memory: ~{num_workers * 2.5:.1f} GB")
-    print(f"  - Merge/normalize: <5 GB (used memory-mapped arrays)")
-    print(f"  - Disk space used: ~{(features_size_gb + masks_size_gb):.1f} GB temporary + {output_path.stat().st_size / 1e9:.1f} GB final")
+    print(f"  - Dataset (main process): ~4 GB")
+    print(f"  - Workers: ~{num_workers * 0.5:.1f} GB")
+    print(f"  - Total peak RAM: ~{4 + num_workers * 0.5:.1f} GB")
+    print(f"  - Disk space: ~{(features_size_gb + masks_size_gb):.1f} GB")
     print("=" * 70)
 
 
 if __name__ == "__main__":
-    generate_all_augmentations_batched(batch_size=100)
+    import sys
+
+    # Choose mode based on memory constraints
+    if len(sys.argv) > 1 and sys.argv[1] == "--sequential":
+        # Sequential mode: ~5GB RAM (slow but minimal memory)
+        print("Using SEQUENTIAL mode (minimal memory)")
+        generate_all_augmentations_sequential()
+    else:
+        # Batched mode: ~6GB RAM with 4 workers (faster)
+        print("Using BATCHED mode (faster, moderate memory)")
+        print("Tip: Use --sequential for systems with <8GB RAM")
+        generate_all_augmentations_batched(batch_size=100, num_workers=4)
