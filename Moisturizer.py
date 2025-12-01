@@ -895,8 +895,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             }
             # Create fast lookup mappings
             self.dense_station_to_idx = {sid: idx for idx, sid in enumerate(self.dense_arrays['station_ids'])}
-            # Normalize dates to midnight UTC to ensure consistent matching
-            self.dense_date_to_idx = {date.normalize(): idx for idx, date in enumerate(self.dense_arrays['dates'])}
+            # Dates in dense arrays are already at midnight - no need to normalize
+            self.dense_date_to_idx = {date: idx for idx, date in enumerate(self.dense_arrays['dates'])}
             print(f"  Loaded dense arrays: {self.dense_arrays['features'].shape}")
             print(f"  Memory: ~{self.dense_arrays['features'].nbytes / 1e6:.1f} MB")
 
@@ -904,8 +904,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             print("  Building fallback index for edge cases...")
             # Use numpy arrays for fast dict building (100x faster than itertuples)
             station_ids = self.timeseries_df['station_id'].astype(np.int32).values
-            # Normalize dates to midnight UTC for consistent dictionary lookups
-            dates = pd.to_datetime(self.timeseries_df['date'].values).normalize()
+            # Dates from CSV/precomputed are already at midnight - no need to normalize
+            dates = self.timeseries_df['date'].values
             param_codes = self.timeseries_df['parameter_code'].values
             values = self.timeseries_df['value'].astype(np.float32).values
             self.timeseries_index = dict(zip(
@@ -917,8 +917,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             print("Creating fast lookup index for timeseries...")
             # Use numpy arrays for fast dict building (100x faster than itertuples)
             station_ids = self.timeseries_df['station_id'].astype(np.int32).values
-            # Normalize dates to midnight UTC for consistent dictionary lookups
-            dates = pd.to_datetime(self.timeseries_df['date'].values).normalize()
+            # Dates from CSV/precomputed are already at midnight - no need to normalize
+            dates = self.timeseries_df['date'].values
             param_codes = self.timeseries_df['parameter_code'].values
             values = self.timeseries_df['value'].astype(np.float32).values
             self.timeseries_index = dict(zip(
@@ -1191,12 +1191,12 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                         mask[:, f_idx] = True
 
         # Fill target station features using FAST DICT LOOKUP
-        # Note: date_range already normalized in constructor (freq='D', normalize=True)
-        for t, date_normalized in enumerate(date_range):
+        # Note: dates from pd.date_range(freq='D') are already at midnight
+        for t, date in enumerate(date_range):
             # Target station features (time-varying only)
             for f_idx, param in enumerate(self.feature_params):
                 if param not in coordinate_features:
-                    key = (target_station_id, date_normalized, param)
+                    key = (target_station_id, date, param)
                     if key in self.timeseries_index:
                         features[t, f_idx] = self.timeseries_index[key]
                         mask[t, f_idx] = True
@@ -1223,21 +1223,21 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 # Time-varying features
                 for f_idx, param in enumerate(self.feature_params):
                     if param not in coordinate_features:
-                        key = (nearby_station_id, date_normalized, param)
+                        key = (nearby_station_id, date, param)
                         feat_idx = nearby_offset + 1 + f_idx
                         if key in self.timeseries_index:
                             features[t, feat_idx] = self.timeseries_index[key]
                             mask[t, feat_idx] = True
 
                 # Soil moisture for nearby station
-                key = (nearby_station_id, date_normalized, self.soil_moisture_param)
+                key = (nearby_station_id, date, self.soil_moisture_param)
                 soil_idx = nearby_offset + 1 + len(self.feature_params)
                 if key in self.timeseries_index:
                     features[t, soil_idx] = self.timeseries_index[key]
                     mask[t, soil_idx] = True
 
         # Get target (soil moisture at end_date for target station)
-        # Use the last date from our already-normalized range
+        # Use the last date from date_range (already at midnight)
         target_key = (target_station_id, date_range[-1], self.soil_moisture_param)
         target = self.timeseries_index.get(target_key, self.missing_value)
 
@@ -1266,9 +1266,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         """
         nearby_stations = self._get_nearest_stations(target_station_id)
 
-        # Get date range indices
+        # Get date range indices (dates from pd.date_range are already at midnight)
         date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-        date_indices = [self.dense_date_to_idx.get(date.normalize()) for date in date_range]
+        date_indices = [self.dense_date_to_idx.get(date) for date in date_range]
 
         # Check if all dates are in our dense array
         if None in date_indices:
