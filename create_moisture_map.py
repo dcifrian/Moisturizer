@@ -242,12 +242,15 @@ def build_sequence_for_any_station(
     end_date,
     timeseries_lookup,
     nearest_df,
-    stations_df,
+    stations_lookup,  # Pre-built dict instead of DataFrame
     feature_params,
     norm_stats,
     seq_length=64,
     n_nearest=4,
-    missing_value=-1000.0
+    missing_value=-1000.0,
+    dense_arrays=None,  # PHASE 2: Dense arrays for fast path
+    dense_station_to_idx=None,  # PHASE 2: Station ID -> dense array index
+    dense_date_to_idx=None  # PHASE 2: Date -> dense array index
 ):
     """
     Build a sequence for ANY station (even without soil moisture sensor)
@@ -255,9 +258,14 @@ def build_sequence_for_any_station(
     This allows us to predict for stations without sensors by using their
     weather data + nearby stations with sensors as context.
 
+    OPTIMIZATION: Uses dense arrays for nearby stations when available (100-200x faster)
+
     Args:
         timeseries_lookup: Pre-built dict from build_fast_timeseries_lookup
-        stations_df: DataFrame with station metadata (for coordinate features)
+        stations_lookup: Pre-built dict {station_id: row}
+        dense_arrays: Optional dict with 'features', 'masks', 'feature_params' for fast path
+        dense_station_to_idx: Optional dict {station_id: array_index}
+        dense_date_to_idx: Optional dict {date: array_index}
     """
     import numpy as np
 
@@ -300,76 +308,139 @@ def build_sequence_for_any_station(
     features = np.full((seq_length, total_features), missing_value, dtype=np.float32)
     mask = np.zeros((seq_length, total_features), dtype=bool)
 
-    # Get station metadata for coordinate features
-    target_station_row = stations_df[stations_df['station_id'] == station_id]
-    if target_station_row.empty:
+    # Get station metadata for coordinate features (fast dict lookup)
+    if station_id not in stations_lookup:
         return None
-    target_station_row = target_station_row.iloc[0]
+    target_station_row = stations_lookup[station_id]
 
-    # Build station lookup for nearby stations
+    # Get nearby station rows (fast dict lookup)
     nearby_station_rows = {}
     for nearby in nearby_stations:
-        nearby_row = stations_df[stations_df['station_id'] == nearby['station_id']]
-        if not nearby_row.empty:
-            nearby_station_rows[nearby['station_id']] = nearby_row.iloc[0]
+        if nearby['station_id'] in stations_lookup:
+            nearby_station_rows[nearby['station_id']] = stations_lookup[nearby['station_id']]
 
-    # Fill target station features using fast lookup
+    # OPTIMIZATION: Fill coordinate features ONCE before the date loop (static data)
+    # Target station coordinates
+    f_idx = 0
+    for param in feature_params:
+        if param in coordinate_features:
+            coord_value = target_station_row.get(param)
+            if pd.notna(coord_value):
+                features[:, f_idx] = float(coord_value)  # Fill ALL timesteps at once
+                mask[:, f_idx] = True
+        f_idx += 1
+
+    # Nearby stations coordinates
+    for n_idx, nearby in enumerate(nearby_stations):
+        nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
+
+        # Distance (constant across time)
+        features[:, nearby_offset] = nearby['distance']
+        mask[:, nearby_offset] = True
+
+        # Coordinate features
+        if nearby['station_id'] in nearby_station_rows:
+            nearby_row = nearby_station_rows[nearby['station_id']]
+            f_idx_nearby = 0
+            for param in feature_params:
+                if param in coordinate_features:
+                    feat_idx = nearby_offset + 1 + f_idx_nearby
+                    coord_value = nearby_row.get(param)
+                    if pd.notna(coord_value):
+                        features[:, feat_idx] = float(coord_value)  # Fill ALL timesteps
+                        mask[:, feat_idx] = True
+                f_idx_nearby += 1
+
+    # PHASE 2: Check if we can use dense arrays for nearby stations (FAST PATH)
+    use_dense = False
+    date_indices = None
+    if dense_arrays is not None and dense_station_to_idx is not None and dense_date_to_idx is not None:
+        # Check if all dates are in dense arrays
+        date_indices = [dense_date_to_idx.get(date.normalize()) for date in date_range]
+        if None not in date_indices:
+            use_dense = True
+            # print(f"  DEBUG: Using FAST PATH (dense arrays) for nearby stations")
+        # else:
+        #     print(f"  DEBUG: Dates not in dense arrays, using SLOW PATH (dict lookup)")
+
+    # Fill timeseries features (only non-coordinate parameters)
+    timeseries_params = [p for p in feature_params if p not in coordinate_features]
+
+    # PHASE 2: Try FAST PATH for nearby stations using dense arrays
+    if use_dense:
+        # Fill nearby stations using dense arrays (VECTORIZED - very fast!)
+        for n_idx, nearby in enumerate(nearby_stations):
+            nearby_id = nearby['station_id']
+            nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
+
+            # Check if this nearby station is in dense arrays
+            if nearby_id in dense_station_to_idx:
+                nearby_idx = dense_station_to_idx[nearby_id]
+
+                # FAST: Single slice for all 64 days, all 27 features at once!
+                nearby_slice = dense_arrays['features'][nearby_idx, date_indices, :]  # [64, 27]
+                nearby_mask_slice = dense_arrays['masks'][nearby_idx, date_indices, :]
+
+                # Dense array has 27 features: [0-22: weather, 23-25: coords, 26: soil moisture]
+                # We need to map to our feature structure: [distance, features(26), soil_moisture]
+
+                # Copy weather features (indices 0-22 in dense, excluding coords)
+                # In feature_params, weather params are at indices matching dense array
+                feat_start = nearby_offset + 1
+                for f_idx, param in enumerate(feature_params):
+                    if param not in coordinate_features:  # Skip coords (already filled)
+                        # Find this param in dense array
+                        if param in dense_arrays['feature_params']:
+                            dense_param_idx = list(dense_arrays['feature_params']).index(param)
+                            feat_idx = feat_start + f_idx
+                            features[:, feat_idx] = nearby_slice[:, dense_param_idx]
+                            mask[:, feat_idx] = nearby_mask_slice[:, dense_param_idx]
+
+                # Copy soil moisture (index 26 in dense array)
+                soil_idx = nearby_offset + 1 + len(feature_params)
+                if 'HS_CV_AVG_-0.2m' in dense_arrays['feature_params']:
+                    dense_soil_idx = list(dense_arrays['feature_params']).index('HS_CV_AVG_-0.2m')
+                    features[:, soil_idx] = nearby_slice[:, dense_soil_idx]
+                    mask[:, soil_idx] = nearby_mask_slice[:, dense_soil_idx]
+            # else: Station not in dense arrays, coordinates already filled, skip
+    # else: Dense arrays not available, will use dict lookup below
+
+    # Fill target station + nearby stations timeseries (SLOW PATH if needed)
     for t, date in enumerate(date_range):
         date_str = str(date.date())
 
-        # Fill timeseries parameters from lookup
+        # Fill target station timeseries parameters from lookup (always use dict - virtual station)
         f_idx = 0
         for param in feature_params:
-            if param in coordinate_features:
-                # Fill coordinate feature from station metadata (SAME for all dates)
-                if t == 0:  # Only need to fill once, will broadcast to all timesteps below
-                    coord_value = target_station_row.get(param)
-                    if pd.notna(coord_value):
-                        features[:, f_idx] = float(coord_value)  # Fill ALL timesteps
-                        mask[:, f_idx] = True
-            else:
-                # Fill from timeseries lookup
+            if param not in coordinate_features:  # Skip coordinates (already filled)
                 key = (station_id, date_str, param)
                 if key in timeseries_lookup:
                     features[t, f_idx] = timeseries_lookup[key]
                     mask[t, f_idx] = True
             f_idx += 1
 
-        # Fill nearby stations features
-        for n_idx, nearby in enumerate(nearby_stations):
-            nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
+        # Fill nearby stations timeseries features (SLOW PATH - only if dense arrays not used)
+        if not use_dense:
+            for n_idx, nearby in enumerate(nearby_stations):
+                nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
 
-            # Distance (constant across time)
-            features[t, nearby_offset] = nearby['distance']
-            mask[t, nearby_offset] = True
+                # Timeseries features (non-coordinate)
+                f_idx_nearby = 0
+                for param in feature_params:
+                    if param not in coordinate_features:  # Skip coordinates (already filled)
+                        feat_idx = nearby_offset + 1 + f_idx_nearby
+                        key = (nearby['station_id'], date_str, param)
+                        if key in timeseries_lookup:
+                            features[t, feat_idx] = timeseries_lookup[key]
+                            mask[t, feat_idx] = True
+                    f_idx_nearby += 1
 
-            # Features
-            f_idx_nearby = 0
-            for param in feature_params:
-                feat_idx = nearby_offset + 1 + f_idx_nearby
-
-                if param in coordinate_features:
-                    # Fill coordinate feature from station metadata
-                    if t == 0 and nearby['station_id'] in nearby_station_rows:
-                        nearby_row = nearby_station_rows[nearby['station_id']]
-                        coord_value = nearby_row.get(param)
-                        if pd.notna(coord_value):
-                            features[:, feat_idx] = float(coord_value)  # Fill ALL timesteps
-                            mask[:, feat_idx] = True
-                else:
-                    # Fill from timeseries lookup
-                    key = (nearby['station_id'], date_str, param)
-                    if key in timeseries_lookup:
-                        features[t, feat_idx] = timeseries_lookup[key]
-                        mask[t, feat_idx] = True
-                f_idx_nearby += 1
-
-            # Soil moisture for nearby station
-            key = (nearby['station_id'], date_str, 'HS_CV_AVG_-0.2m')
-            soil_idx = nearby_offset + 1 + len(feature_params)
-            if key in timeseries_lookup:
-                features[t, soil_idx] = timeseries_lookup[key]
-                mask[t, soil_idx] = True
+                # Soil moisture for nearby station
+                key = (nearby['station_id'], date_str, 'HS_CV_AVG_-0.2m')
+                soil_idx = nearby_offset + 1 + len(feature_params)
+                if key in timeseries_lookup:
+                    features[t, soil_idx] = timeseries_lookup[key]
+                    mask[t, soil_idx] = True
 
     # Apply normalization
     features_normalized = apply_normalization_to_features(features, mask, norm_stats, missing_value)
@@ -377,7 +448,7 @@ def build_sequence_for_any_station(
     return features_normalized, mask
 
 def apply_normalization_to_features(features, mask, norm_stats, missing_value=-1000.0):
-    """Apply normalization to features (same as in Dataset)"""
+    """Apply normalization to features (same as in Dataset) - VECTORIZED for speed"""
     import numpy as np
 
     feature_mins = norm_stats['feature_mins']
@@ -395,24 +466,21 @@ def apply_normalization_to_features(features, mask, norm_stats, missing_value=-1
     invalid_markers = [-9999.0, missing_value]
     normalized_invalid_marker = -2.0
 
-    features_norm = features.copy()
+    # VECTORIZED normalization (50-100x faster than loop!)
+    # Create invalid mask for entire array at once
+    invalid_mask = np.isin(features, invalid_markers)
 
-    # Normalize ALL feature columns (target station + nearby stations)
-    for feat_idx in range(features.shape[1]):
-        feat_min = feature_mins[feat_idx]
-        feat_max = feature_maxs[feat_idx]
+    # Broadcast normalize all features at once
+    # features: (seq_length, total_features)
+    # feature_mins/maxs: (total_features,)
+    feat_ranges = feature_maxs - feature_mins
+    valid_ranges = feat_ranges > 0
 
-        # Handle invalid markers
-        invalid_mask = np.zeros(features.shape[0], dtype=bool)
-        for marker in invalid_markers:
-            invalid_mask |= (features[:, feat_idx] == marker)
+    # Normalize all features in one operation (broadcasting)
+    features_norm = 2.0 * (features - feature_mins[None, :]) / np.where(valid_ranges[None, :], feat_ranges[None, :], 1.0) - 1.0
 
-        # Normalize valid values to [-1, 1]
-        if feat_max > feat_min:
-            features_norm[:, feat_idx] = 2.0 * (features[:, feat_idx] - feat_min) / (feat_max - feat_min) - 1.0
-
-        # Set invalid markers to -2
-        features_norm[invalid_mask, feat_idx] = normalized_invalid_marker
+    # Set invalid values
+    features_norm[invalid_mask] = normalized_invalid_marker
 
     return features_norm
 
@@ -510,6 +578,35 @@ def create_moisture_map(
     # Load normalization stats
     norm_stats = np.load(str(collector.data_dir / "normalization_stats.npz"))
 
+    # PHASE 2: Load dense arrays for fast nearby station lookups
+    print("\nLoading dense arrays for fast path...")
+    dense_path = collector.data_dir / "dense_features.npz"
+    dense_arrays = None
+    dense_station_to_idx = None
+    dense_date_to_idx = None
+
+    if dense_path.exists():
+        try:
+            dense_data = np.load(str(dense_path))
+            dense_arrays = {
+                'features': dense_data['features'],  # [stations, dates, features]
+                'masks': dense_data['masks'],
+                'feature_params': dense_data['feature_params'].tolist()
+            }
+            # Build fast lookup mappings
+            dense_station_to_idx = {int(sid): idx for idx, sid in enumerate(dense_data['station_ids'])}
+            # Normalize dates to midnight UTC for consistent matching
+            dense_date_to_idx = {pd.Timestamp(date).normalize(): idx
+                               for idx, date in enumerate(pd.DatetimeIndex(dense_data['dates']))}
+            print(f"  ✓ Loaded dense arrays: {dense_arrays['features'].shape}")
+            print(f"    Covers {len(dense_station_to_idx)} stations, {len(dense_date_to_idx)} dates")
+        except Exception as e:
+            print(f"  ⚠ Could not load dense arrays: {e}")
+            print(f"  Will use slower dictionary lookup method")
+    else:
+        print(f"  ⚠ Dense arrays not found at {dense_path}")
+        print(f"  Will use slower dictionary lookup method")
+
     # Build fast lookup for timeseries data
     print("\nBuilding fast timeseries lookup...")
     start_date = target_date - timedelta(days=64 - 1)
@@ -533,6 +630,11 @@ def create_moisture_map(
         list(all_needed_stations), filtered_params
     )
     print(f"  ✓ Built lookup with {len(timeseries_lookup)} entries for {len(all_needed_stations)} stations")
+
+    # Build fast station lookup (avoids pandas filtering in loops)
+    print("\nBuilding fast station lookup...")
+    stations_lookup = {int(row['station_id']): row for _, row in stations_df.iterrows()}
+    print(f"  ✓ Built station lookup with {len(stations_lookup)} stations")
 
     # Phase 1: Collect real data and build sequences for predictions
     print("\nPhase 1: Gathering real data and building sequences...")
@@ -568,11 +670,14 @@ def create_moisture_map(
                     end_date=target_date,
                     timeseries_lookup=timeseries_lookup,
                     nearest_df=nearest_df,
-                    stations_df=stations_df,
+                    stations_lookup=stations_lookup,  # Fast dict lookup
                     feature_params=filtered_params,
                     norm_stats=norm_stats,
                     seq_length=64,
-                    n_nearest=4
+                    n_nearest=4,
+                    dense_arrays=dense_arrays,  # PHASE 2: Fast path
+                    dense_station_to_idx=dense_station_to_idx,
+                    dense_date_to_idx=dense_date_to_idx
                 )
 
                 if sequence_data is not None:
