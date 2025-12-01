@@ -1162,7 +1162,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             target: tensor (soil moisture at end_date)
             mask: [seq_length, total_features] tensor (1 for valid, 0 for missing)
         """
-        date_range = pd.date_range(start=start_date, end=end_date, freq='D', normalize=True)
+        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
         nearby_stations = self._get_nearest_stations(target_station_id)
 
         # Calculate feature dimensions
@@ -1266,8 +1266,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         """
         nearby_stations = self._get_nearest_stations(target_station_id)
 
-        # Get date range indices (normalize ONCE during construction - much faster!)
-        date_range = pd.date_range(start=start_date, end=end_date, freq='D', normalize=True)
+        # Get date range indices (dates from pd.date_range are already at midnight)
+        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
         date_indices = [self.dense_date_to_idx.get(date) for date in date_range]
 
         # Check if all dates are in our dense array
