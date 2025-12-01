@@ -1191,10 +1191,10 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                         mask[:, f_idx] = True
 
         # Fill target station features using FAST DICT LOOKUP
-        for t, date in enumerate(date_range):
-            # Normalize date for consistent lookups
-            date_normalized = date.normalize()
+        # OPTIMIZATION: Normalize all dates ONCE before loop (not inside!)
+        date_range_normalized = date_range.normalize()
 
+        for t, date_normalized in enumerate(date_range_normalized):
             # Target station features (time-varying only)
             for f_idx, param in enumerate(self.feature_params):
                 if param not in coordinate_features:
@@ -1239,7 +1239,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                     mask[t, soil_idx] = True
 
         # Get target (soil moisture at end_date for target station)
-        target_key = (target_station_id, end_date.normalize(), self.soil_moisture_param)
+        # Use the last normalized date from our pre-normalized range (faster than normalize() again)
+        target_key = (target_station_id, date_range_normalized[-1], self.soil_moisture_param)
         target = self.timeseries_index.get(target_key, self.missing_value)
 
         return (
