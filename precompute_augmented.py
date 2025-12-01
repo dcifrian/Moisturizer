@@ -1107,6 +1107,57 @@ def generate_all_augmentations_batched(
         else:
             print(f"   ⚠️  Stats differ - may need more validation samples or check algorithm")
 
+        # Detailed per-feature report
+        print(f"\n   Detailed per-feature comparison:")
+        print(f"   " + "="*120)
+        print(f"   {'Feature':<50} {'Expected Min':>12} {'Actual Min':>12} {'Min Diff':>10} {'Expected Max':>12} {'Actual Max':>12} {'Max Diff':>10}")
+        print(f"   " + "-"*120)
+
+        # Build feature names
+        feature_names = []
+
+        # Target station features (26)
+        for param in filtered_params:
+            feature_names.append(f"target_{param}")
+
+        # Nearby stations features (4 stations × 28 features each)
+        nearby_features_per_station = 1 + len(filtered_params) + 1  # distance + features + soil
+        for nearby_idx in range(n_nearby_in_features):
+            # Distance
+            feature_names.append(f"nearby{nearby_idx+1}_distance")
+            # Weather/coordinate features
+            for param in filtered_params:
+                feature_names.append(f"nearby{nearby_idx+1}_{param}")
+            # Soil moisture
+            feature_names.append(f"nearby{nearby_idx+1}_soil")
+
+        # Show target station features
+        print(f"\n   TARGET STATION FEATURES:")
+        print(f"   " + "-"*120)
+        for feat_idx in range(len(filtered_params)):
+            if not (np.isinf(expected_feature_mins[feat_idx]) or np.isinf(feature_mins[feat_idx])):
+                min_diff = abs(expected_feature_mins[feat_idx] - feature_mins[feat_idx])
+                max_diff = abs(expected_feature_maxs[feat_idx] - feature_maxs[feat_idx])
+                print(f"   {feature_names[feat_idx]:<50} {expected_feature_mins[feat_idx]:12.4f} {feature_mins[feat_idx]:12.4f} {min_diff:10.6f} {expected_feature_maxs[feat_idx]:12.4f} {feature_maxs[feat_idx]:12.4f} {max_diff:10.6f}")
+
+        # Show each nearby station's features
+        for nearby_idx in range(n_nearby_in_features):
+            print(f"\n   NEARBY STATION {nearby_idx+1} FEATURES:")
+            print(f"   " + "-"*120)
+
+            offset = len(filtered_params) + (nearby_idx * nearby_features_per_station)
+
+            # Show all 28 features for this nearby station (distance + 26 features + soil)
+            for local_feat_idx in range(nearby_features_per_station):
+                global_feat_idx = offset + local_feat_idx
+
+                if global_feat_idx < len(feature_names) and not (np.isinf(expected_feature_mins[global_feat_idx]) or np.isinf(feature_mins[global_feat_idx])):
+                    min_diff = abs(expected_feature_mins[global_feat_idx] - feature_mins[global_feat_idx])
+                    max_diff = abs(expected_feature_maxs[global_feat_idx] - feature_maxs[global_feat_idx])
+                    print(f"   {feature_names[global_feat_idx]:<50} {expected_feature_mins[global_feat_idx]:12.4f} {feature_mins[global_feat_idx]:12.4f} {min_diff:10.6f} {expected_feature_maxs[global_feat_idx]:12.4f} {feature_maxs[global_feat_idx]:12.4f} {max_diff:10.6f}")
+
+        print(f"   " + "="*120)
+
     # Normalize in batches (working with memory-mapped arrays)
     # VECTORIZED VERSION - much faster than sample-by-sample loops!
     print(f"\n{step_num + 4}. Normalizing augmented samples (vectorized)...")
