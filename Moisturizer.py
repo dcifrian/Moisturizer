@@ -904,7 +904,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             print("  Building fallback index for edge cases...")
             # Use numpy arrays for fast dict building (100x faster than itertuples)
             station_ids = self.timeseries_df['station_id'].astype(np.int32).values
-            dates = self.timeseries_df['date'].values
+            # Normalize dates to midnight UTC for consistent dictionary lookups
+            dates = pd.to_datetime(self.timeseries_df['date'].values).normalize()
             param_codes = self.timeseries_df['parameter_code'].values
             values = self.timeseries_df['value'].astype(np.float32).values
             self.timeseries_index = dict(zip(
@@ -916,7 +917,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             print("Creating fast lookup index for timeseries...")
             # Use numpy arrays for fast dict building (100x faster than itertuples)
             station_ids = self.timeseries_df['station_id'].astype(np.int32).values
-            dates = self.timeseries_df['date'].values
+            # Normalize dates to midnight UTC for consistent dictionary lookups
+            dates = pd.to_datetime(self.timeseries_df['date'].values).normalize()
             param_codes = self.timeseries_df['parameter_code'].values
             values = self.timeseries_df['value'].astype(np.float32).values
             self.timeseries_index = dict(zip(
@@ -1162,9 +1164,12 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
         # Fill target station features using FAST DICT LOOKUP
         for t, date in enumerate(date_range):
+            # Normalize date for consistent lookups
+            date_normalized = date.normalize()
+
             # Target station features
             for f_idx, param in enumerate(self.feature_params):
-                key = (target_station_id, date, param)
+                key = (target_station_id, date_normalized, param)
                 if key in self.timeseries_index:
                     features[t, f_idx] = self.timeseries_index[key]
                     mask[t, f_idx] = True
@@ -1180,21 +1185,21 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
                 # Features
                 for f_idx, param in enumerate(self.feature_params):
-                    key = (nearby_station_id, date, param)
+                    key = (nearby_station_id, date_normalized, param)
                     feat_idx = nearby_offset + 1 + f_idx
                     if key in self.timeseries_index:
                         features[t, feat_idx] = self.timeseries_index[key]
                         mask[t, feat_idx] = True
 
                 # Soil moisture for nearby station
-                key = (nearby_station_id, date, self.soil_moisture_param)
+                key = (nearby_station_id, date_normalized, self.soil_moisture_param)
                 soil_idx = nearby_offset + 1 + len(self.feature_params)
                 if key in self.timeseries_index:
                     features[t, soil_idx] = self.timeseries_index[key]
                     mask[t, soil_idx] = True
 
         # Get target (soil moisture at end_date for target station)
-        target_key = (target_station_id, end_date, self.soil_moisture_param)
+        target_key = (target_station_id, end_date.normalize(), self.soil_moisture_param)
         target = self.timeseries_index.get(target_key, self.missing_value)
 
         return (
