@@ -33,12 +33,34 @@ def _process_batch_direct_write(args):
     Can optionally normalize data using provided stats before writing.
 
     Args:
-        args: Tuple of (batch_num, start_idx, batch_samples_data, aug_params, memmap_paths)
+        args: Tuple of (batch_num, start_idx, batch_sample_indices, aug_params, memmap_paths, dataset_args)
 
     Returns:
         batch_num (for tracking completion)
     """
-    batch_num, start_idx, batch_samples_data, aug_params, memmap_paths = args
+    batch_num, start_idx, batch_sample_indices, aug_params, memmap_paths, dataset_args = args
+
+    # Each worker loads its own dataset instance (memory-mapped arrays are shared, not copied!)
+    from Moisturizer import SoilMoistureSequenceDataset
+    worker_dataset = SoilMoistureSequenceDataset(**dataset_args)
+
+    # Fetch samples in worker (parallelized!)
+    batch_samples_data = []
+    for idx in batch_sample_indices:
+        sample = worker_dataset[idx]
+        sample_info = worker_dataset.sample_index[idx]
+
+        batch_samples_data.append({
+            'features': sample['features'].numpy(),
+            'mask': sample['mask'].numpy(),
+            'target': sample['target'].numpy(),
+            'sample_info': sample_info
+        })
+
+    # Continue with original processing logic
+    batch_num, start_idx, batch_samples_data, aug_params, memmap_paths = (
+        batch_num, start_idx, batch_samples_data, aug_params, memmap_paths
+    )
 
     # Unpack parameters
     seq_length, n_nearby_available, n_nearby_in_features = aug_params['dimensions']
@@ -606,10 +628,10 @@ def generate_all_augmentations_batched(
     """
     Pre-compute ALL augmented samples with batched processing (memory efficient!)
 
-    Uses multiprocessing with PRE-FETCHED SAMPLES (no dataset in workers!):
-    - Main process loads dataset ONCE and fetches samples
-    - Workers receive pre-fetched samples (no dataset loading)
-    - Memory usage: ~4GB (main dataset) + ~500MB per worker
+    Uses multiprocessing with PARALLEL FETCHING:
+    - Each worker loads its own dataset instance (memory-mapped arrays are shared!)
+    - Workers fetch samples in parallel (no blocking on main process)
+    - Memory usage: ~4GB (shared memmaps) + ~100MB per worker (metadata only)
 
     Args:
         data_dir: Directory containing the MeteoGalicia dataset
@@ -687,7 +709,7 @@ def generate_all_augmentations_batched(
         'target_features': target_features,
         'nearby_features_per_station': nearby_features_per_station,
         'total_features': total_features,
-        'debug': True  # ENABLED for debugging data corruption
+        'debug': False  # Disabled - debugging complete
     }
     # Calculate number of batches from dataset size (reliable!)
     num_batches = (len(base_dataset.sample_index) + batch_size - 1) // batch_size
@@ -703,6 +725,19 @@ def generate_all_augmentations_batched(
         logical_cores = mp.cpu_count()
         num_workers = max(1, (logical_cores // 2) - 1)
         print(f"   Auto-detected {num_workers} workers (physical cores - 1)")
+
+    # Prepare dataset args for workers (they'll create their own instances)
+    dataset_args = {
+        'timeseries': str(collector.timeseries_file),
+        'stations': str(collector.stations_file),
+        'nearest': str(collector.nearest_file),
+        'seq_length': seq_length,
+        'n_nearest': n_nearby_available,
+        'feature_params': filtered_params,
+        'precomputed_path': None,
+        'dense_array_path': str(dense_path) if dense_path.exists() else None,
+        'normalize': False
+    }
 
     # Compute augmented stats from base dataset if requested (saves ~2 hours!)
     base_stats = None
@@ -841,30 +876,20 @@ def generate_all_augmentations_batched(
     print(f"   Starting parallel processing (workers write directly to memmap)...")
 
     def batch_generator():
-        """Generator that fetches samples on-demand and tracks augmented sample positions"""
+        """Generator that yields batch indices (workers fetch samples in parallel!)"""
         current_aug_idx = 0  # Track position in augmented dataset
         for batch_num in range(num_batches):
             start_idx_base = batch_num * batch_size
             end_idx_base = min(start_idx_base + batch_size, len(base_dataset.sample_index))
 
-            # Fetch samples for this batch
-            batch_samples_data = []
-            for idx in range(start_idx_base, end_idx_base):
-                sample = base_dataset[idx]
-                sample_info = base_dataset.sample_index[idx]
-
-                batch_samples_data.append({
-                    'features': sample['features'].numpy(),
-                    'mask': sample['mask'].numpy(),
-                    'target': sample['target'].numpy(),
-                    'sample_info': sample_info
-                })
+            # Pass indices instead of data - workers will fetch in parallel!
+            batch_sample_indices = list(range(start_idx_base, end_idx_base))
 
             # Calculate where this batch will be written in augmented dataset
             start_idx_aug = current_aug_idx
-            current_aug_idx += len(batch_samples_data) * total_augmentations
+            current_aug_idx += len(batch_sample_indices) * total_augmentations
 
-            yield (batch_num, start_idx_aug, batch_samples_data, aug_params, memmap_paths)
+            yield (batch_num, start_idx_aug, batch_sample_indices, aug_params, memmap_paths, dataset_args)
 
     # Process batches in parallel (workers write DIRECTLY to memmap, no pickling!)
     all_end_dates = np.zeros(total_samples, dtype=np.float64)
