@@ -706,28 +706,89 @@ def generate_all_augmentations_batched(
         num_workers = max(1, (logical_cores // 2) - 1)
         print(f"   Auto-detected {num_workers} workers (physical cores - 1)")
 
-    # Load base dataset stats if requested (saves ~2 hours!)
+    # Compute augmented stats from base dataset if requested (saves ~2 hours!)
     base_stats = None
     if use_base_stats:
-        base_norm_stats_path = Path(data_dir) / "normalization_stats.npz"
-        if not base_norm_stats_path.exists():
-            print(f"\n   ERROR: --use-base-stats requested but base stats not found at {base_norm_stats_path}")
-            print(f"   Please run normalization on the base dataset first, or run without --use-base-stats")
-            return
+        print(f"\n4. Computing augmented dataset stats from base dataset (5 nearby)...")
+        print(f"   Key insight: Since augmentation permutes 4 of 5 nearby stations,")
+        print(f"   each nearby slot can be ANY of the 5 stations.")
+        print(f"   Therefore: Range for each nearby feature = min/max across ALL 5 stations.")
+        print()
 
-        print(f"\n4. Loading base dataset normalization stats...")
-        base_stats = np.load(base_norm_stats_path)
-        print(f"   ✓ Loaded stats from {base_norm_stats_path}")
-        print(f"   Feature range: [{base_stats['feature_mins'].min():.2f}, {base_stats['feature_maxs'].max():.2f}]")
-        print(f"   Target range: [{float(base_stats['target_min']):.2f}, {float(base_stats['target_max']):.2f}]")
+        # Sample from base dataset to compute stats
+        num_samples_for_stats = min(10000, len(base_dataset.sample_index))
+        sample_indices = np.random.choice(len(base_dataset.sample_index),
+                                         size=num_samples_for_stats, replace=False)
+
+        print(f"   Sampling {num_samples_for_stats} samples from base dataset...")
+
+        # Initialize min/max tracking
+        target_features_count = len(filtered_params)
+        nearby_features_per_station = 1 + len(filtered_params) + 1  # distance + features + soil
+        augmented_total_features = target_features_count + (nearby_features_per_station * n_nearby_in_features)
+
+        feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
+        feature_maxs = np.full(augmented_total_features, -np.inf, dtype=np.float32)
+        target_min = np.inf
+        target_max = -np.inf
+
+        for idx in tqdm(sample_indices, desc="   Computing stats"):
+            sample = base_dataset[int(idx)]
+            features = sample['features'].numpy()
+            target = sample['target'].numpy()[0]
+
+            # Target stats
+            if target != -1000.0 and target != -9999.0:
+                target_min = min(target_min, target)
+                target_max = max(target_max, target)
+
+            # Target station features (unchanged)
+            target_feats = features[:, :target_features_count]
+            for feat_idx in range(target_features_count):
+                feat_values = target_feats[:, feat_idx]
+                valid = feat_values[(feat_values != -1000.0) & (feat_values != -9999.0)]
+                if len(valid) > 0:
+                    feature_mins[feat_idx] = min(feature_mins[feat_idx], valid.min())
+                    feature_maxs[feat_idx] = max(feature_maxs[feat_idx], valid.max())
+
+            # Nearby stations: Extract all 5 stations' data
+            nearby_start = target_features_count
+            nearby_base = features[:, nearby_start:].reshape(seq_length, n_nearby_available,
+                                                            nearby_features_per_station)
+
+            # For each feature across nearby stations (distance, features, soil):
+            # The augmented dataset will have 4 stations, each slot can be ANY of the 5
+            for nearby_feat_idx in range(nearby_features_per_station):
+                feat_across_stations = nearby_base[:, :, nearby_feat_idx]
+                valid = feat_across_stations[(feat_across_stations != -1000.0) &
+                                            (feat_across_stations != -9999.0)]
+
+                if len(valid) > 0:
+                    # Apply same range to all 4 slots
+                    for slot in range(n_nearby_in_features):
+                        aug_feat_idx = target_features_count + (slot * nearby_features_per_station) + nearby_feat_idx
+                        feature_mins[aug_feat_idx] = min(feature_mins[aug_feat_idx], valid.min())
+                        feature_maxs[aug_feat_idx] = max(feature_maxs[aug_feat_idx], valid.max())
+
+        print(f"   ✓ Computed augmented stats from base dataset")
+        print(f"   Feature range: [{feature_mins[~np.isinf(feature_mins)].min():.2f}, {feature_maxs[~np.isinf(feature_maxs)].max():.2f}]")
+        print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
         print(f"   → Workers will normalize data during generation (saves ~2 hours!)")
+
+        # Create stats dict
+        base_stats = {
+            'feature_mins': feature_mins,
+            'feature_maxs': feature_maxs,
+            'target_min': target_min,
+            'target_max': target_max
+        }
 
         # Add stats to aug_params for workers
         aug_params['normalize'] = True
-        aug_params['feature_mins'] = base_stats['feature_mins']
-        aug_params['feature_maxs'] = base_stats['feature_maxs']
-        aug_params['target_min'] = float(base_stats['target_min'])
-        aug_params['target_max'] = float(base_stats['target_max'])
+        aug_params['feature_mins'] = feature_mins
+        aug_params['feature_maxs'] = feature_maxs
+        aug_params['target_min'] = float(target_min)
+        aug_params['target_max'] = float(target_max)
         aug_params['invalid_markers'] = [-9999.0, -1000.0]
 
     print(f"\n{'5' if use_base_stats else '4'}. Creating memmap files and processing in parallel (direct write, no serialization!)...")
@@ -973,6 +1034,78 @@ def generate_all_augmentations_batched(
         else:
             print(f"   ⚠ Stats differ significantly (>1% difference)")
             print(f"   → Should compute augmented stats (current approach)")
+
+    # Also compute the "correct" augmented stats from base dataset for comparison
+    print(f"\n   Computing correct augmented stats from base dataset (5 nearby) for validation...")
+    num_samples_validation = min(1000, len(base_dataset.sample_index))
+    validation_indices = np.random.choice(len(base_dataset.sample_index),
+                                         size=num_samples_validation, replace=False)
+
+    target_features_count = len(filtered_params)
+    nearby_features_per_station = 1 + len(filtered_params) + 1
+    expected_total_features = target_features_count + (nearby_features_per_station * n_nearby_in_features)
+
+    expected_feature_mins = np.full(expected_total_features, np.inf, dtype=np.float32)
+    expected_feature_maxs = np.full(expected_total_features, -np.inf, dtype=np.float32)
+    expected_target_min = np.inf
+    expected_target_max = -np.inf
+
+    for idx in validation_indices:
+        sample = base_dataset[int(idx)]
+        features = sample['features'].numpy()
+        target = sample['target'].numpy()[0]
+
+        # Target stats
+        if target != -1000.0 and target != -9999.0:
+            expected_target_min = min(expected_target_min, target)
+            expected_target_max = max(expected_target_max, target)
+
+        # Target station features
+        target_feats = features[:, :target_features_count]
+        for feat_idx in range(target_features_count):
+            feat_values = target_feats[:, feat_idx]
+            valid = feat_values[(feat_values != -1000.0) & (feat_values != -9999.0)]
+            if len(valid) > 0:
+                expected_feature_mins[feat_idx] = min(expected_feature_mins[feat_idx], valid.min())
+                expected_feature_maxs[feat_idx] = max(expected_feature_maxs[feat_idx], valid.max())
+
+        # Nearby stations: all 5 stations' data
+        nearby_start = target_features_count
+        nearby_base = features[:, nearby_start:].reshape(seq_length, n_nearby_available,
+                                                        nearby_features_per_station)
+
+        for nearby_feat_idx in range(nearby_features_per_station):
+            feat_across_stations = nearby_base[:, :, nearby_feat_idx]
+            valid = feat_across_stations[(feat_across_stations != -1000.0) &
+                                        (feat_across_stations != -9999.0)]
+
+            if len(valid) > 0:
+                for slot in range(n_nearby_in_features):
+                    aug_feat_idx = target_features_count + (slot * nearby_features_per_station) + nearby_feat_idx
+                    expected_feature_mins[aug_feat_idx] = min(expected_feature_mins[aug_feat_idx], valid.min())
+                    expected_feature_maxs[aug_feat_idx] = max(expected_feature_maxs[aug_feat_idx], valid.max())
+
+    # Compare expected vs actual
+    print(f"\n   Validation: Comparing expected (from base 5 nearby) vs actual augmented stats:")
+
+    # Only compare valid indices (not inf)
+    valid_mask = ~(np.isinf(expected_feature_mins) | np.isinf(expected_feature_maxs) |
+                   np.isinf(feature_mins) | np.isinf(feature_maxs))
+
+    if valid_mask.sum() > 0:
+        expected_min_diffs = np.abs(expected_feature_mins[valid_mask] - feature_mins[valid_mask])
+        expected_max_diffs = np.abs(expected_feature_maxs[valid_mask] - feature_maxs[valid_mask])
+
+        print(f"   Expected feature range: [{expected_feature_mins[valid_mask].min():.2f}, {expected_feature_maxs[valid_mask].max():.2f}]")
+        print(f"   Actual feature range: [{feature_mins[valid_mask].min():.2f}, {feature_maxs[valid_mask].max():.2f}]")
+        print(f"   Feature min diff: max={expected_min_diffs.max():.6f}, mean={expected_min_diffs.mean():.6f}")
+        print(f"   Feature max diff: max={expected_max_diffs.max():.6f}, mean={expected_max_diffs.mean():.6f}")
+
+        if expected_min_diffs.max() < 1.0 and expected_max_diffs.max() < 1.0:
+            print(f"   ✅ EXCELLENT! Actual stats match expected augmented stats (<1.0 absolute diff)")
+            print(f"   → --use-base-stats with correct computation would work perfectly!")
+        else:
+            print(f"   ⚠️  Stats differ - may need more validation samples or check algorithm")
 
     # Normalize in batches (working with memory-mapped arrays)
     # VECTORIZED VERSION - much faster than sample-by-sample loops!
