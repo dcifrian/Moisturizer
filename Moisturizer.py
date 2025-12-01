@@ -895,7 +895,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             }
             # Create fast lookup mappings
             self.dense_station_to_idx = {sid: idx for idx, sid in enumerate(self.dense_arrays['station_ids'])}
-            self.dense_date_to_idx = {date: idx for idx, date in enumerate(self.dense_arrays['dates'])}
+            # Normalize dates to midnight UTC to ensure consistent matching
+            self.dense_date_to_idx = {date.normalize(): idx for idx, date in enumerate(self.dense_arrays['dates'])}
             print(f"  Loaded dense arrays: {self.dense_arrays['features'].shape}")
             print(f"  Memory: ~{self.dense_arrays['features'].nbytes / 1e6:.1f} MB")
 
@@ -1221,9 +1222,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         """
         nearby_stations = self._get_nearest_stations(target_station_id)
 
-        # Get date range indices
+        # Get date range indices (normalize to midnight UTC for consistent matching)
         date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-        date_indices = [self.dense_date_to_idx.get(date) for date in date_range]
+        date_indices = [self.dense_date_to_idx.get(date.normalize()) for date in date_range]
 
         # Check if all dates are in our dense array
         if None in date_indices:
