@@ -1162,7 +1162,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             target: tensor (soil moisture at end_date)
             mask: [seq_length, total_features] tensor (1 for valid, 0 for missing)
         """
-        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+        date_range = pd.date_range(start=start_date, end=end_date, freq='D', normalize=True)
         nearby_stations = self._get_nearest_stations(target_station_id)
 
         # Calculate feature dimensions
@@ -1191,10 +1191,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                         mask[:, f_idx] = True
 
         # Fill target station features using FAST DICT LOOKUP
-        # OPTIMIZATION: Normalize all dates ONCE before loop (not inside!)
-        date_range_normalized = date_range.normalize()
-
-        for t, date_normalized in enumerate(date_range_normalized):
+        # Note: date_range already normalized in constructor (freq='D', normalize=True)
+        for t, date_normalized in enumerate(date_range):
             # Target station features (time-varying only)
             for f_idx, param in enumerate(self.feature_params):
                 if param not in coordinate_features:
@@ -1239,8 +1237,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                     mask[t, soil_idx] = True
 
         # Get target (soil moisture at end_date for target station)
-        # Use the last normalized date from our pre-normalized range (faster than normalize() again)
-        target_key = (target_station_id, date_range_normalized[-1], self.soil_moisture_param)
+        # Use the last date from our already-normalized range
+        target_key = (target_station_id, date_range[-1], self.soil_moisture_param)
         target = self.timeseries_index.get(target_key, self.missing_value)
 
         return (
@@ -1268,9 +1266,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         """
         nearby_stations = self._get_nearest_stations(target_station_id)
 
-        # Get date range indices (normalize to midnight UTC for consistent matching)
-        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-        date_indices = [self.dense_date_to_idx.get(date.normalize()) for date in date_range]
+        # Get date range indices (normalize ONCE during construction - much faster!)
+        date_range = pd.date_range(start=start_date, end=end_date, freq='D', normalize=True)
+        date_indices = [self.dense_date_to_idx.get(date) for date in date_range]
 
         # Check if all dates are in our dense array
         if None in date_indices:
