@@ -1622,12 +1622,23 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             mask_tensor = torch.from_numpy(mask)
 
         else:
-            # Build on-the-fly (slow fallback)
-            features_tensor, target_tensor, mask_tensor = self._build_sequence_tensor(
-                self.sample_index[idx]['target_station'],
-                self.sample_index[idx]['start_date'],
-                self.sample_index[idx]['end_date']
-            )
+            # Build on-the-fly: use dense arrays if available (fast), otherwise dict lookup (slow)
+            sample_info = self.sample_index[idx]
+
+            if self.dense_arrays is not None:
+                # FAST PATH: Use dense array slicing
+                features_tensor, target_tensor, mask_tensor = self._build_sequence_from_dense(
+                    sample_info['target_station'],
+                    sample_info['start_date'],
+                    sample_info['end_date']
+                )
+            else:
+                # SLOW PATH: Use dict lookups (fallback)
+                features_tensor, target_tensor, mask_tensor = self._build_sequence_tensor(
+                    sample_info['target_station'],
+                    sample_info['start_date'],
+                    sample_info['end_date']
+                )
 
         # Get end date (lightweight operation at end)
         sample = self.sample_index[idx]
