@@ -45,7 +45,7 @@ for idx in indices:
     sample = base_dataset[int(idx)]
     base_features.append(sample['features'].numpy())
 
-base_features = np.array(base_features)  # (100, 64, 166)
+base_features = np.stack(base_features, axis=0)  # (100, 64, 166)
 print(f"Base features shape: {base_features.shape}")
 print()
 

@@ -1162,17 +1162,33 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         features = np.full((self.seq_length, total_features), self.missing_value, dtype=np.float32)
         mask = np.zeros((self.seq_length, total_features), dtype=bool)
 
+        # Coordinate features (static - not in timeseries)
+        coordinate_features = ['altitude', 'utmx', 'utmy']
+
+        # Fill target station coordinate features ONCE (static, same for all timesteps)
+        for f_idx, param in enumerate(self.feature_params):
+            if param in coordinate_features:
+                # Look up from stations_df (static attribute)
+                station_row = self.stations_df[self.stations_df['station_id'] == target_station_id]
+                if len(station_row) > 0 and param in station_row.columns:
+                    coord_value = station_row.iloc[0][param]
+                    if pd.notna(coord_value):
+                        # Fill for ALL timesteps (static feature)
+                        features[:, f_idx] = float(coord_value)
+                        mask[:, f_idx] = True
+
         # Fill target station features using FAST DICT LOOKUP
         for t, date in enumerate(date_range):
             # Normalize date for consistent lookups
             date_normalized = date.normalize()
 
-            # Target station features
+            # Target station features (time-varying only)
             for f_idx, param in enumerate(self.feature_params):
-                key = (target_station_id, date_normalized, param)
-                if key in self.timeseries_index:
-                    features[t, f_idx] = self.timeseries_index[key]
-                    mask[t, f_idx] = True
+                if param not in coordinate_features:
+                    key = (target_station_id, date_normalized, param)
+                    if key in self.timeseries_index:
+                        features[t, f_idx] = self.timeseries_index[key]
+                        mask[t, f_idx] = True
 
             # Fill nearby stations features using FAST DICT LOOKUP
             for n_idx, nearby in enumerate(nearby_stations):
@@ -1183,13 +1199,25 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 features[t, nearby_offset] = nearby['distance']
                 mask[t, nearby_offset] = True
 
-                # Features
+                # Coordinate features (static)
                 for f_idx, param in enumerate(self.feature_params):
-                    key = (nearby_station_id, date_normalized, param)
-                    feat_idx = nearby_offset + 1 + f_idx
-                    if key in self.timeseries_index:
-                        features[t, feat_idx] = self.timeseries_index[key]
-                        mask[t, feat_idx] = True
+                    if param in coordinate_features:
+                        station_row = self.stations_df[self.stations_df['station_id'] == nearby_station_id]
+                        if len(station_row) > 0 and param in station_row.columns:
+                            coord_value = station_row.iloc[0][param]
+                            if pd.notna(coord_value):
+                                feat_idx = nearby_offset + 1 + f_idx
+                                features[t, feat_idx] = float(coord_value)
+                                mask[t, feat_idx] = True
+
+                # Time-varying features
+                for f_idx, param in enumerate(self.feature_params):
+                    if param not in coordinate_features:
+                        key = (nearby_station_id, date_normalized, param)
+                        feat_idx = nearby_offset + 1 + f_idx
+                        if key in self.timeseries_index:
+                            features[t, feat_idx] = self.timeseries_index[key]
+                            mask[t, feat_idx] = True
 
                 # Soil moisture for nearby station
                 key = (nearby_station_id, date_normalized, self.soil_moisture_param)
