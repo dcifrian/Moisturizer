@@ -329,7 +329,8 @@ def generate_all_augmentations_sequential(
     n_nearby_available: int = 5,
     n_nearby_in_features: int = 4,
     coverage_threshold: float = 0.25,
-    seq_length: int = 64
+    seq_length: int = 64,
+    use_base_stats: bool = False
 ):
     """
     Pre-compute ALL augmented samples SEQUENTIALLY (minimal memory!)
@@ -345,6 +346,8 @@ def generate_all_augmentations_sequential(
         n_nearby_in_features: Number of nearby stations in augmented samples (4)
         coverage_threshold: Minimum coverage to include a parameter (0.25 = 25%)
         seq_length: Sequence length (default 64)
+        use_base_stats: If True, use base dataset normalization stats and normalize
+                        during generation (more accurate method)
     """
     print("=" * 70)
     print("PRE-COMPUTING AUGMENTED DATASET (SEQUENTIAL - LOW MEMORY)")
@@ -408,8 +411,80 @@ def generate_all_augmentations_sequential(
     masks_size_gb = total_samples * seq_length * total_features * 1 / 1e9
     print(f"   Dataset size: {features_size_gb:.1f}GB features + {masks_size_gb:.1f}GB masks = {features_size_gb + masks_size_gb:.1f}GB total")
 
+    # Compute augmented stats from base dataset if requested
+    base_stats = None
+    if use_base_stats:
+        print(f"\n4. Computing augmented dataset stats from base dataset (5 nearby)...")
+        print(f"   Using base stats for more accurate normalization")
+
+        # Sample from base dataset to compute stats
+        num_samples_for_stats = min(10000, len(base_dataset.sample_index))
+        sample_indices = np.random.choice(len(base_dataset.sample_index),
+                                         size=num_samples_for_stats, replace=False)
+
+        print(f"   Sampling {num_samples_for_stats} samples from base dataset...")
+
+        # Initialize min/max tracking
+        target_features_count = len(filtered_params)
+        nearby_features_per_station_calc = 1 + len(filtered_params) + 1  # distance + features + soil
+        augmented_total_features = target_features_count + (nearby_features_per_station_calc * n_nearby_in_features)
+
+        feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
+        feature_maxs = np.full(augmented_total_features, -np.inf, dtype=np.float32)
+        target_min = np.inf
+        target_max = -np.inf
+
+        for idx in tqdm(sample_indices, desc="   Computing stats"):
+            sample = base_dataset[int(idx)]
+            features = sample['features'].numpy()
+            target = sample['target'].numpy()[0]
+
+            # Target stats
+            if target != -1000.0 and target != -9999.0:
+                target_min = min(target_min, target)
+                target_max = max(target_max, target)
+
+            # Target station features (unchanged)
+            target_feats = features[:, :target_features_count]
+            for feat_idx in range(target_features_count):
+                feat_values = target_feats[:, feat_idx]
+                valid = feat_values[(feat_values != -1000.0) & (feat_values != -9999.0)]
+                if len(valid) > 0:
+                    feature_mins[feat_idx] = min(feature_mins[feat_idx], valid.min())
+                    feature_maxs[feat_idx] = max(feature_maxs[feat_idx], valid.max())
+
+            # Nearby stations: Extract all 5 stations' data
+            nearby_start = target_features_count
+            nearby_base = features[:, nearby_start:].reshape(seq_length, n_nearby_available,
+                                                            nearby_features_per_station_calc)
+
+            # For each feature across nearby stations
+            for nearby_feat_idx in range(nearby_features_per_station_calc):
+                feat_across_stations = nearby_base[:, :, nearby_feat_idx]
+                valid = feat_across_stations[(feat_across_stations != -1000.0) &
+                                            (feat_across_stations != -9999.0)]
+
+                if len(valid) > 0:
+                    # Apply same range to all 4 slots
+                    for slot in range(n_nearby_in_features):
+                        aug_feat_idx = target_features_count + (slot * nearby_features_per_station_calc) + nearby_feat_idx
+                        feature_mins[aug_feat_idx] = min(feature_mins[aug_feat_idx], valid.min())
+                        feature_maxs[aug_feat_idx] = max(feature_maxs[aug_feat_idx], valid.max())
+
+        base_stats = {
+            'feature_mins': feature_mins,
+            'feature_maxs': feature_maxs,
+            'target_min': float(target_min),
+            'target_max': float(target_max)
+        }
+
+        print(f"   Feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
+        print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
+        print(f"   → Will normalize during generation")
+
     # Create memory-mapped arrays (write directly, no temp batches!)
-    print(f"\n4. Creating memory-mapped arrays...")
+    step_num = 5 if use_base_stats else 4
+    print(f"\n{step_num}. Creating memory-mapped arrays...")
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Use np.lib.format.open_memmap() to create proper .npy files with headers
@@ -444,15 +519,20 @@ def generate_all_augmentations_sequential(
     all_start_dates = np.zeros(total_samples, dtype=np.float64)
 
     # Process samples sequentially
-    print(f"\n5. Generating augmentations (sequential)...")
+    step_num += 1
+    print(f"\n{step_num}. Generating augmentations (sequential)...")
     current_idx = 0
+
+    # Normalization params if using base stats
+    invalid_markers = [-9999.0, -1000.0]
+    normalized_invalid_marker = -2.0
 
     for base_idx in tqdm(range(len(base_dataset.sample_index)), desc="   Processing", unit="sample"):
         # Get base sample
         sample = base_dataset[base_idx]
         base_features = sample['features'].numpy()
         base_mask = sample['mask'].numpy()
-        base_target = sample['target'].numpy()
+        base_target = sample['target'].numpy()[0]
         sample_info = base_dataset.sample_index[base_idx]
 
         # Extract target and nearby features
@@ -479,9 +559,32 @@ def generate_all_augmentations_sequential(
                 aug_features = np.concatenate([target_feat, perm_nearby_features], axis=1)
                 aug_mask = np.concatenate([target_mask, perm_nearby_mask], axis=1)
 
+                # Normalize if base_stats provided
+                normalized_target = base_target
+                if use_base_stats:
+                    # Vectorized normalization
+                    invalid_mask = np.isin(aug_features, invalid_markers)
+
+                    feature_mins_arr = base_stats['feature_mins']
+                    feature_maxs_arr = base_stats['feature_maxs']
+                    feat_ranges = feature_maxs_arr - feature_mins_arr
+                    valid_ranges = feat_ranges > 0
+
+                    aug_features = 2.0 * (aug_features - feature_mins_arr[None, :]) / np.where(valid_ranges[None, :], feat_ranges[None, :], 1.0) - 1.0
+                    aug_features[invalid_mask] = normalized_invalid_marker
+
+                    # Normalize target
+                    if base_target not in invalid_markers:
+                        target_min = base_stats['target_min']
+                        target_max = base_stats['target_max']
+                        if target_max > target_min:
+                            normalized_target = 2.0 * (base_target - target_min) / (target_max - target_min) - 1.0
+                    else:
+                        normalized_target = normalized_invalid_marker
+
                 # Write directly to memmap
                 all_features[current_idx] = aug_features
-                all_targets[current_idx] = base_target
+                all_targets[current_idx] = normalized_target
                 all_masks[current_idx] = aug_mask
                 all_target_stations[current_idx] = sample_info['target_station']
                 all_end_dates[current_idx] = sample_info['end_date'].timestamp()
@@ -499,11 +602,60 @@ def generate_all_augmentations_sequential(
 
     print(f"   ✓ Generated {current_idx:,} augmented samples")
 
+    # Skip stats computation if using base stats (already normalized!)
+    if use_base_stats:
+        print(f"\n{step_num + 1}. Skipping statistics computation (using base dataset stats)")
+        print(f"   ✓ Data already normalized during generation")
+
+        # Use stats from base_stats
+        feature_mins = base_stats['feature_mins']
+        feature_maxs = base_stats['feature_maxs']
+        target_min = base_stats['target_min']
+        target_max = base_stats['target_max']
+
+        # Save everything and exit early
+        step_num += 2
+        print(f"\n{step_num}. Saving dataset...")
+        all_features.flush()
+        all_targets.flush()
+        all_masks.flush()
+        all_target_stations.flush()
+        all_skip_pattern.flush()
+        all_permutation.flush()
+
+        np.save(output_path / 'end_dates.npy', all_end_dates)
+        np.save(output_path / 'start_dates.npy', all_start_dates)
+        np.save(output_path / 'is_normalized.npy', np.array([True], dtype=bool))
+
+        np.savez(
+            norm_stats_path,
+            feature_mins=feature_mins,
+            feature_maxs=feature_maxs,
+            target_min=target_min,
+            target_max=target_max
+        )
+
+        print(f"\n   ✓ Saved to: {output_path}")
+
+        print("\n" + "=" * 70)
+        print("✓ AUGMENTED DATASET COMPLETE!")
+        print("=" * 70)
+        print(f"Base samples: {len(base_dataset.sample_index):,}")
+        print(f"Augmented samples: {total_samples:,}")
+        print(f"Augmentation factor: {total_samples / len(base_dataset.sample_index):.0f}x")
+        print(f"\nMemory usage:")
+        print(f"  - Peak RAM: ~5 GB (sequential processing)")
+        print(f"  - Disk space: {(features_size_gb + masks_size_gb):.1f} GB")
+        print(f"\nPerformance:")
+        print(f"  - Normalization: Done during generation")
+        print("=" * 70)
+        return
+
     # Compute normalization statistics
-    print(f"\n6. Computing normalization statistics...")
+    step_num += 1
+    print(f"\n{step_num}. Computing normalization statistics...")
     feature_mins = np.full(total_features, np.inf, dtype=np.float32)
     feature_maxs = np.full(total_features, -np.inf, dtype=np.float32)
-    invalid_markers = [-9999.0, -1000.0]
 
     sample_batch_size = 10000
     for i in tqdm(range(0, len(all_features), sample_batch_size),
@@ -536,7 +688,8 @@ def generate_all_augmentations_sequential(
     print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
 
     # Normalize
-    print(f"\n7. Normalizing augmented samples (vectorized)...")
+    step_num += 1
+    print(f"\n{step_num}. Normalizing augmented samples (vectorized)...")
     normalized_invalid_marker = -2.0
 
     for idx in tqdm(range(0, len(all_features), sample_batch_size),
@@ -580,7 +733,8 @@ def generate_all_augmentations_sequential(
             all_targets.flush()
 
     # Flush and save
-    print(f"\n8. Saving dataset...")
+    step_num += 1
+    print(f"\n{step_num}. Saving dataset...")
     all_features.flush()
     all_targets.flush()
     all_masks.flush()
@@ -1323,8 +1477,11 @@ if __name__ == "__main__":
         # Sequential mode: ~5GB RAM (slow but minimal memory)
         print("Using SEQUENTIAL mode (minimal memory)")
         if use_base_stats:
-            print("WARNING: --use-base-stats is not supported in sequential mode (ignored)")
-        generate_all_augmentations_sequential(seq_length=seq_length)
+            print("Using base dataset stats (more accurate method!)")
+        print(f"Sequence length: {seq_length}")
+        print("Tip: Use --use-base-stats for more accurate normalization")
+        print("Tip: Use --seq-length N to change sequence length (default 64)")
+        generate_all_augmentations_sequential(seq_length=seq_length, use_base_stats=use_base_stats)
     else:
         # Batched mode: auto-detects CPU cores (faster)
         print("Using BATCHED mode (parallel, auto-detect workers)")
