@@ -1266,9 +1266,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         """
         nearby_stations = self._get_nearest_stations(target_station_id)
 
-        # Get date range indices (dates from pd.date_range are already at midnight)
+        # Get date range indices
         date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-        date_indices = [self.dense_date_to_idx.get(date) for date in date_range]
+        date_indices = [self.dense_date_to_idx.get(date.normalize()) for date in date_range]
 
         # Check if all dates are in our dense array
         if None in date_indices:
