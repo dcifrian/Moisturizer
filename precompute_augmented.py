@@ -1203,12 +1203,23 @@ if __name__ == "__main__":
     # Parse command-line arguments
     use_sequential = False
     use_base_stats = False
+    seq_length = 64  # Default
 
-    for arg in sys.argv[1:]:
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
         if arg == "--sequential":
             use_sequential = True
         elif arg == "--use-base-stats":
             use_base_stats = True
+        elif arg == "--seq-length":
+            if i + 1 < len(sys.argv):
+                seq_length = int(sys.argv[i + 1])
+                i += 1
+            else:
+                print("ERROR: --seq-length requires a value")
+                sys.exit(1)
+        i += 1
 
     # Choose mode based on arguments
     if use_sequential:
@@ -1216,12 +1227,14 @@ if __name__ == "__main__":
         print("Using SEQUENTIAL mode (minimal memory)")
         if use_base_stats:
             print("WARNING: --use-base-stats is not supported in sequential mode (ignored)")
-        generate_all_augmentations_sequential()
+        generate_all_augmentations_sequential(seq_length=seq_length)
     else:
         # Batched mode: auto-detects CPU cores (faster)
         print("Using BATCHED mode (parallel, auto-detect workers)")
         if use_base_stats:
             print("Using base dataset stats (saves ~2 hours!)")
+        print(f"Sequence length: {seq_length}")
         print("Tip: Use --sequential for systems with <8GB RAM")
         print("Tip: Use --use-base-stats to skip statistics computation and normalization")
-        generate_all_augmentations_batched(batch_size=100, use_base_stats=use_base_stats)
+        print("Tip: Use --seq-length N to change sequence length (default 64)")
+        generate_all_augmentations_batched(batch_size=100, seq_length=seq_length, use_base_stats=use_base_stats)
