@@ -1108,10 +1108,10 @@ def generate_all_augmentations_batched(
             print(f"   ⚠️  Stats differ - may need more validation samples or check algorithm")
 
         # Detailed per-feature report
-        print(f"\n   Detailed per-feature comparison:")
-        print(f"   " + "="*120)
-        print(f"   {'Feature':<50} {'Expected Min':>12} {'Actual Min':>12} {'Min Diff':>10} {'Expected Max':>12} {'Actual Max':>12} {'Max Diff':>10}")
-        print(f"   " + "-"*120)
+        print(f"\n   Detailed per-feature comparison (Base vs Expected vs Actual):")
+        print(f"   " + "="*150)
+        print(f"   {'Feature':<50} {'Base Min':>12} {'Exp Min':>12} {'Act Min':>12} {'Base Max':>12} {'Exp Max':>12} {'Act Max':>12} {'Base-Act':>10} {'Exp-Act':>10}")
+        print(f"   " + "-"*150)
 
         # Build feature names
         feature_names = []
@@ -1133,17 +1133,25 @@ def generate_all_augmentations_batched(
 
         # Show target station features
         print(f"\n   TARGET STATION FEATURES:")
-        print(f"   " + "-"*120)
+        print(f"   " + "-"*150)
         for feat_idx in range(len(filtered_params)):
             if not (np.isinf(expected_feature_mins[feat_idx]) or np.isinf(feature_mins[feat_idx])):
-                min_diff = abs(expected_feature_mins[feat_idx] - feature_mins[feat_idx])
-                max_diff = abs(expected_feature_maxs[feat_idx] - feature_maxs[feat_idx])
-                print(f"   {feature_names[feat_idx]:<50} {expected_feature_mins[feat_idx]:12.4f} {feature_mins[feat_idx]:12.4f} {min_diff:10.6f} {expected_feature_maxs[feat_idx]:12.4f} {feature_maxs[feat_idx]:12.4f} {max_diff:10.6f}")
+                base_min = base_feature_mins[feat_idx] if feat_idx < len(base_feature_mins) else np.inf
+                base_max = base_feature_maxs[feat_idx] if feat_idx < len(base_feature_maxs) else -np.inf
+                exp_min = expected_feature_mins[feat_idx]
+                exp_max = expected_feature_maxs[feat_idx]
+                act_min = feature_mins[feat_idx]
+                act_max = feature_maxs[feat_idx]
+
+                base_act_diff = abs(base_max - act_max) if not np.isinf(base_max) else np.inf
+                exp_act_diff = abs(exp_max - act_max)
+
+                print(f"   {feature_names[feat_idx]:<50} {base_min:12.4f} {exp_min:12.4f} {act_min:12.4f} {base_max:12.4f} {exp_max:12.4f} {act_max:12.4f} {base_act_diff:10.4f} {exp_act_diff:10.6f}")
 
         # Show each nearby station's features
         for nearby_idx in range(n_nearby_in_features):
             print(f"\n   NEARBY STATION {nearby_idx+1} FEATURES:")
-            print(f"   " + "-"*120)
+            print(f"   " + "-"*150)
 
             offset = len(filtered_params) + (nearby_idx * nearby_features_per_station)
 
@@ -1152,11 +1160,26 @@ def generate_all_augmentations_batched(
                 global_feat_idx = offset + local_feat_idx
 
                 if global_feat_idx < len(feature_names) and not (np.isinf(expected_feature_mins[global_feat_idx]) or np.isinf(feature_mins[global_feat_idx])):
-                    min_diff = abs(expected_feature_mins[global_feat_idx] - feature_mins[global_feat_idx])
-                    max_diff = abs(expected_feature_maxs[global_feat_idx] - feature_maxs[global_feat_idx])
-                    print(f"   {feature_names[global_feat_idx]:<50} {expected_feature_mins[global_feat_idx]:12.4f} {feature_mins[global_feat_idx]:12.4f} {min_diff:10.6f} {expected_feature_maxs[global_feat_idx]:12.4f} {feature_maxs[global_feat_idx]:12.4f} {max_diff:10.6f}")
+                    base_min = base_feature_mins[global_feat_idx] if global_feat_idx < len(base_feature_mins) else np.inf
+                    base_max = base_feature_maxs[global_feat_idx] if global_feat_idx < len(base_feature_maxs) else -np.inf
+                    exp_min = expected_feature_mins[global_feat_idx]
+                    exp_max = expected_feature_maxs[global_feat_idx]
+                    act_min = feature_mins[global_feat_idx]
+                    act_max = feature_maxs[global_feat_idx]
 
-        print(f"   " + "="*120)
+                    base_act_diff = abs(base_max - act_max) if not np.isinf(base_max) else np.inf
+                    exp_act_diff = abs(exp_max - act_max)
+
+                    print(f"   {feature_names[global_feat_idx]:<50} {base_min:12.4f} {exp_min:12.4f} {act_min:12.4f} {base_max:12.4f} {exp_max:12.4f} {act_max:12.4f} {base_act_diff:10.4f} {exp_act_diff:10.6f}")
+
+        print(f"   " + "="*150)
+        print(f"\n   Legend:")
+        print(f"     Base: Stats from normalization_stats.npz (4 nearby, non-augmented)")
+        print(f"     Exp:  Expected stats computed from base 5 nearby (new algorithm)")
+        print(f"     Act:  Actual stats from augmented dataset")
+        print(f"     Base-Act: Difference between base and actual (shows why base stats don't work)")
+        print(f"     Exp-Act:  Difference between expected and actual (should be ~0 if algorithm correct)")
+
 
     # Normalize in batches (working with memory-mapped arrays)
     # VECTORIZED VERSION - much faster than sample-by-sample loops!
