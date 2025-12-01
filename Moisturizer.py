@@ -927,6 +927,19 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             ))
             print(f"  Indexed {len(self.timeseries_index):,} data points")
 
+        # Build station coordinates lookup (FAST DICT - avoid pandas filtering in loops!)
+        print("Creating fast lookup index for station coordinates...")
+        self.station_coords = {}
+        coordinate_features = ['altitude', 'utmx', 'utmy']
+        for _, row in self.stations_df.iterrows():
+            station_id = int(row['station_id'])
+            self.station_coords[station_id] = {
+                'altitude': float(row['altitude']) if pd.notna(row['altitude']) else None,
+                'utmx': float(row['utmx']) if pd.notna(row['utmx']) else None,
+                'utmy': float(row['utmy']) if pd.notna(row['utmy']) else None
+            }
+        print(f"  Indexed {len(self.station_coords)} station coordinates")
+
         # Determine target stations
         if target_stations is None:
             self.target_stations = self.stations_df[
@@ -1166,15 +1179,15 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         coordinate_features = ['altitude', 'utmx', 'utmy']
 
         # Fill target station coordinate features ONCE (static, same for all timesteps)
+        # Use FAST DICT LOOKUP instead of pandas filtering!
         for f_idx, param in enumerate(self.feature_params):
             if param in coordinate_features:
-                # Look up from stations_df (static attribute)
-                station_row = self.stations_df[self.stations_df['station_id'] == target_station_id]
-                if len(station_row) > 0 and param in station_row.columns:
-                    coord_value = station_row.iloc[0][param]
-                    if pd.notna(coord_value):
+                # Look up from station_coords dict (100x faster than pandas!)
+                if target_station_id in self.station_coords:
+                    coord_value = self.station_coords[target_station_id].get(param)
+                    if coord_value is not None:
                         # Fill for ALL timesteps (static feature)
-                        features[:, f_idx] = float(coord_value)
+                        features[:, f_idx] = coord_value
                         mask[:, f_idx] = True
 
         # Fill target station features using FAST DICT LOOKUP
@@ -1199,15 +1212,14 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 features[t, nearby_offset] = nearby['distance']
                 mask[t, nearby_offset] = True
 
-                # Coordinate features (static)
+                # Coordinate features (static) - Use FAST DICT LOOKUP!
                 for f_idx, param in enumerate(self.feature_params):
                     if param in coordinate_features:
-                        station_row = self.stations_df[self.stations_df['station_id'] == nearby_station_id]
-                        if len(station_row) > 0 and param in station_row.columns:
-                            coord_value = station_row.iloc[0][param]
-                            if pd.notna(coord_value):
+                        if nearby_station_id in self.station_coords:
+                            coord_value = self.station_coords[nearby_station_id].get(param)
+                            if coord_value is not None:
                                 feat_idx = nearby_offset + 1 + f_idx
-                                features[t, feat_idx] = float(coord_value)
+                                features[t, feat_idx] = coord_value
                                 mask[t, feat_idx] = True
 
                 # Time-varying features
