@@ -1229,6 +1229,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         # Check if all dates are in our dense array
         if None in date_indices:
             # Fall back to dict method if dates not available
+            print(f"  DEBUG: Falling back to dict method - dates not found in dense array")
+            print(f"    date_indices: {date_indices}")
             return self._build_sequence_tensor(target_station_id, start_date, end_date)
 
         # Get station indices
@@ -1290,8 +1292,14 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         end_date_idx = date_indices[-1]
         if soil_idx_in_dense is not None:
             target = self.dense_arrays['features'][target_idx, end_date_idx, soil_idx_in_dense]
+            # DEBUG
+            if target == self.missing_value:
+                print(f"  DEBUG: Target from dense array is missing_value!")
+                print(f"    target_idx={target_idx}, end_date_idx={end_date_idx}, soil_idx={soil_idx_in_dense}")
+                print(f"    target={target}")
         else:
             # Fall back to dict lookup for soil moisture if not in dense array
+            print(f"  DEBUG: soil_idx_in_dense is None - falling back to dict lookup")
             target_key = (target_station_id, end_date, self.soil_moisture_param)
             target = self.timeseries_index.get(target_key, self.missing_value) if self.timeseries_index else self.missing_value
 
