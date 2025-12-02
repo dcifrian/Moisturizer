@@ -355,8 +355,8 @@ def build_sequence_for_any_station(
     use_dense = False
     date_indices = None
     if dense_arrays is not None and dense_station_to_idx is not None and dense_date_to_idx is not None:
-        # Check if all dates are in dense arrays (dates already at midnight)
-        date_indices = [dense_date_to_idx.get(date) for date in date_range]
+        # Check if all dates are in dense arrays
+        date_indices = [dense_date_to_idx.get(date.normalize()) for date in date_range]
         if None not in date_indices:
             use_dense = True
             # print(f"  DEBUG: Using FAST PATH (dense arrays) for nearby stations")
@@ -599,8 +599,8 @@ def create_moisture_map(
             }
             # Build fast lookup mappings
             dense_station_to_idx = {int(sid): idx for idx, sid in enumerate(dense_data['station_ids'])}
-            # Dates in dense arrays are already at midnight - no need to normalize
-            dense_date_to_idx = {pd.Timestamp(date): idx
+            # Normalize dates to midnight UTC for consistent matching
+            dense_date_to_idx = {pd.Timestamp(date).normalize(): idx
                                for idx, date in enumerate(pd.DatetimeIndex(dense_data['dates']))}
             print(f"  ✓ Loaded dense arrays: {dense_arrays['features'].shape}")
             print(f"    Covers {len(dense_station_to_idx)} stations, {len(dense_date_to_idx)} dates")
