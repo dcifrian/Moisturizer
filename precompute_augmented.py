@@ -186,13 +186,14 @@ def _process_batch_direct_write(args):
 
                 current_idx += 1
 
-    # Flush this worker's writes to disk
-    all_features.flush()
-    all_targets.flush()
-    all_masks.flush()
-    all_target_stations.flush()
-    all_skip_pattern.flush()
-    all_permutation.flush()
+    # Don't flush! Memmap auto-flushes and flushing after every batch is catastrophically slow
+    # The OS will handle writing dirty pages to disk efficiently
+    # all_features.flush()
+    # all_targets.flush()
+    # all_masks.flush()
+    # all_target_stations.flush()
+    # all_skip_pattern.flush()
+    # all_permutation.flush()
 
     # Return batch info and dates (dates are small, safe to pickle)
     return (batch_num, start_idx, np.array(batch_end_dates, dtype=np.float64),
@@ -572,11 +573,12 @@ def generate_all_augmentations_sequential(
 
                 current_idx += 1
 
-        # Flush periodically to avoid buffer buildup
-        if (base_idx + 1) % 1000 == 0:
-            all_features.flush()
-            all_targets.flush()
-            all_masks.flush()
+        # Don't flush periodically - catastrophically slow!
+        # OS handles dirty pages efficiently. Only flush at the very end.
+        # if (base_idx + 1) % 1000 == 0:
+        #     all_features.flush()
+        #     all_targets.flush()
+        #     all_masks.flush()
 
     print(f"   ✓ Generated {current_idx:,} augmented samples")
 
@@ -706,9 +708,10 @@ def generate_all_augmentations_sequential(
         all_features[idx:end_idx] = features_batch
         all_targets[idx:end_idx] = targets_batch
 
-        if (end_idx % 100000) < sample_batch_size:
-            all_features.flush()
-            all_targets.flush()
+        # Don't flush periodically - too slow! OS handles it.
+        # if (end_idx % 100000) < sample_batch_size:
+        #     all_features.flush()
+        #     all_targets.flush()
 
     # Flush and save
     step_num += 1
@@ -1400,10 +1403,10 @@ def generate_all_augmentations_batched(
         all_features[idx:end_idx] = features_batch
         all_targets[idx:end_idx] = targets_batch
 
-        # Flush to disk periodically (less frequently since we're faster)
-        if (end_idx % 100000) < sample_batch_size:
-            all_features.flush()
-            all_targets.flush()
+        # Don't flush periodically - too slow! OS handles it.
+        # if (end_idx % 100000) < sample_batch_size:
+        #     all_features.flush()
+        #     all_targets.flush()
 
     # Save final dataset
     print(f"\n{step_num + 5}. Flushing all changes to disk...")
