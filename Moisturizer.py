@@ -940,6 +940,27 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             }
         print(f"  Indexed {len(self.station_coords)} station coordinates")
 
+        # Build nearest stations lookup (FAST DICT - avoid pandas filtering in loops!)
+        print("Creating fast lookup index for nearest stations...")
+        self.nearest_stations_cache = {}
+        for _, row in self.nearest_df.iterrows():
+            station_id = int(row['station_id'])
+            nearby_with_soil = []
+
+            # Extract all nearest neighbors from the row
+            for i in range(1, len(self.nearest_df.columns) // 3 + 1):
+                nearest_id_col = f'nearest_{i}_id'
+                if nearest_id_col not in row:
+                    break
+                if row[f'nearest_{i}_has_soil_moisture']:
+                    nearby_with_soil.append({
+                        'station_id': int(row[nearest_id_col]),
+                        'distance': row[f'nearest_{i}_distance']
+                    })
+
+            self.nearest_stations_cache[station_id] = nearby_with_soil
+        print(f"  Indexed {len(self.nearest_stations_cache)} station nearest neighbor lists")
+
         # Determine target stations
         if target_stations is None:
             self.target_stations = self.stations_df[
@@ -1127,23 +1148,11 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
     def _get_nearest_stations(self, target_station_id: int) -> List[Dict]:
         """Get n nearest stations with soil moisture for a target station"""
-        nearest_info = self.nearest_df[
-            self.nearest_df['station_id'] == target_station_id
-            ].iloc[0]
+        # Use cached lookup instead of pandas filtering (100x faster!)
+        all_nearby = self.nearest_stations_cache.get(target_station_id, [])
 
-        nearby_with_soil = []
-        for i in range(1, len(self.nearest_df.columns) // 3 + 1):
-            if f'nearest_{i}_id' not in nearest_info:
-                break
-            if nearest_info[f'nearest_{i}_has_soil_moisture']:
-                nearby_with_soil.append({
-                    'station_id': int(nearest_info[f'nearest_{i}_id']),
-                    'distance': nearest_info[f'nearest_{i}_distance']
-                })
-                if len(nearby_with_soil) == self.n_nearest:
-                    break
-
-        return nearby_with_soil
+        # Return up to n_nearest stations
+        return all_nearby[:self.n_nearest]
 
     def _build_sequence_tensor(
             self,
