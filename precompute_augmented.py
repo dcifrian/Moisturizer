@@ -1003,9 +1003,20 @@ def generate_all_augmentations_batched(
 
             # Fetch samples for this batch (main process)
             batch_samples_data = []
+            import time
+            if batch_num < 5:  # Time first 5 batches to see pattern
+                batch_start = time.time()
+
             for idx in range(start_idx_base, end_idx_base):
+                if batch_num < 5 and idx == start_idx_base:
+                    sample_start = time.time()
+
                 sample = base_dataset[idx]
                 sample_info = base_dataset.sample_index[idx]
+
+                if batch_num < 5 and idx == start_idx_base:
+                    sample_time = time.time() - sample_start
+                    print(f"      [DEBUG] Batch {batch_num}, first sample took {sample_time*1000:.1f}ms")
 
                 batch_samples_data.append({
                     'features': sample['features'].numpy(),
@@ -1013,6 +1024,10 @@ def generate_all_augmentations_batched(
                     'target': sample['target'].numpy(),
                     'sample_info': sample_info
                 })
+
+            if batch_num < 5:
+                batch_time = time.time() - batch_start
+                print(f"      [DEBUG] Batch {batch_num} took {batch_time:.2f}s for {len(batch_samples_data)} samples ({batch_time*1000/len(batch_samples_data):.1f}ms/sample)")
 
             # Calculate where this batch will be written in augmented dataset
             start_idx_aug = current_aug_idx

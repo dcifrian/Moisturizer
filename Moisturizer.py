@@ -1635,6 +1635,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
             if self.dense_arrays is not None:
                 # FAST PATH: Use dense array slicing
+                if idx < 3:  # Debug first 3 samples
+                    print(f"  [DEBUG] Sample {idx}: Using FAST dense array path")
                 features_tensor, target_tensor, mask_tensor = self._build_sequence_from_dense(
                     sample_info['target_station'],
                     sample_info['start_date'],
@@ -1642,6 +1644,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 )
             else:
                 # SLOW PATH: Use dict lookups (fallback)
+                if idx < 3:  # Debug first 3 samples
+                    print(f"  [DEBUG] Sample {idx}: Using SLOW dict lookup path")
                 features_tensor, target_tensor, mask_tensor = self._build_sequence_tensor(
                     sample_info['target_station'],
                     sample_info['start_date'],
