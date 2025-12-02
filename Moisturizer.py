@@ -2275,7 +2275,7 @@ def precomputeDataset():
     print(f"✓ Normalization stats saved to: {norm_stats_path}")
     print(f"\nYou can now use loadDataset() for fast loading!")
 
-def loadDataset(use_precomputed=True, normalize=True):
+def loadDataset(use_precomputed=True, normalize=True , precomputed_path = None, norm_stats_path = None):
     """
     Load PyTorch Dataset
 
@@ -2298,8 +2298,10 @@ def loadDataset(use_precomputed=True, normalize=True):
     print(f"\nUsing {len(filtered_params)} filtered parameters...")
 
     # Check for precomputed data
-    precomputed_path = collector.data_dir / "precomputed_sequences"
-    norm_stats_path = collector.data_dir / "normalization_stats.npz"
+    if precomputed_path is None:
+        precomputed_path = collector.data_dir / "precomputed_sequences"
+    if norm_stats_path is None:
+        norm_stats_path = collector.data_dir / "normalization_stats.npz"
 
     if use_precomputed and not precomputed_path.exists():
         print(f"\n⚠ Precomputed data not found at {precomputed_path}")
@@ -2349,7 +2351,8 @@ if __name__ == "__main2__":
 if __name__ == "__main__":
     # Check if precomputed data exists
     collector = MeteoGaliciaCollector()
-    precomputed_path = collector.data_dir / "precomputed_sequences"
+    precomputed_path = collector.data_dir / "precomputed_sequences_augmented"
+    norm_stats_path = collector.data_dir / "normalization_stats_augmented.npz"
     features_file = precomputed_path / "features.npy"
 
     if not features_file.exists():
@@ -2365,7 +2368,7 @@ if __name__ == "__main__":
         print("✓ Precomputation complete! Starting training...")
         print("=" * 60)
 
-    train_ds, val_ds, _ = loadDataset(use_precomputed=True, normalize=True)
+    train_ds, val_ds, _ = loadDataset(use_precomputed=True, normalize=True,precomputed_path=precomputed_path,norm_stats_path=norm_stats_path)
 
     # After loading dataset, check one sample:
     sample = train_ds[0]
@@ -2414,4 +2417,4 @@ if __name__ == "__main__":
                       attention_dropout=0.01,
                       quantize_bits= None if not quantize else 8
                       )
-    trololo.training_loop(train_data=train_ds,val_data=val_ds,lr=4.1e-4,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=84,batch_size=512,transfer=0)
+    trololo.training_loop(train_data=train_ds,val_data=val_ds,lr=4.1e-4,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=20,batch_size=512,transfer=0)
