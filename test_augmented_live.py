@@ -19,9 +19,11 @@ print("="*70)
 import numpy as np
 dense_data = np.load("meteogalicia_data/dense_features.npz")
 feature_params = dense_data['feature_params'].tolist()
-# Remove soil moisture and coordinates - those are handled separately
-feature_params = [p for p in feature_params if p not in ['HS_CV_AVG_-0.2m', 'altitude', 'utmx', 'utmy']]
+# Remove ONLY soil moisture - it's the target variable
+# Keep altitude, utmx, utmy - they are part of the feature set
+feature_params = [p for p in feature_params if p != 'HS_CV_AVG_-0.2m']
 print(f"Using {len(feature_params)} feature parameters from dense arrays")
+print(f"  (includes spatial features: altitude, utmx, utmy)")
 
 # Create live augmented dataset
 print("\nCreating LIVE augmented dataset...")
@@ -143,6 +145,7 @@ configs = [
     (128, 0),   # Single process
     (128, 2),   # 2 workers
     (512, 2),   # Larger batch
+    (512, 8),   # 8 workers (8 cores available)
 ]
 
 for batch_size, num_workers in configs:
