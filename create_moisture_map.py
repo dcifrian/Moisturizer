@@ -368,6 +368,10 @@ def build_sequence_for_any_station(
 
     # PHASE 2: Try FAST PATH for nearby stations using dense arrays
     if use_dense:
+        # Pre-build feature lookup dict ONCE (not in loops!)
+        dense_feature_params_list = list(dense_arrays['feature_params'])
+        dense_param_to_idx = {param: idx for idx, param in enumerate(dense_feature_params_list)}
+
         # Fill nearby stations using dense arrays (VECTORIZED - very fast!)
         for n_idx, nearby in enumerate(nearby_stations):
             nearby_id = nearby['station_id']
@@ -389,17 +393,17 @@ def build_sequence_for_any_station(
                 feat_start = nearby_offset + 1
                 for f_idx, param in enumerate(feature_params):
                     if param not in coordinate_features:  # Skip coords (already filled)
-                        # Find this param in dense array
-                        if param in dense_arrays['feature_params']:
-                            dense_param_idx = list(dense_arrays['feature_params']).index(param)
+                        # Find this param in dense array using pre-built dict
+                        if param in dense_param_to_idx:
+                            dense_param_idx = dense_param_to_idx[param]
                             feat_idx = feat_start + f_idx
                             features[:, feat_idx] = nearby_slice[:, dense_param_idx]
                             mask[:, feat_idx] = nearby_mask_slice[:, dense_param_idx]
 
                 # Copy soil moisture (index 26 in dense array)
                 soil_idx = nearby_offset + 1 + len(feature_params)
-                if 'HS_CV_AVG_-0.2m' in dense_arrays['feature_params']:
-                    dense_soil_idx = list(dense_arrays['feature_params']).index('HS_CV_AVG_-0.2m')
+                if 'HS_CV_AVG_-0.2m' in dense_param_to_idx:
+                    dense_soil_idx = dense_param_to_idx['HS_CV_AVG_-0.2m']
                     features[:, soil_idx] = nearby_slice[:, dense_soil_idx]
                     mask[:, soil_idx] = nearby_mask_slice[:, dense_soil_idx]
             # else: Station not in dense arrays, coordinates already filled, skip
