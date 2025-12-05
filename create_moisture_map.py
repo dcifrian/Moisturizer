@@ -1222,7 +1222,8 @@ def create_moisture_map(
     virtual_grid_size=100,  # Default to 100x100 grid
     auto_range=False,  # If False, use fixed range 0.07-0.4
     hide_markers=None,  # Set of markers to hide: {'real', 'predicted', 'virtual'}
-    real_moisture_only=False  # If True, only use real moisture stations for the map
+    real_moisture_only=False,  # If True, only use real moisture stations for the map
+    all_maps=False  # If True, create all map variants efficiently (reuses data)
 ):
     """
     Create a beautiful moisture map of all Galicia
@@ -1238,10 +1239,23 @@ def create_moisture_map(
         auto_range: If True, auto-range colorbar. If False, use fixed 0.07-0.4 range
         hide_markers: Set of marker types to hide: 'real', 'predicted', 'virtual'
         real_moisture_only: If True, only use real moisture stations (skip predictions)
+        all_maps: If True, create all map variants efficiently by reusing data:
+                  - {base}_moisture_map.png (full: real + predicted + virtual)
+                  - {base}_moisture_map_novirtual.png (real + predicted only)
+                  - {base}_moisture_map_realonly.png (real sensor data only)
+                  - {base}_precipitation.png (cumulative precipitation)
+                  - {base}_water_balance.png (cumulative water balance)
     """
     if hide_markers is None:
         hide_markers = set()
-    
+
+    # When all_maps is enabled, ensure we collect all data types
+    if all_maps:
+        real_moisture_only = False  # Need predictions
+        if virtual_grid_size is None:
+            virtual_grid_size = 100  # Need virtual grid
+        include_weather_maps = True  # Will create weather maps too
+
     print("=" * 60)
     print("CREATING GALICIA SOIL MOISTURE MAP")
     print("=" * 60)
@@ -1590,32 +1604,67 @@ def create_moisture_map(
     if virtual_results:
         print(f"  - Virtual grid: {(results_df['type'] == 'virtual').sum()}")
 
-    # Create visualization
-    print(f"\nCreating visualization...")
-    create_visualization(
-        results_df, target_date, output_file, 
-        coastline_points, galicia_land,
-        auto_range=auto_range,
-        hide_markers=hide_markers
-    )
+    # Compute output filenames
+    # If output ends with _moisture_map.png, use that pattern; otherwise append suffixes
+    if output_file.endswith('_moisture_map.png'):
+        base_name = output_file[:-len('_moisture_map.png')]
+    else:
+        base_name = output_file.replace('.png', '')
 
-    print(f"\n✓ Map saved to {output_file}")
+    if all_maps:
+        # Create all 3 moisture map variants efficiently (reusing collected data)
+        print("\n" + "=" * 60)
+        print("CREATING ALL MOISTURE MAP VARIANTS")
+        print("=" * 60)
 
-    # Create optional weather maps if requested
-    if include_weather_maps:
+        # 1. Full map (real + predicted + virtual)
+        full_file = f"{base_name}_moisture_map.png"
+        print(f"\nCreating full moisture map (real + predicted + virtual)...")
+        create_visualization(
+            results_df, target_date, full_file,
+            coastline_points, galicia_land,
+            auto_range=auto_range,
+            hide_markers=hide_markers
+        )
+        print(f"✓ Full map saved to {full_file}")
+
+        # 2. No virtual map (real + predicted only)
+        novirtual_file = f"{base_name}_moisture_map_novirtual.png"
+        print(f"\nCreating no-virtual moisture map (real + predicted)...")
+        novirtual_results = real_results + predicted_results
+        novirtual_df = pd.DataFrame(novirtual_results)
+        create_visualization(
+            novirtual_df, target_date, novirtual_file,
+            coastline_points, galicia_land,
+            auto_range=auto_range,
+            hide_markers=hide_markers
+        )
+        print(f"✓ No-virtual map saved to {novirtual_file}")
+
+        # 3. Real only map (only real sensor data)
+        realonly_file = f"{base_name}_moisture_map_realonly.png"
+        print(f"\nCreating real-only moisture map (sensors only)...")
+        realonly_df = pd.DataFrame(real_results)
+        create_visualization(
+            realonly_df, target_date, realonly_file,
+            coastline_points, galicia_land,
+            auto_range=auto_range,
+            hide_markers=hide_markers
+        )
+        print(f"✓ Real-only map saved to {realonly_file}")
+
+        # Weather maps with proper naming (no _moisture_map in name)
         print("\n" + "=" * 60)
         print("CREATING CUMULATIVE WEATHER MAPS")
         print("=" * 60)
 
-        # Compute cumulative precipitation and water balance over the 64-day sequence
-        start_date = target_date - timedelta(days=63)  # 64 days total
+        start_date = target_date - timedelta(days=63)
         weather_results = compute_cumulative_weather(
             stations_df, timeseries_lookup, start_date, target_date
         )
 
         if not weather_results.empty:
-            # Create precipitation map
-            precip_file = output_file.replace('.png', '_precipitation.png')
+            precip_file = f"{base_name}_precipitation.png"
             print(f"\nCreating cumulative precipitation map...")
             create_weather_visualization(
                 weather_results[weather_results['precipitation'].notna()],
@@ -1629,8 +1678,7 @@ def create_moisture_map(
             )
             print(f"✓ Precipitation map saved to {precip_file}")
 
-            # Create water balance map
-            balance_file = output_file.replace('.png', '_water_balance.png')
+            balance_file = f"{base_name}_water_balance.png"
             print(f"\nCreating cumulative water balance map...")
             create_weather_visualization(
                 weather_results[weather_results['water_balance'].notna()],
@@ -1645,6 +1693,59 @@ def create_moisture_map(
             print(f"✓ Water balance map saved to {balance_file}")
         else:
             print("⚠ No weather data available for the selected date range")
+
+    else:
+        # Original single-map behavior
+        print(f"\nCreating visualization...")
+        create_visualization(
+            results_df, target_date, output_file,
+            coastline_points, galicia_land,
+            auto_range=auto_range,
+            hide_markers=hide_markers
+        )
+        print(f"\n✓ Map saved to {output_file}")
+
+        # Create optional weather maps if requested
+        if include_weather_maps:
+            print("\n" + "=" * 60)
+            print("CREATING CUMULATIVE WEATHER MAPS")
+            print("=" * 60)
+
+            start_date = target_date - timedelta(days=63)
+            weather_results = compute_cumulative_weather(
+                stations_df, timeseries_lookup, start_date, target_date
+            )
+
+            if not weather_results.empty:
+                precip_file = output_file.replace('.png', '_precipitation.png')
+                print(f"\nCreating cumulative precipitation map...")
+                create_weather_visualization(
+                    weather_results[weather_results['precipitation'].notna()],
+                    'precipitation',
+                    target_date,
+                    precip_file,
+                    coastline_points,
+                    galicia_land,
+                    title=f"Cumulative Precipitation (64 days)\n{start_date.date()} to {target_date.date()}",
+                    unit="mm"
+                )
+                print(f"✓ Precipitation map saved to {precip_file}")
+
+                balance_file = output_file.replace('.png', '_water_balance.png')
+                print(f"\nCreating cumulative water balance map...")
+                create_weather_visualization(
+                    weather_results[weather_results['water_balance'].notna()],
+                    'water_balance',
+                    target_date,
+                    balance_file,
+                    coastline_points,
+                    galicia_land,
+                    title=f"Cumulative Water Balance (64 days)\n{start_date.date()} to {target_date.date()}",
+                    unit="mm"
+                )
+                print(f"✓ Water balance map saved to {balance_file}")
+            else:
+                print("⚠ No weather data available for the selected date range")
 
     print("\n" + "=" * 60)
 
@@ -2104,5 +2205,6 @@ if __name__ == "__main__":
         virtual_grid_size=args.virtual_grid,
         auto_range=args.auto_range,
         hide_markers=hide_markers,
-        real_moisture_only=args.real_moisture_only
+        real_moisture_only=args.real_moisture_only,
+        all_maps=args.all_maps
     )
