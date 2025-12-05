@@ -15,6 +15,9 @@ import time
 from pathlib import Path
 import zipfile
 
+from augmented_live import AugmentedLiveDataset
+from model_loader import load_model
+
 # PyTorch imports - optional, only needed for Dataset class
 try:
     import torch
@@ -2344,6 +2347,43 @@ def loadDataset(use_precomputed=True, normalize=True , precomputed_path = None, 
     )
     return train_ds, val_ds, test_ds
 
+def loadDatasetLiveAugmented():
+    collector = MeteoGaliciaCollector() # Does nothing, just for the paths
+    print("\n" + "=" * 60)
+    print("STEP 1: Loading PyTorch Dataset")
+    print("=" * 60)
+
+    # Get filtered parameters
+    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=0.25)
+
+    if not filtered_params:
+        print("\n✗ No parameters passed the threshold!")
+        return
+
+    print(f"\nUsing {len(filtered_params)} filtered parameters...")
+    dataset = AugmentedLiveDataset.from_base_dataset(
+        timeseries=str(collector.timeseries_file),
+        stations=str(collector.stations_file),
+        nearest=str(collector.nearest_file),
+        dense_array_path=str(collector.data_dir / "dense_features.npz"),
+        feature_params=filtered_params,
+        seq_length=64,
+        n_nearby_available=5,
+        n_nearby_in_features=4,
+        normalize=True,
+    )
+    # Train/val/test split
+    print("\n" + "=" * 60)
+    print("STEP 2: Creating train/val/test splits")
+    print("=" * 60)
+
+    train_ds, val_ds, test_ds = AugmentedLiveDatasetV2.train_val_test_split(
+        dataset,
+        val_stations_ratio=0.15,
+        test_stations_ratio=0.0
+    )
+    return train_ds, val_ds, test_ds
+
 if __name__ == "__main2__":
     buildDataset()
 
@@ -2368,7 +2408,8 @@ if __name__ == "__main__":
         print("✓ Precomputation complete! Starting training...")
         print("=" * 60)
 
-    train_ds, val_ds, _ = loadDataset(use_precomputed=True, normalize=True,precomputed_path=precomputed_path,norm_stats_path=norm_stats_path)
+    #train_ds, val_ds, _ = loadDataset(use_precomputed=True, normalize=True,precomputed_path=precomputed_path,norm_stats_path=norm_stats_path)
+    train_ds, val_ds, _ = loadDatasetLiveAugmented()
 
     # After loading dataset, check one sample:
     sample = train_ds[0]
@@ -2379,10 +2420,10 @@ if __name__ == "__main__":
     print(f"Feature shape: {features.shape}")
     print(f"Target value: {target.item():.4f}")
 
-    # Check if target value appears anywhere in features
+    # Check if target value appears anywhere in the target station features. Nearby stations may happen to have equal or similar values but that is ok.
     # (it shouldn't if there's no leakage!)
     features_np = features.numpy()
-    matches = (np.abs(features_np - target.item()) < 0.001).sum()
+    matches = (np.abs(features_np - target.item())[:,:26] < 0.001).sum()
     print(f"Features matching target value: {matches}")
 
     if matches > 0:
@@ -2395,26 +2436,5 @@ if __name__ == "__main__":
     last_matches = (np.abs(last_timestep - target.item()) < 0.001).sum()
     print(f"Last timestep matches: {last_matches}")
 
-    #torch._dynamo.config.disable = True
-    from TROLOLO.TROLOLO_pyramid import TROLOLO
-    quantize = False
-    trololo = TROLOLO(seq_length=64,
-                      num_layers=16,
-                      num_heads=48,
-                      embed_dim=192,
-                      mlp_dim=512,
-                      n_class_tokens=2,
-                      num_classes=1,
-                      mlp_rank=0.1,
-                      qkv_rank=0.2,
-                      attnproj_rank=0.1,
-                      sequence_pyramid=[],
-                      attn_rank_pyramid=[],
-                      rank_pyramid_begin=2,
-                      rank_pyramid_factor=1.0,
-                      head_constriction="ONE_CLASS_TOKEN",
-                      dropout=0.05,
-                      attention_dropout=0.01,
-                      quantize_bits= None if not quantize else 8
-                      )
+    trololo = load_model()
     trololo.training_loop(train_data=train_ds,val_data=val_ds,lr=4.1e-4,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=20,batch_size=512,transfer=0)

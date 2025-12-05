@@ -22,36 +22,113 @@ import torch
 from pathlib import Path
 
 from Moisturizer import MeteoGaliciaCollector, SoilMoistureSequenceDataset
+from model_loader import load_model
 
 
-def load_coastline_data(lon_min, lon_max, lat_min, lat_max, padding=0.15):
+def load_coastline_data(lon_min, lon_max, lat_min, lat_max, padding=0.15, cache_dir=None):
     """
     Load and prepare coastline data early to fail fast if there are issues.
+    Uses Galicia's administrative boundary when available, falls back to land data.
+    
+    Downloads are cached to avoid re-downloading on subsequent runs.
 
     Returns:
         tuple: (coastline_points, galicia_land)
     """
     import geopandas as gpd
     from shapely.geometry import box, Point, LineString
+    import os
+    import hashlib
+    
+    # Set up cache directory
+    if cache_dir is None:
+        cache_dir = os.path.join(os.path.dirname(__file__), '.geo_cache')
+    os.makedirs(cache_dir, exist_ok=True)
 
-    print("  Loading Natural Earth coastline data...")
-    # Download 10m resolution land data from Natural Earth CDN
-    url = "https://naciscdn.org/naturalearth/10m/physical/ne_10m_land.zip"
-    world = gpd.read_file(url)
+    print("  Loading boundary data...")
+    
+    galicia_land = None
+    
+    def cached_read_file(url):
+        """Read a file from URL, caching locally to avoid re-downloads."""
+        # Create a filename from the URL
+        url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
+        filename = os.path.basename(url).replace('.zip', '')
+        cache_path = os.path.join(cache_dir, f"{filename}_{url_hash}")
+        
+        if os.path.exists(cache_path):
+            print(f"    Using cached: {os.path.basename(cache_path)}")
+            return gpd.read_file(cache_path)
+        else:
+            print(f"    Downloading: {os.path.basename(url)}...")
+            gdf = gpd.read_file(url)
+            # Save to cache
+            gdf.to_file(cache_path, driver='GPKG')
+            print(f"    Cached to: {os.path.basename(cache_path)}")
+            return gdf
+    
+    # Try to load Galicia's administrative boundary (more accurate than land data)
+    try:
+        print("    Attempting to load Galicia administrative boundary...")
+        admin_url = "https://naciscdn.org/naturalearth/10m/cultural/ne_10m_admin_1_states_provinces.zip"
+        admin = cached_read_file(admin_url)
+        
+        # Natural Earth uses 'admin' for country name and 'name' for region name
+        # Try multiple approaches to find Galicia
+        galicia_rows = None
+        
+        # Approach 1: Look for Spain entries first, then find Galicia
+        if 'admin' in admin.columns:
+            spain = admin[admin['admin'].str.contains('Spain', case=False, na=False)]
+            print(f"    Found {len(spain)} Spain regions")
+            if len(spain) > 0:
+                # Look for Galicia in the name column
+                galicia_rows = spain[spain['name'].str.contains('Galicia', case=False, na=False)]
+                if len(galicia_rows) == 0 and 'name_en' in spain.columns:
+                    galicia_rows = spain[spain['name_en'].str.contains('Galicia', case=False, na=False)]
+        
+        # Approach 2: Direct search in all data
+        if galicia_rows is None or len(galicia_rows) == 0:
+            for col in ['name', 'name_en', 'name_local', 'gn_name', 'woe_name']:
+                if col in admin.columns:
+                    matches = admin[admin[col].str.contains('Galicia', case=False, na=False)]
+                    if len(matches) > 0:
+                        galicia_rows = matches
+                        print(f"    Found Galicia via column '{col}'")
+                        break
+        
+        if galicia_rows is not None and len(galicia_rows) > 0:
+            galicia_land = galicia_rows.geometry.union_all()
+            print(f"    ✓ Found Galicia administrative boundary")
+        else:
+            # Print some Spain region names to help debug
+            if 'admin' in admin.columns:
+                spain = admin[admin['admin'].str.contains('Spain', case=False, na=False)]
+                if len(spain) > 0:
+                    print(f"    Spain region names: {list(spain['name'].head(10))}")
+            print(f"    Could not find Galicia in admin boundaries, falling back to land data")
+    except Exception as e:
+        print(f"    Could not load admin boundaries ({e}), falling back to land data")
+    
+    # Fall back to Natural Earth land data if admin boundary not found
+    if galicia_land is None:
+        print("    Loading Natural Earth land data...")
+        url = "https://naciscdn.org/naturalearth/10m/physical/ne_10m_land.zip"
+        world = cached_read_file(url)
 
-    # Add padding to bounding box
-    lon_pad = (lon_max - lon_min) * padding
-    lat_pad = (lat_max - lat_min) * padding
+        # Add padding to bounding box
+        lon_pad = (lon_max - lon_min) * padding
+        lat_pad = (lat_max - lat_min) * padding
 
-    # Clip to our region of interest
-    bbox = box(lon_min - lon_pad, lat_min - lat_pad, lon_max + lon_pad, lat_max + lat_pad)
+        # Clip to our region of interest
+        bbox = box(lon_min - lon_pad, lat_min - lat_pad, lon_max + lon_pad, lat_max + lat_pad)
 
-    # Get land areas in our bbox
-    galicia_land = world.geometry.intersection(bbox)
-    galicia_land = galicia_land[~galicia_land.is_empty].unary_union
+        # Get land areas in our bbox
+        galicia_land = world.geometry.intersection(bbox)
+        galicia_land = galicia_land[~galicia_land.is_empty].union_all()
 
-    print("  Sampling coastline points...")
-    # Extract exterior boundary (coastline)
+    print("  Sampling coastline/boundary points...")
+    # Extract exterior boundary
     coastlines = []
     if hasattr(galicia_land, 'geoms'):
         # MultiPolygon - get all exteriors
@@ -82,71 +159,10 @@ def load_coastline_data(lon_min, lon_max, lat_min, lat_max, padding=0.15):
             coastline_points.append([point.x, point.y])
 
     coastline_points = np.array(coastline_points)
-    print(f"  ✓ Loaded coastline with {len(coastline_points)} sampled points")
+    print(f"  ✓ Loaded boundary with {len(coastline_points)} sampled points")
 
     return coastline_points, galicia_land
 
-
-def load_model(model_path, device='cuda'):
-    """Load trained TROLOLO model"""
-    print(f"Loading model from {model_path}...")
-
-    # Import TROLOLO (adjust import based on your structure)
-    try:
-        from TROLOLO.TROLOLO_pyramid import TROLOLO
-    except ImportError:
-        print("Error: Could not import TROLOLO. Make sure it's in your path.")
-        return None
-
-    # Load checkpoint
-    checkpoint = torch.load(model_path, map_location=device)
-
-    quantize = False
-    """trololo = TROLOLO(seq_length=64,
-                      num_layers=8,
-                      num_heads=48,
-                      embed_dim=192,
-                      mlp_dim=512,
-                      n_class_tokens=2,
-                      num_classes=1,
-                      mlp_rank=0.1,
-                      qkv_rank=0.2,
-                      attnproj_rank=0.1,
-                      sequence_pyramid=[],
-                      attn_rank_pyramid=[],
-                      rank_pyramid_begin=2,
-                      rank_pyramid_factor=1.0,
-                      head_constriction="ONE_CLASS_TOKEN",
-                      dropout=0.05,
-                      attention_dropout=0.01,
-                      quantize_bits=None if not quantize else 8
-                      )
-    """
-    trololo = TROLOLO(seq_length=64,
-                      num_layers=16,
-                      num_heads=48,
-                      embed_dim=192,
-                      mlp_dim=512,
-                      n_class_tokens=2,
-                      num_classes=1,
-                      mlp_rank=0.1,
-                      qkv_rank=0.2,
-                      attnproj_rank=0.1,
-                      sequence_pyramid=[],
-                      attn_rank_pyramid=[],
-                      rank_pyramid_begin=2,
-                      rank_pyramid_factor=1.0,
-                      head_constriction="ONE_CLASS_TOKEN",
-                      dropout=0.05,
-                      attention_dropout=0.01,
-                      quantize_bits= None if not quantize else 8
-                      )
-    trololo.load_state_dict(checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint)
-    trololo.to(device)
-    trololo.eval()
-
-    print(f"✓ Model loaded successfully")
-    return trololo
 
 
 def predict_for_station(model, dataset, station_id, end_date, device='cuda'):
@@ -198,41 +214,52 @@ def denormalize_soil_moisture(normalized_value, norm_stats_path):
     return original
 
 
-def get_real_soil_moisture(collector, station_id, date):
-    """Get actual soil moisture from timeseries data if available"""
-    timeseries_df = pd.read_csv(collector.timeseries_file)
-    timeseries_df['date'] = pd.to_datetime(timeseries_df['date'])
-
-    data = timeseries_df[
-        (timeseries_df['station_id'] == station_id) &
-        (timeseries_df['date'] == date) &
-        (timeseries_df['parameter_code'] == 'HS_CV_AVG_-0.2m')
-    ]
-
-    if not data.empty:
-        return data.iloc[0]['value']
-    return None
+def get_real_soil_moisture_from_lookup(timeseries_lookup, station_id, date):
+    """
+    Get actual soil moisture from pre-built lookup dict.
+    
+    OPTIMIZED: Uses pre-built dict instead of re-reading CSV every time.
+    """
+    date_str = str(date.date()) if hasattr(date, 'date') else str(date)[:10]
+    key = (int(station_id), date_str, 'HS_CV_AVG_-0.2m')
+    return timeseries_lookup.get(key)
 
 
 def build_fast_timeseries_lookup(timeseries_df, start_date, end_date, station_ids, feature_params):
     """
     Pre-process timeseries into fast numpy lookup structure.
+    
+    OPTIMIZED: Uses vectorized numpy operations instead of iterrows.
 
     Returns dict: {(station_id, date_str, parameter_code): value}
     """
-    # Filter to relevant date range and stations
-    mask = (
-        (timeseries_df['date'] >= start_date) &
-        (timeseries_df['date'] <= end_date) &
-        (timeseries_df['station_id'].isin(station_ids))
-    )
-    filtered = timeseries_df[mask]
-
-    # Create lookup dict for O(1) access
-    lookup = {}
-    for _, row in filtered.iterrows():
-        key = (int(row['station_id']), str(row['date'].date()), row['parameter_code'])
-        lookup[key] = float(row['value'])
+    # Convert station_ids to set for fast lookup
+    station_ids_set = set(station_ids)
+    
+    # Filter using numpy boolean indexing (much faster than pandas)
+    dates = timeseries_df['date'].values
+    sids = timeseries_df['station_id'].values
+    
+    # Create boolean mask vectorized
+    date_mask = (dates >= np.datetime64(start_date)) & (dates <= np.datetime64(end_date))
+    station_mask = np.isin(sids, list(station_ids_set))
+    mask = date_mask & station_mask
+    
+    # Extract filtered arrays directly (no DataFrame overhead)
+    filtered_stations = sids[mask].astype(np.int32)
+    filtered_dates = dates[mask]
+    filtered_params = timeseries_df['parameter_code'].values[mask]
+    filtered_values = timeseries_df['value'].values[mask].astype(np.float32)
+    
+    # Convert dates to strings vectorized
+    # Use pandas for efficient datetime->string conversion
+    date_strings = pd.to_datetime(filtered_dates).strftime('%Y-%m-%d').values
+    
+    # Build lookup dict using zip (much faster than iterrows)
+    lookup = dict(zip(
+        zip(filtered_stations, date_strings, filtered_params),
+        filtered_values
+    ))
 
     return lookup
 
@@ -241,8 +268,8 @@ def build_sequence_for_any_station(
     station_id,
     end_date,
     timeseries_lookup,
-    nearest_df,
-    stations_df,
+    nearest_lookup,  # Pre-built dict: station_id -> list of nearby stations
+    stations_lookup,  # Pre-built dict: station_id -> station row dict
     feature_params,
     norm_stats,
     seq_length=64,
@@ -257,40 +284,28 @@ def build_sequence_for_any_station(
 
     Args:
         timeseries_lookup: Pre-built dict from build_fast_timeseries_lookup
-        stations_df: DataFrame with station metadata (for coordinate features)
+        nearest_lookup: Pre-built dict: station_id -> [{'station_id': X, 'distance': Y}, ...]
+        stations_lookup: Pre-built dict: station_id -> {'altitude': X, 'utmx': Y, ...}
+    
+    OPTIMIZED: Uses pre-built dict lookups instead of DataFrame filtering.
     """
-    import numpy as np
-
     start_date = end_date - timedelta(days=seq_length - 1)
+    # Pre-generate date strings (faster than converting in loop)
     date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    date_strings = [str(d.date()) for d in date_range]
 
-    # Get nearest stations for this station
-    nearest_info = nearest_df[nearest_df['station_id'] == station_id]
-    if nearest_info.empty:
+    # Get nearest stations from pre-built lookup
+    if station_id not in nearest_lookup:
         return None
-
-    nearest_info = nearest_info.iloc[0]
-
-    # Find n nearest stations WITH soil moisture
-    nearby_stations = []
-    for i in range(1, 50):  # Check up to 50 nearest
-        if f'nearest_{i}_id' not in nearest_info:
-            break
-        if nearest_info.get(f'nearest_{i}_has_soil_moisture', False):
-            nearby_stations.append({
-                'station_id': int(nearest_info[f'nearest_{i}_id']),
-                'distance': nearest_info[f'nearest_{i}_distance']
-            })
-            if len(nearby_stations) == n_nearest:
-                break
-
+    
+    nearby_stations = nearest_lookup[station_id][:n_nearest]
+    
     if len(nearby_stations) < n_nearest:
         return None
 
-    # Separate coordinate features from timeseries parameters (CRITICAL FIX!)
-    coordinate_features = ['altitude', 'utmx', 'utmy']
-    timeseries_params = [p for p in feature_params if p not in coordinate_features]
-
+    # Separate coordinate features from timeseries parameters
+    coordinate_features = {'altitude', 'utmx', 'utmy'}  # Use set for O(1) lookup
+    
     # Calculate feature dimensions
     target_features_per_timestep = len(feature_params)
     nearby_features_per_timestep = (len(feature_params) + 1 + 1)  # features + soil moisture + distance
@@ -300,72 +315,70 @@ def build_sequence_for_any_station(
     features = np.full((seq_length, total_features), missing_value, dtype=np.float32)
     mask = np.zeros((seq_length, total_features), dtype=bool)
 
-    # Get station metadata for coordinate features
-    target_station_row = stations_df[stations_df['station_id'] == station_id]
-    if target_station_row.empty:
+    # Get target station metadata from pre-built lookup
+    if station_id not in stations_lookup:
         return None
-    target_station_row = target_station_row.iloc[0]
+    target_station_coords = stations_lookup[station_id]
 
-    # Build station lookup for nearby stations
-    nearby_station_rows = {}
+    # Pre-fetch nearby station coords
+    nearby_station_coords = {}
     for nearby in nearby_stations:
-        nearby_row = stations_df[stations_df['station_id'] == nearby['station_id']]
-        if not nearby_row.empty:
-            nearby_station_rows[nearby['station_id']] = nearby_row.iloc[0]
+        nid = nearby['station_id']
+        if nid in stations_lookup:
+            nearby_station_coords[nid] = stations_lookup[nid]
 
-    # Fill target station features using fast lookup
-    for t, date in enumerate(date_range):
-        date_str = str(date.date())
+    # Fill coordinate features ONCE (they're constant across time)
+    for f_idx, param in enumerate(feature_params):
+        if param in coordinate_features:
+            coord_value = target_station_coords.get(param)
+            if coord_value is not None:
+                features[:, f_idx] = coord_value
+                mask[:, f_idx] = True
+    
+    # Fill nearby station coordinate features and distances ONCE
+    for n_idx, nearby in enumerate(nearby_stations):
+        nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
+        
+        # Distance (constant across time)
+        features[:, nearby_offset] = nearby['distance']
+        mask[:, nearby_offset] = True
+        
+        # Coordinate features for nearby station
+        if nearby['station_id'] in nearby_station_coords:
+            ncoords = nearby_station_coords[nearby['station_id']]
+            for f_idx_nearby, param in enumerate(feature_params):
+                if param in coordinate_features:
+                    feat_idx = nearby_offset + 1 + f_idx_nearby
+                    coord_value = ncoords.get(param)
+                    if coord_value is not None:
+                        features[:, feat_idx] = coord_value
+                        mask[:, feat_idx] = True
 
-        # Fill timeseries parameters from lookup
-        f_idx = 0
-        for param in feature_params:
-            if param in coordinate_features:
-                # Fill coordinate feature from station metadata (SAME for all dates)
-                if t == 0:  # Only need to fill once, will broadcast to all timesteps below
-                    coord_value = target_station_row.get(param)
-                    if pd.notna(coord_value):
-                        features[:, f_idx] = float(coord_value)  # Fill ALL timesteps
-                        mask[:, f_idx] = True
-            else:
-                # Fill from timeseries lookup
+    # Fill timeseries features for each timestep
+    for t, date_str in enumerate(date_strings):
+        # Target station timeseries features
+        for f_idx, param in enumerate(feature_params):
+            if param not in coordinate_features:
                 key = (station_id, date_str, param)
                 if key in timeseries_lookup:
                     features[t, f_idx] = timeseries_lookup[key]
                     mask[t, f_idx] = True
-            f_idx += 1
 
-        # Fill nearby stations features
+        # Nearby stations timeseries features
         for n_idx, nearby in enumerate(nearby_stations):
             nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
+            nid = nearby['station_id']
 
-            # Distance (constant across time)
-            features[t, nearby_offset] = nearby['distance']
-            mask[t, nearby_offset] = True
-
-            # Features
-            f_idx_nearby = 0
-            for param in feature_params:
-                feat_idx = nearby_offset + 1 + f_idx_nearby
-
-                if param in coordinate_features:
-                    # Fill coordinate feature from station metadata
-                    if t == 0 and nearby['station_id'] in nearby_station_rows:
-                        nearby_row = nearby_station_rows[nearby['station_id']]
-                        coord_value = nearby_row.get(param)
-                        if pd.notna(coord_value):
-                            features[:, feat_idx] = float(coord_value)  # Fill ALL timesteps
-                            mask[:, feat_idx] = True
-                else:
-                    # Fill from timeseries lookup
-                    key = (nearby['station_id'], date_str, param)
+            for f_idx_nearby, param in enumerate(feature_params):
+                if param not in coordinate_features:
+                    feat_idx = nearby_offset + 1 + f_idx_nearby
+                    key = (nid, date_str, param)
                     if key in timeseries_lookup:
                         features[t, feat_idx] = timeseries_lookup[key]
                         mask[t, feat_idx] = True
-                f_idx_nearby += 1
 
             # Soil moisture for nearby station
-            key = (nearby['station_id'], date_str, 'HS_CV_AVG_-0.2m')
+            key = (nid, date_str, 'HS_CV_AVG_-0.2m')
             soil_idx = nearby_offset + 1 + len(feature_params)
             if key in timeseries_lookup:
                 features[t, soil_idx] = timeseries_lookup[key]
@@ -417,20 +430,787 @@ def apply_normalization_to_features(features, mask, norm_stats, missing_value=-1
     return features_norm
 
 
-def get_real_soil_moisture(collector, station_id, date):
-    """Get actual soil moisture from timeseries data if available"""
-    timeseries_df = pd.read_csv(collector.timeseries_file)
-    timeseries_df['date'] = pd.to_datetime(timeseries_df['date'])
+def create_virtual_grid_stations(
+    lon_min, lon_max, lat_min, lat_max,
+    grid_size=100,
+    galicia_land=None
+):
+    """
+    Create a grid of virtual weather stations covering the region.
+    
+    Args:
+        lon_min, lon_max, lat_min, lat_max: Bounding box
+        grid_size: Number of points in each dimension (grid_size x grid_size)
+        galicia_land: Optional shapely geometry to filter land-only points
+    
+    Returns:
+        List of dicts with virtual station info: [{lon, lat, grid_id}, ...]
+    """
+    from shapely.geometry import Point
+    
+    # Create regular grid
+    lons = np.linspace(lon_min, lon_max, grid_size)
+    lats = np.linspace(lat_min, lat_max, grid_size)
+    
+    virtual_stations = []
+    grid_id = 0
+    
+    for lon in lons:
+        for lat in lats:
+            # Filter to land only if geometry provided
+            if galicia_land is not None:
+                point = Point(lon, lat)
+                if not galicia_land.contains(point):
+                    continue
+            
+            virtual_stations.append({
+                'grid_id': grid_id,
+                'longitude': lon,
+                'latitude': lat
+            })
+            grid_id += 1
+    
+    return virtual_stations
 
-    data = timeseries_df[
-        (timeseries_df['station_id'] == station_id) &
-        (timeseries_df['date'] == date) &
-        (timeseries_df['parameter_code'] == 'HS_CV_AVG_-0.2m')
-    ]
 
-    if not data.empty:
-        return data.iloc[0]['value']
+def find_nearest_real_stations(virtual_station, stations_df, stations_lookup, n_nearest=4):
+    """
+    Find the n nearest real stations to a virtual station.
+    Uses UTM coordinates for distance calculation (meters) to match the precomputed distances.
+    
+    Returns list of dicts: [{station_id, distance, lon, lat}, ...]
+    """
+    # First, interpolate UTM coordinates for the virtual station from nearby stations
+    # Use a simple approach: find closest station by lat/lon and use similar UTM
+    virtual_lon = virtual_station['longitude']
+    virtual_lat = virtual_station['latitude']
+    
+    # Get stations with valid UTM coordinates
+    valid_utm = []
+    for _, row in stations_df.iterrows():
+        sid = int(row['station_id'])
+        if sid in stations_lookup:
+            coords = stations_lookup[sid]
+            if coords.get('utmx') is not None and coords.get('utmy') is not None:
+                valid_utm.append({
+                    'station_id': sid,
+                    'longitude': row['longitude'],
+                    'latitude': row['latitude'],
+                    'utmx': coords['utmx'],
+                    'utmy': coords['utmy'],
+                    'has_soil_moisture': row['has_soil_moisture']
+                })
+    
+    if not valid_utm:
+        return []
+    
+    # Compute approximate UTM for virtual station using inverse distance weighted interpolation
+    # from nearest stations (by lat/lon)
+    lons = np.array([s['longitude'] for s in valid_utm])
+    lats = np.array([s['latitude'] for s in valid_utm])
+    
+    ll_distances = np.sqrt((lons - virtual_lon)**2 + (lats - virtual_lat)**2)
+    nearest_idx = np.argsort(ll_distances)[:6]  # Use 6 nearest for UTM interpolation
+    
+    weights = 1.0 / (ll_distances[nearest_idx] + 1e-9)
+    weights = weights / weights.sum()
+    
+    virtual_utmx = np.sum(weights * np.array([valid_utm[i]['utmx'] for i in nearest_idx]))
+    virtual_utmy = np.sum(weights * np.array([valid_utm[i]['utmy'] for i in nearest_idx]))
+    
+    # Now compute distances in meters using UTM
+    result = []
+    for s in valid_utm:
+        dist_m = np.sqrt((s['utmx'] - virtual_utmx)**2 + (s['utmy'] - virtual_utmy)**2)
+        result.append({
+            'station_id': s['station_id'],
+            'distance': dist_m,  # Distance in meters
+            'longitude': s['longitude'],
+            'latitude': s['latitude'],
+            'has_soil_moisture': s['has_soil_moisture']
+        })
+    
+    # Sort by distance and return n nearest
+    result.sort(key=lambda x: x['distance'])
+    return result[:n_nearest]
+
+
+def interpolate_coordinate_features(virtual_station, nearest_stations, stations_lookup, use_real_elevation=True):
+    """
+    Interpolate coordinate features (altitude, utmx, utmy) from nearest stations.
+    Uses inverse distance weighting based on the distances already computed (in meters).
+    
+    For altitude, attempts to use real SRTM elevation data if available.
+    Falls back to interpolation from nearby stations if SRTM data not available.
+    
+    Returns dict: {altitude, utmx, utmy}
+    """
+    result = {'altitude': None, 'utmx': None, 'utmy': None}
+    
+    # Try to get real elevation from SRTM data first
+    if use_real_elevation:
+        real_elevation = get_elevation_from_srtm(
+            virtual_station['longitude'], 
+            virtual_station['latitude']
+        )
+        if real_elevation is not None:
+            result['altitude'] = real_elevation
+    
+    for coord in ['altitude', 'utmx', 'utmy']:
+        # Skip altitude if we already got it from SRTM
+        if coord == 'altitude' and result['altitude'] is not None:
+            continue
+            
+        values = []
+        weights = []
+        
+        for ns in nearest_stations:
+            sid = ns['station_id']
+            if sid in stations_lookup and stations_lookup[sid].get(coord) is not None:
+                values.append(stations_lookup[sid][coord])
+                # Use the distance already computed (now in meters)
+                weights.append(1.0 / (ns['distance'] + 1.0))  # +1m to avoid div by zero
+        
+        if values:
+            weights = np.array(weights)
+            weights = weights / weights.sum()
+            result[coord] = float(np.sum(np.array(values) * weights))
+    
+    return result
+
+
+# Global elevation data cache
+_elevation_data = None
+_elevation_transform = None
+_elevation_bounds = None
+
+
+def load_srtm_elevation_data(cache_dir=None):
+    """
+    Load SRTM elevation data for Galicia region.
+    Downloads and caches the data locally.
+    
+    Uses the 'elevation' package to download SRTM 30m data.
+    
+    Returns (data, transform, bounds) or (None, None, None) if unavailable.
+    """
+    global _elevation_data, _elevation_transform, _elevation_bounds
+    
+    # Return cached data if already loaded in memory
+    if _elevation_data is not None:
+        return _elevation_data, _elevation_transform, _elevation_bounds
+    
+    import os
+    
+    if cache_dir is None:
+        cache_dir = os.path.join(os.path.dirname(__file__), '.geo_cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    elevation_cache = os.path.join(cache_dir, 'galicia_elevation.tif')
+    
+    try:
+        import rasterio
+        
+        if os.path.exists(elevation_cache):
+            print("    Using cached elevation data...")
+            with rasterio.open(elevation_cache) as src:
+                _elevation_data = src.read(1)
+                _elevation_transform = src.transform
+                _elevation_bounds = src.bounds
+            return _elevation_data, _elevation_transform, _elevation_bounds
+        
+        # Try to download SRTM data using the 'elevation' package
+        print("    Downloading SRTM elevation data (first run only)...")
+        
+        try:
+            import elevation
+            
+            # Define bounds for Galicia (west, south, east, north)
+            bounds = (-9.5, 41.7, -6.5, 44.0)
+            
+            # Download and clip SRTM data
+            elevation.clip(bounds=bounds, output=elevation_cache, product='SRTM3')
+            
+            with rasterio.open(elevation_cache) as src:
+                _elevation_data = src.read(1)
+                _elevation_transform = src.transform
+                _elevation_bounds = src.bounds
+            
+            print(f"    ✓ Downloaded and cached SRTM elevation data")
+            return _elevation_data, _elevation_transform, _elevation_bounds
+            
+        except ImportError:
+            print("    'elevation' package not installed.")
+            print("    To enable real elevation data, install: pip install elevation")
+            return None, None, None
+            
+    except ImportError:
+        print("    'rasterio' not installed.")
+        print("    To enable real elevation data, install: pip install rasterio elevation")
+        return None, None, None
+    except Exception as e:
+        print(f"    Could not load elevation data: {e}")
+        return None, None, None
+
+
+def get_elevation_from_srtm(lon, lat, cache_dir=None):
+    """
+    Get elevation for a point from cached SRTM data.
+    
+    Returns elevation in meters, or None if data unavailable.
+    """
+    data, transform, bounds = load_srtm_elevation_data(cache_dir)
+    
+    if data is None:
+        return None
+    
+    try:
+        from rasterio.transform import rowcol
+        
+        # Check if point is within bounds
+        if not (bounds.left <= lon <= bounds.right and bounds.bottom <= lat <= bounds.top):
+            return None
+        
+        # Convert lon/lat to row/col
+        row, col = rowcol(transform, lon, lat)
+        
+        # Check bounds
+        if 0 <= row < data.shape[0] and 0 <= col < data.shape[1]:
+            elev = data[row, col]
+            # SRTM uses -32768 as nodata
+            if elev > -1000:
+                return float(elev)
+    except Exception:
+        pass
+    
     return None
+
+
+def get_elevation_from_open_elevation(lon, lat):
+    """
+    DEPRECATED: Use get_elevation_from_srtm instead.
+    
+    Get elevation from Open-Elevation API (free, no API key needed).
+    Falls back to None if request fails.
+    
+    Note: Rate limited to 1000 queries/month. Use SRTM data instead.
+    """
+    # Try SRTM first
+    elev = get_elevation_from_srtm(lon, lat)
+    if elev is not None:
+        return elev
+    
+    # Fall back to API (but this is rate-limited)
+    import requests
+    try:
+        url = f"https://api.open-elevation.com/api/v1/lookup?locations={lat},{lon}"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if 'results' in data and len(data['results']) > 0:
+                return data['results'][0]['elevation']
+    except Exception:
+        pass
+    return None
+
+
+def point_in_triangle(px, py, ax, ay, bx, by, cx, cy):
+    """Check if point (px, py) is inside triangle ABC using barycentric coordinates."""
+    def sign(p1x, p1y, p2x, p2y, p3x, p3y):
+        return (p1x - p3x) * (p2y - p3y) - (p2x - p3x) * (p1y - p3y)
+    
+    d1 = sign(px, py, ax, ay, bx, by)
+    d2 = sign(px, py, bx, by, cx, cy)
+    d3 = sign(px, py, cx, cy, ax, ay)
+    
+    has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+    has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+    
+    return not (has_neg and has_pos)
+
+
+def triangle_area(ax, ay, bx, by, cx, cy):
+    """Compute area of triangle ABC."""
+    return abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) / 2.0
+
+
+def select_triangle_stations(virtual_station, nearest_stations, stations_lookup):
+    """
+    Select 3 stations for interpolation:
+    - First station is always the nearest
+    - Other two are chosen from the provided nearest stations to form the smallest triangle
+      that contains the virtual station
+    - If no containing triangle exists, fall back to 3 nearest
+    
+    Returns list of 3 station dicts with 'station_id' and 'distance'
+    """
+    if len(nearest_stations) < 3:
+        return nearest_stations
+    
+    # Get virtual station UTM coordinates (approximate from nearest)
+    v_lon = virtual_station['longitude']
+    v_lat = virtual_station['latitude']
+    
+    # Get UTM coordinates for candidate stations (use all provided)
+    candidates = []
+    for ns in nearest_stations:
+        sid = ns['station_id']
+        if sid in stations_lookup:
+            coords = stations_lookup[sid]
+            if coords.get('utmx') is not None and coords.get('utmy') is not None:
+                candidates.append({
+                    'station_id': sid,
+                    'distance': ns['distance'],
+                    'utmx': coords['utmx'],
+                    'utmy': coords['utmy']
+                })
+    
+    if len(candidates) < 3:
+        return nearest_stations[:3]
+    
+    # Compute approximate UTM for virtual station using weighted average of nearest
+    weights = np.array([1.0 / (c['distance'] + 1.0) for c in candidates[:3]])
+    weights = weights / weights.sum()
+    v_utmx = sum(w * c['utmx'] for w, c in zip(weights, candidates[:3]))
+    v_utmy = sum(w * c['utmy'] for w, c in zip(weights, candidates[:3]))
+    
+    # First station is always nearest
+    first = candidates[0]
+    
+    # Find smallest triangle containing the virtual station
+    best_triangle = None
+    best_area = float('inf')
+    
+    for i in range(1, len(candidates)):
+        for j in range(i + 1, len(candidates)):
+            # Triangle: first, candidates[i], candidates[j]
+            ax, ay = first['utmx'], first['utmy']
+            bx, by = candidates[i]['utmx'], candidates[i]['utmy']
+            cx, cy = candidates[j]['utmx'], candidates[j]['utmy']
+            
+            if point_in_triangle(v_utmx, v_utmy, ax, ay, bx, by, cx, cy):
+                area = triangle_area(ax, ay, bx, by, cx, cy)
+                if area < best_area:
+                    best_area = area
+                    best_triangle = [first, candidates[i], candidates[j]]
+    
+    if best_triangle is not None:
+        return best_triangle
+    else:
+        # No containing triangle found - use 3 nearest
+        return [{'station_id': c['station_id'], 'distance': c['distance']} 
+                for c in candidates[:3]]
+
+
+def build_sequence_for_virtual_station(
+    virtual_station,
+    end_date,
+    timeseries_lookup,
+    nearest_real_stations,  # List from find_nearest_real_stations
+    nearest_with_soil,  # List of nearest stations WITH soil moisture sensors
+    virtual_coords,  # Interpolated {altitude, utmx, utmy}
+    stations_lookup,
+    feature_params,
+    norm_stats,
+    seq_length=64,
+    n_nearest=4,
+    missing_value=-1000.0
+):
+    """
+    Build a sequence for a virtual grid station by interpolating features from real stations.
+    
+    For each feature at each timestep:
+    - Use inverse distance weighted interpolation from nearest real stations
+    - Missing values (-9999, -1000) are excluded from interpolation
+    """
+    
+    start_date = end_date - timedelta(days=seq_length - 1)
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    date_strings = [str(d.date()) for d in date_range]
+    
+    # Coordinate features
+    coordinate_features = {'altitude', 'utmx', 'utmy'}
+    
+    # Calculate feature dimensions (same structure as real stations)
+    target_features_per_timestep = len(feature_params)
+    nearby_features_per_timestep = (len(feature_params) + 1 + 1)  # features + soil moisture + distance
+    total_features = target_features_per_timestep + (nearby_features_per_timestep * n_nearest)
+    
+    # Initialize arrays
+    features = np.full((seq_length, total_features), missing_value, dtype=np.float32)
+    mask = np.zeros((seq_length, total_features), dtype=bool)
+    
+    # Pre-compute distances and weights for nearest real stations
+    # Distances are now in meters, so use +1m epsilon instead of 1e-9
+    distances = np.array([ns['distance'] for ns in nearest_real_stations])
+    weights = 1.0 / (distances + 1.0)  # +1 meter
+    weights = weights / weights.sum()
+    
+    # Fill coordinate features for target (virtual) station - constant across time
+    for f_idx, param in enumerate(feature_params):
+        if param in coordinate_features:
+            coord_value = virtual_coords.get(param)
+            if coord_value is not None:
+                features[:, f_idx] = coord_value
+                mask[:, f_idx] = True
+    
+    # Fill nearby station (with soil moisture) coordinate features and distances
+    for n_idx, nearby in enumerate(nearest_with_soil[:n_nearest]):
+        nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
+        
+        # Distance
+        features[:, nearby_offset] = nearby['distance']
+        mask[:, nearby_offset] = True
+        
+        # Coordinate features
+        if nearby['station_id'] in stations_lookup:
+            ncoords = stations_lookup[nearby['station_id']]
+            for f_idx_nearby, param in enumerate(feature_params):
+                if param in coordinate_features:
+                    feat_idx = nearby_offset + 1 + f_idx_nearby
+                    coord_value = ncoords.get(param)
+                    if coord_value is not None:
+                        features[:, feat_idx] = coord_value
+                        mask[:, feat_idx] = True
+    
+    # Fill timeseries features by interpolation
+    # Strategy: Use 3 stations forming the smallest triangle containing the virtual station.
+    # If nearest has missing data, only impute if virtual station is close to other stations
+    # (within 15% of nearest distance). Otherwise keep as missing (-2 normalized).
+    
+    # Select which 3 stations to use for interpolation
+    # We need nearest_real_stations to have at least 10 for triangle selection
+    interpolation_stations = select_triangle_stations(
+        virtual_station, nearest_real_stations, stations_lookup
+    )
+    
+    # Recompute weights for the selected stations
+    interp_distances = np.array([ns['distance'] for ns in interpolation_stations])
+    interp_weights = 1.0 / (interp_distances + 1.0)
+    interp_weights = interp_weights / interp_weights.sum()
+    
+    nearest_distance = interpolation_stations[0]['distance']
+    
+    for t, date_str in enumerate(date_strings):
+        # Target station: interpolate each feature from selected stations
+        for f_idx, param in enumerate(feature_params):
+            if param not in coordinate_features:
+                # Check nearest station first
+                nearest_key = (interpolation_stations[0]['station_id'], date_str, param)
+                nearest_val = timeseries_lookup.get(nearest_key)
+                
+                if nearest_val is not None and nearest_val > -9000:
+                    # Nearest has valid data - interpolate from all 3 stations
+                    values = [nearest_val]
+                    valid_weights = [interp_weights[0]]
+                    
+                    for i in range(1, len(interpolation_stations)):
+                        key = (interpolation_stations[i]['station_id'], date_str, param)
+                        val = timeseries_lookup.get(key)
+                        if val is not None and val > -9000:
+                            values.append(val)
+                            valid_weights.append(interp_weights[i])
+                    
+                    # Interpolate
+                    valid_weights = np.array(valid_weights)
+                    valid_weights = valid_weights / valid_weights.sum()
+                    features[t, f_idx] = float(np.sum(np.array(values) * valid_weights))
+                    mask[t, f_idx] = True
+                else:
+                    # Nearest has missing data - check if we should impute from others
+                    # Allow imputation if any other station is within 5% of nearest distance
+                    allow_impute = False
+                    for i in range(1, len(interpolation_stations)):
+                        if interpolation_stations[i]['distance'] <= nearest_distance * 1.05:
+                            allow_impute = True
+                            break
+                    
+                    if allow_impute:
+                        # Try to get value from other stations
+                        values = []
+                        valid_weights = []
+                        for i in range(1, len(interpolation_stations)):
+                            key = (interpolation_stations[i]['station_id'], date_str, param)
+                            val = timeseries_lookup.get(key)
+                            if val is not None and val > -9000:
+                                values.append(val)
+                                valid_weights.append(interp_weights[i])
+                        
+                        if values:
+                            valid_weights = np.array(valid_weights)
+                            valid_weights = valid_weights / valid_weights.sum()
+                            features[t, f_idx] = float(np.sum(np.array(values) * valid_weights))
+                            mask[t, f_idx] = True
+                    # else: keep as missing_value (-1000) -> -2 after normalization
+        
+        # Context stations (4 nearest with soil moisture sensors): use their ACTUAL data
+        # These provide real weather + real soil moisture as context for the prediction
+        for n_idx, nearby in enumerate(nearest_with_soil[:n_nearest]):
+            nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
+            nid = nearby['station_id']
+            
+            # Weather features for this context station (actual, not interpolated)
+            for f_idx_nearby, param in enumerate(feature_params):
+                if param not in coordinate_features:
+                    feat_idx = nearby_offset + 1 + f_idx_nearby
+                    key = (nid, date_str, param)
+                    if key in timeseries_lookup:
+                        features[t, feat_idx] = timeseries_lookup[key]
+                        mask[t, feat_idx] = True
+            
+            # Soil moisture for this context station (actual)
+            key = (nid, date_str, 'HS_CV_AVG_-0.2m')
+            soil_idx = nearby_offset + 1 + len(feature_params)
+            if key in timeseries_lookup:
+                features[t, soil_idx] = timeseries_lookup[key]
+                mask[t, soil_idx] = True
+    
+    # Apply normalization
+    features_normalized = apply_normalization_to_features(features, mask, norm_stats, missing_value)
+    
+    return features_normalized, mask
+
+
+def find_nearest_stations_with_soil_moisture(virtual_station, stations_df, stations_lookup, n_max=10):
+    """
+    Find the nearest stations that have soil moisture sensors.
+    Uses UTM coordinates for distance calculation (meters) to match the precomputed distances.
+    """
+    virtual_lon = virtual_station['longitude']
+    virtual_lat = virtual_station['latitude']
+    
+    # Get soil moisture stations with valid UTM coordinates
+    valid_utm = []
+    for _, row in stations_df.iterrows():
+        if not row['has_soil_moisture']:
+            continue
+        sid = int(row['station_id'])
+        if sid in stations_lookup:
+            coords = stations_lookup[sid]
+            if coords.get('utmx') is not None and coords.get('utmy') is not None:
+                valid_utm.append({
+                    'station_id': sid,
+                    'longitude': row['longitude'],
+                    'latitude': row['latitude'],
+                    'utmx': coords['utmx'],
+                    'utmy': coords['utmy']
+                })
+    
+    if not valid_utm:
+        return []
+    
+    # Compute approximate UTM for virtual station using inverse distance weighted interpolation
+    lons = np.array([s['longitude'] for s in valid_utm])
+    lats = np.array([s['latitude'] for s in valid_utm])
+    
+    ll_distances = np.sqrt((lons - virtual_lon)**2 + (lats - virtual_lat)**2)
+    nearest_idx = np.argsort(ll_distances)[:6]
+    
+    weights = 1.0 / (ll_distances[nearest_idx] + 1e-9)
+    weights = weights / weights.sum()
+    
+    virtual_utmx = np.sum(weights * np.array([valid_utm[i]['utmx'] for i in nearest_idx]))
+    virtual_utmy = np.sum(weights * np.array([valid_utm[i]['utmy'] for i in nearest_idx]))
+    
+    # Compute distances in meters using UTM
+    result = []
+    for s in valid_utm:
+        dist_m = np.sqrt((s['utmx'] - virtual_utmx)**2 + (s['utmy'] - virtual_utmy)**2)
+        result.append({
+            'station_id': s['station_id'],
+            'distance': dist_m,  # Distance in meters
+            'longitude': s['longitude'],
+            'latitude': s['latitude'],
+            'has_soil_moisture': True
+        })
+    
+    # Sort by distance and return n nearest
+    result.sort(key=lambda x: x['distance'])
+    return result[:n_max]
+
+
+def debug_find_worst_offenders(
+    virtual_sequences,  # List of (station_info, features_norm, mask) for virtual stations
+    predicted_sequences,  # List of (station_info, features_norm, mask) for predicted stations
+    virtual_results,  # Results with moisture predictions
+    predicted_results,  # Results with moisture predictions
+    stations_df,
+    stations_lookup,
+    nearest_lookup,
+    feature_params,
+    norm_stats,
+    top_n=5
+):
+    """
+    Find virtual stations that are close to predicted (triangle) stations but have
+    very different moisture predictions. Compare the ACTUAL NORMALIZED FEATURES
+    that were sent to the model.
+    """
+    if not virtual_results or not predicted_results:
+        print("No virtual or predicted results to compare")
+        return
+    
+    print("\n" + "=" * 80)
+    print("DEBUG: Finding worst offenders (virtual vs predicted station discrepancies)")
+    print("=" * 80)
+    
+    # Build lookup from station_id/grid_id to sequence data
+    virtual_seq_lookup = {}
+    for station_info, features_norm, mask in virtual_sequences:
+        key = (station_info['longitude'], station_info['latitude'])
+        virtual_seq_lookup[key] = (features_norm, mask, station_info)
+    
+    pred_seq_lookup = {}
+    for station_info, features_norm, mask in predicted_sequences:
+        sid = station_info['station_id']
+        pred_seq_lookup[sid] = (features_norm, mask, station_info)
+    
+    # Build arrays for fast distance computation
+    virtual_coords = np.array([[v['longitude'], v['latitude']] for v in virtual_results])
+    virtual_moisture = np.array([v['moisture'] for v in virtual_results])
+    
+    pred_coords = np.array([[p['longitude'], p['latitude']] for p in predicted_results])
+    pred_moisture = np.array([p['moisture'] for p in predicted_results])
+    pred_ids = [p['station_id'] for p in predicted_results]
+    
+    # Use approximate conversion: 1 degree ≈ 111km
+    deg_to_km = 111.0
+    
+    offenders = []
+    for i, vr in enumerate(virtual_results):
+        # Find nearest predicted station
+        dists_deg = np.sqrt(np.sum((pred_coords - virtual_coords[i])**2, axis=1))
+        nearest_idx = np.argmin(dists_deg)
+        dist_km = dists_deg[nearest_idx] * deg_to_km
+        
+        # Only consider if within 1km
+        if dist_km > 1.0:
+            continue
+        
+        moisture_diff = abs(virtual_moisture[i] - pred_moisture[nearest_idx])
+        score = moisture_diff / (dist_km + 0.1)
+        
+        offenders.append({
+            'virtual_idx': i,
+            'virtual_result': vr,
+            'pred_idx': nearest_idx,
+            'pred_result': predicted_results[nearest_idx],
+            'pred_station_id': pred_ids[nearest_idx],
+            'dist_km': dist_km,
+            'moisture_diff': moisture_diff,
+            'score': score
+        })
+    
+    offenders.sort(key=lambda x: -x['score'])
+    
+    print(f"\nFound {len(offenders)} virtual stations within 1km of a predicted station")
+    if not offenders:
+        print("No offenders found!")
+        return
+        
+    print(f"Showing top {min(top_n, len(offenders))} worst offenders:\n")
+    
+    # Feature structure: target_features + n_nearest * (distance + features + soil_moisture)
+    n_target_features = len(feature_params)
+    n_nearest = 4
+    nearby_features_per_station = len(feature_params) + 1 + 1  # features + distance + soil_moisture
+    
+    for rank, off in enumerate(offenders[:top_n]):
+        vr = off['virtual_result']
+        pr = off['pred_result']
+        pred_sid = off['pred_station_id']
+        
+        print(f"\n{'='*70}")
+        print(f"OFFENDER #{rank+1} (score: {off['score']:.3f})")
+        print(f"{'='*70}")
+        print(f"Virtual station: ({vr['longitude']:.4f}, {vr['latitude']:.4f})")
+        print(f"Predicted station {pred_sid}: ({pr['longitude']:.4f}, {pr['latitude']:.4f})")
+        print(f"Distance between them: {off['dist_km']*1000:.1f}m")
+        print(f"\nMOISTURE PREDICTION:")
+        print(f"  Virtual:   {vr['moisture']:.4f}")
+        print(f"  Predicted: {pr['moisture']:.4f}")
+        print(f"  Difference: {off['moisture_diff']:.4f}")
+        
+        # Get actual normalized sequences
+        vkey = (vr['longitude'], vr['latitude'])
+        if vkey not in virtual_seq_lookup:
+            print(f"  WARNING: Could not find virtual sequence for {vkey}")
+            continue
+        v_features, v_mask, _ = virtual_seq_lookup[vkey]
+        
+        if pred_sid not in pred_seq_lookup:
+            print(f"  WARNING: Could not find predicted sequence for station {pred_sid}")
+            continue
+        p_features, p_mask, _ = pred_seq_lookup[pred_sid]
+        
+        # Compare the ACTUAL normalized features (last timestep, index -1)
+        print(f"\n--- ACTUAL NORMALIZED FEATURES SENT TO MODEL (last timestep) ---")
+        print(f"  Comparing what the model actually saw for each station")
+        
+        # Compute differences for target station features
+        print(f"\n  TARGET STATION FEATURES (first {n_target_features} features):")
+        print(f"  {'Idx':>4s}  {'Parameter':25s}  {'Pred':>10s}  {'Virtual':>10s}  {'Diff':>10s}")
+        print(f"  {'-'*4}  {'-'*25}  {'-'*10}  {'-'*10}  {'-'*10}")
+        
+        target_diffs = []
+        for f_idx in range(n_target_features):
+            param = feature_params[f_idx] if f_idx < len(feature_params) else f"feat_{f_idx}"
+            p_val = p_features[-1, f_idx]  # Last timestep
+            v_val = v_features[-1, f_idx]
+            diff = abs(p_val - v_val)
+            target_diffs.append((f_idx, param, p_val, v_val, diff))
+        
+        # Sort by diff and show top 10
+        target_diffs.sort(key=lambda x: -x[4])
+        for f_idx, param, p_val, v_val, diff in target_diffs[:10]:
+            print(f"  {f_idx:4d}  {param:25s}  {p_val:10.4f}  {v_val:10.4f}  {diff:10.4f}")
+        
+        # Compare context station features (nearby stations with soil moisture)
+        print(f"\n  CONTEXT STATION FEATURES (4 nearest soil moisture stations):")
+        
+        for n_idx in range(n_nearest):
+            offset = n_target_features + n_idx * nearby_features_per_station
+            
+            # Distance feature
+            dist_idx = offset
+            p_dist = p_features[-1, dist_idx]
+            v_dist = v_features[-1, dist_idx]
+            
+            print(f"\n  Context station {n_idx+1}:")
+            print(f"    Distance (normalized): Pred={p_dist:.4f}, Virtual={v_dist:.4f}, Diff={abs(p_dist-v_dist):.4f}")
+            
+            # Soil moisture feature (last in the group)
+            soil_idx = offset + 1 + len(feature_params)
+            p_soil = p_features[-1, soil_idx]
+            v_soil = v_features[-1, soil_idx]
+            print(f"    Soil moisture (norm):  Pred={p_soil:.4f}, Virtual={v_soil:.4f}, Diff={abs(p_soil-v_soil):.4f}")
+            
+            # Check a few weather features for this context station
+            context_diffs = []
+            for f_idx_rel, param in enumerate(feature_params[:5]):  # First 5 params
+                feat_idx = offset + 1 + f_idx_rel
+                p_val = p_features[-1, feat_idx]
+                v_val = v_features[-1, feat_idx]
+                context_diffs.append((param, p_val, v_val, abs(p_val - v_val)))
+            
+            context_diffs.sort(key=lambda x: -x[3])
+            if context_diffs[0][3] > 0.01:  # Only show if there's meaningful difference
+                print(f"    Largest feature diffs:")
+                for param, p_val, v_val, diff in context_diffs[:3]:
+                    print(f"      {param}: Pred={p_val:.4f}, Virt={v_val:.4f}, Diff={diff:.4f}")
+        
+        # Overall statistics
+        all_diffs = np.abs(p_features[-1, :] - v_features[-1, :])
+        print(f"\n  SUMMARY:")
+        print(f"    Total features: {len(all_diffs)}")
+        print(f"    Max diff: {np.max(all_diffs):.4f}")
+        print(f"    Mean diff: {np.mean(all_diffs):.4f}")
+        print(f"    Features with diff > 0.1: {np.sum(all_diffs > 0.1)}")
+        print(f"    Features with diff > 0.5: {np.sum(all_diffs > 0.5)}")
+    
+    print("\n" + "=" * 80)
+    print("END DEBUG")
+    print("=" * 80)
 
 
 def create_moisture_map(
@@ -438,7 +1218,11 @@ def create_moisture_map(
     target_date=None,
     output_file='galicia_moisture_map.png',
     device='cuda',
-    include_weather_maps=False
+    include_weather_maps=False,
+    virtual_grid_size=100,  # Default to 100x100 grid
+    auto_range=False,  # If False, use fixed range 0.07-0.4
+    hide_markers=None,  # Set of markers to hide: {'real', 'predicted', 'virtual'}
+    real_moisture_only=False  # If True, only use real moisture stations for the map
 ):
     """
     Create a beautiful moisture map of all Galicia
@@ -449,7 +1233,15 @@ def create_moisture_map(
         output_file: Path to save the visualization
         device: 'cuda' or 'cpu'
         include_weather_maps: If True, also create cumulative precipitation and water balance maps
+        virtual_grid_size: If set, create a NxN grid of virtual stations with interpolated
+                          features and model-predicted soil moisture (e.g. 100 for 100 by 100 grid)
+        auto_range: If True, auto-range colorbar. If False, use fixed 0.07-0.4 range
+        hide_markers: Set of marker types to hide: 'real', 'predicted', 'virtual'
+        real_moisture_only: If True, only use real moisture stations (skip predictions)
     """
+    if hide_markers is None:
+        hide_markers = set()
+    
     print("=" * 60)
     print("CREATING GALICIA SOIL MOISTURE MAP")
     print("=" * 60)
@@ -457,8 +1249,20 @@ def create_moisture_map(
     # Initialize collector
     collector = MeteoGaliciaCollector()
 
-    # Load stations
+    # Load all data files ONCE at the start
+    print("\nLoading data files...")
     stations_df = pd.read_csv(collector.stations_file)
+    nearest_df = pd.read_csv(collector.nearest_file)
+    
+    # Load timeseries ONCE with optimized dtypes
+    print("  Loading timeseries (this may take a moment)...")
+    timeseries_df = pd.read_csv(
+        collector.timeseries_file,
+        dtype={'station_id': np.int32, 'value': np.float32}  # Specify dtypes for efficiency
+    )
+    timeseries_df['date'] = pd.to_datetime(timeseries_df['date'])
+    print(f"  ✓ Loaded {len(timeseries_df):,} timeseries records")
+    
     print(f"\nFound {len(stations_df)} stations total")
     print(f"  - {stations_df['has_soil_moisture'].sum()} with soil moisture sensors")
     print(f"  - {(~stations_df['has_soil_moisture']).sum()} without sensors (will predict)")
@@ -469,11 +1273,8 @@ def create_moisture_map(
     lat_min, lat_max = stations_df['latitude'].min(), stations_df['latitude'].max()
     coastline_points, galicia_land = load_coastline_data(lon_min, lon_max, lat_min, lat_max)
 
-    # Determine target date
+    # Determine target date using already-loaded timeseries
     if target_date is None:
-        # Use most recent date in timeseries
-        timeseries_df = pd.read_csv(collector.timeseries_file)
-        timeseries_df['date'] = pd.to_datetime(timeseries_df['date'])
         target_date = timeseries_df['date'].max()
     else:
         target_date = pd.to_datetime(target_date)
@@ -481,18 +1282,22 @@ def create_moisture_map(
     print(f"\nTarget date: {target_date.strftime('%Y-%m-%d')}")
 
     # Load model
-    model = load_model(model_path, device)
-    if model is None:
-        return
+    model = load_model(model_path, device,compilation=False)
 
-    # Load dataset for inference
+    # Analyze parameter coverage (pass pre-loaded DataFrames to avoid re-reading)
+    print("\nAnalyzing parameter coverage...")
+    _, filtered_params = collector.analyze_parameter_coverage(
+        timeseries_df=timeseries_df,
+        stations_df=stations_df,
+        coverage_threshold=0.25
+    )
+
+    # Create dataset - pass pre-loaded DataFrames
     print("\nLoading dataset...")
-    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=0.25)
-
     dataset = SoilMoistureSequenceDataset(
-        timeseries=str(collector.timeseries_file),
-        stations=str(collector.stations_file),
-        nearest=str(collector.nearest_file),
+        timeseries=timeseries_df,  # Pass DataFrame directly instead of path
+        stations=stations_df,
+        nearest=nearest_df,
         seq_length=64,
         n_nearest=4,
         feature_params=filtered_params,
@@ -500,12 +1305,6 @@ def create_moisture_map(
         normalize=True,
         norm_stats_path=str(collector.data_dir / "normalization_stats_augmented.npz")
     )
-
-    # Load timeseries and nearest data for on-the-fly predictions
-    print("\nLoading timeseries data for predictions...")
-    timeseries_df = pd.read_csv(collector.timeseries_file)
-    timeseries_df['date'] = pd.to_datetime(timeseries_df['date'])
-    nearest_df = pd.read_csv(collector.nearest_file)
 
     # Load normalization stats
     norm_stats = np.load(str(collector.data_dir / "normalization_stats_augmented.npz"))
@@ -515,18 +1314,39 @@ def create_moisture_map(
     start_date = target_date - timedelta(days=64 - 1)
 
     # Collect all station IDs we'll need (all stations + their nearby stations)
+    # OPTIMIZED: Pre-build nearest stations lookup dict to avoid repeated DataFrame filtering
     all_needed_stations = set(stations_df['station_id'].tolist())
-    for _, station in stations_df.iterrows():
-        if not station['has_soil_moisture']:
-            # Add nearby stations for this station
-            nearest_info = nearest_df[nearest_df['station_id'] == station['station_id']]
-            if not nearest_info.empty:
-                nearest_info = nearest_info.iloc[0]
-                for i in range(1, 50):
-                    if f'nearest_{i}_id' not in nearest_info:
-                        break
-                    if nearest_info.get(f'nearest_{i}_has_soil_moisture', False):
-                        all_needed_stations.add(int(nearest_info[f'nearest_{i}_id']))
+    
+    # Build nearest lookup dict once - stores full info including distance
+    nearest_lookup = {}
+    for _, row in nearest_df.iterrows():
+        station_id = int(row['station_id'])
+        nearby_with_soil = []
+        for i in range(1, 50):
+            if f'nearest_{i}_id' not in row:
+                break
+            if row.get(f'nearest_{i}_has_soil_moisture', False):
+                nearby_with_soil.append({
+                    'station_id': int(row[f'nearest_{i}_id']),
+                    'distance': float(row[f'nearest_{i}_distance'])
+                })
+        nearest_lookup[station_id] = nearby_with_soil
+    
+    # Build stations lookup dict once - for coordinate features
+    stations_lookup = {}
+    for _, row in stations_df.iterrows():
+        sid = int(row['station_id'])
+        stations_lookup[sid] = {
+            'altitude': float(row['altitude']) if pd.notna(row['altitude']) else None,
+            'utmx': float(row['utmx']) if pd.notna(row['utmx']) else None,
+            'utmy': float(row['utmy']) if pd.notna(row['utmy']) else None
+        }
+    
+    # Now collect all needed stations efficiently
+    for station_id in stations_df[~stations_df['has_soil_moisture']]['station_id']:
+        if station_id in nearest_lookup:
+            for nearby in nearest_lookup[station_id]:
+                all_needed_stations.add(nearby['station_id'])
 
     timeseries_lookup = build_fast_timeseries_lookup(
         timeseries_df, start_date, target_date,
@@ -549,8 +1369,8 @@ def create_moisture_map(
         has_sensor = station['has_soil_moisture']
 
         if has_sensor:
-            # Get real data
-            moisture = get_real_soil_moisture(collector, station_id, target_date)
+            # Get real data - OPTIMIZED: use pre-built lookup instead of re-reading CSV
+            moisture = get_real_soil_moisture_from_lookup(timeseries_lookup, station_id, target_date)
             if moisture is not None:
                 real_results.append({
                     'station_id': station_id,
@@ -560,15 +1380,15 @@ def create_moisture_map(
                     'type': 'real',
                     'name': station.get('name', f'Station {station_id}')
                 })
-        else:
-            # Build sequence for later batch inference
+        elif not real_moisture_only:
+            # Build sequence for later batch inference (skip if real_moisture_only)
             try:
                 sequence_data = build_sequence_for_any_station(
                     station_id=station_id,
                     end_date=target_date,
                     timeseries_lookup=timeseries_lookup,
-                    nearest_df=nearest_df,
-                    stations_df=stations_df,
+                    nearest_lookup=nearest_lookup,  # Use pre-built dict
+                    stations_lookup=stations_lookup,  # Use pre-built dict
                     feature_params=filtered_params,
                     norm_stats=norm_stats,
                     seq_length=64,
@@ -634,16 +1454,150 @@ def create_moisture_map(
                 'name': station_info['name']
             })
 
+    # Phase 4: Virtual grid predictions (if enabled and not real_moisture_only)
+    virtual_results = []
+    if virtual_grid_size is not None and virtual_grid_size > 0 and not real_moisture_only:
+        print(f"\n" + "=" * 60)
+        print(f"Phase 4: Creating {virtual_grid_size}x{virtual_grid_size} virtual grid...")
+        print("=" * 60)
+        
+        # Create virtual grid stations (land only)
+        virtual_stations = create_virtual_grid_stations(
+            lon_min, lon_max, lat_min, lat_max,
+            grid_size=virtual_grid_size,
+            galicia_land=galicia_land
+        )
+        print(f"  Created {len(virtual_stations)} virtual stations (land only)")
+        
+        # Build sequences for virtual stations
+        print(f"\n  Building sequences for virtual stations...")
+        virtual_sequences = []  # List of (station_info, features_norm, mask)
+        
+        # Pre-compute station coordinates array for fast distance calculations
+        station_coords_array = stations_df[['longitude', 'latitude']].values
+        soil_stations_mask = stations_df['has_soil_moisture'].values
+        soil_stations_df = stations_df[stations_df['has_soil_moisture']]
+        soil_coords_array = soil_stations_df[['longitude', 'latitude']].values
+        
+        for i, vs in enumerate(virtual_stations):
+            if i % 500 == 0:
+                print(f"    Processing virtual station {i+1}/{len(virtual_stations)}...")
+            
+            try:
+                # Find nearest real stations for feature interpolation
+                nearest_real = find_nearest_real_stations(vs, stations_df, stations_lookup, n_nearest=5)
+                
+                # Find nearest stations WITH soil moisture for context
+                nearest_soil = find_nearest_stations_with_soil_moisture(vs, stations_df, stations_lookup, n_max=10)
+                
+                if len(nearest_soil) < 4:
+                    continue  # Need at least 4 nearby soil moisture stations
+                
+                # Interpolate coordinate features (uses real elevation API for altitude)
+                virtual_coords_interp = interpolate_coordinate_features(vs, nearest_real, stations_lookup)
+                
+                # Build sequence
+                sequence_data = build_sequence_for_virtual_station(
+                    virtual_station=vs,
+                    end_date=target_date,
+                    timeseries_lookup=timeseries_lookup,
+                    nearest_real_stations=nearest_real,
+                    nearest_with_soil=nearest_soil,
+                    virtual_coords=virtual_coords_interp,
+                    stations_lookup=stations_lookup,
+                    feature_params=filtered_params,
+                    norm_stats=norm_stats,
+                    seq_length=64,
+                    n_nearest=4
+                )
+                
+                if sequence_data is not None:
+                    features_norm, mask = sequence_data
+                    station_info = {
+                        'grid_id': vs['grid_id'],
+                        'latitude': vs['latitude'],
+                        'longitude': vs['longitude']
+                    }
+                    virtual_sequences.append((station_info, features_norm, mask))
+                    
+            except Exception as e:
+                # Skip problematic virtual stations silently
+                continue
+        
+        print(f"  ✓ Built {len(virtual_sequences)} valid virtual station sequences")
+        
+        # Run batch inference for virtual stations
+        if virtual_sequences:
+            print(f"\n  Running batched inference for virtual grid...")
+            
+            batch_size = len(virtual_sequences)
+            X_batch = torch.stack([
+                torch.from_numpy(features_norm) for _, features_norm, _ in virtual_sequences
+            ])
+            
+            print(f"    Batch shape: {X_batch.shape}")
+            
+            x_gpu = torch.zeros([batch_size, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
+                               dtype=torch.float16, device=device)
+            
+            with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
+                x_gpu[:batch_size, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
+                x = x_gpu[:batch_size, :, :]
+                predictions_normalized = model(x).cpu()
+            
+            print(f"  ✓ Virtual grid inference complete")
+            
+            # Denormalize and store results
+            for i, (station_info, _, _) in enumerate(virtual_sequences):
+                pred_normalized = predictions_normalized[i].item()
+                pred_denorm = denormalize_soil_moisture(
+                    pred_normalized,
+                    str(collector.data_dir / "normalization_stats.npz")
+                )
+                
+                virtual_results.append({
+                    'station_id': f"grid_{station_info['grid_id']}",
+                    'latitude': station_info['latitude'],
+                    'longitude': station_info['longitude'],
+                    'moisture': pred_denorm,
+                    'type': 'virtual',
+                    'name': f"Virtual {station_info['grid_id']}"
+                })
+            
+            print(f"  ✓ {len(virtual_results)} virtual grid predictions complete")
+        
+        # Debug: find worst offenders (virtual stations with large moisture diff from nearby predicted)
+        # Pass the actual normalized sequences so we can compare what went into the model
+        debug_find_worst_offenders(
+            virtual_sequences=virtual_sequences,
+            predicted_sequences=sequences_to_predict,
+            virtual_results=virtual_results,
+            predicted_results=predicted_results,
+            stations_df=stations_df,
+            stations_lookup=stations_lookup,
+            nearest_lookup=nearest_lookup,
+            feature_params=filtered_params,
+            norm_stats=norm_stats,
+            top_n=5
+        )
+
     # Combine all results
-    all_results = real_results + predicted_results
+    all_results = real_results + predicted_results + virtual_results
     results_df = pd.DataFrame(all_results)
     print(f"\n✓ Collected data for {len(results_df)} stations")
     print(f"  - Real: {(results_df['type'] == 'real').sum()}")
     print(f"  - Predicted: {(results_df['type'] == 'predicted').sum()}")
+    if virtual_results:
+        print(f"  - Virtual grid: {(results_df['type'] == 'virtual').sum()}")
 
     # Create visualization
     print(f"\nCreating visualization...")
-    create_visualization(results_df, target_date, output_file, coastline_points, galicia_land)
+    create_visualization(
+        results_df, target_date, output_file, 
+        coastline_points, galicia_land,
+        auto_range=auto_range,
+        hide_markers=hide_markers
+    )
 
     print(f"\n✓ Map saved to {output_file}")
 
@@ -718,25 +1672,29 @@ def compute_cumulative_weather(stations_df, timeseries_lookup, start_date, end_d
         lat = station['latitude']
         lon = station['longitude']
 
-        # Sum up precipitation over all days
+        # Sum up precipitation over all days (skip invalid -9999 values)
         precip_sum = 0
         precip_count = 0
         for date in date_range:
             date_str = str(date.date())
             key = (station_id, date_str, 'PP_SUM_1.5m')
             if key in timeseries_lookup:
-                precip_sum += timeseries_lookup[key]
-                precip_count += 1
+                val = timeseries_lookup[key]
+                if val > -9000:  # Valid value
+                    precip_sum += val
+                    precip_count += 1
 
-        # Sum up water balance over all days
+        # Sum up water balance over all days (skip invalid -9999 values)
         balance_sum = 0
         balance_count = 0
         for date in date_range:
             date_str = str(date.date())
             key = (station_id, date_str, 'BH_SUM_1.5m')
             if key in timeseries_lookup:
-                balance_sum += timeseries_lookup[key]
-                balance_count += 1
+                val = timeseries_lookup[key]
+                if val > -9000:  # Valid value
+                    balance_sum += val
+                    balance_count += 1
 
         # Only include if we have some data
         if precip_count > 0 or balance_count > 0:
@@ -772,12 +1730,17 @@ def create_weather_visualization(results_df, value_column, target_date, output_f
     colors = ['#8B4513', '#D2691E', '#FFFFFF', '#90EE90', '#32CD32', '#228B22', '#4682B4']
     cmap = LinearSegmentedColormap.from_list('water_balance', colors, N=100)
 
-    # Get coordinate bounds with padding
-    lon_min, lon_max = results_df['longitude'].min(), results_df['longitude'].max()
-    lat_min, lat_max = results_df['latitude'].min(), results_df['latitude'].max()
+    # Get coordinate bounds from Galicia boundary (consistent across all maps)
+    if galicia_land is not None:
+        bounds = galicia_land.bounds  # (minx, miny, maxx, maxy)
+        lon_min, lat_min, lon_max, lat_max = bounds
+    else:
+        lon_min, lon_max = results_df['longitude'].min(), results_df['longitude'].max()
+        lat_min, lat_max = results_df['latitude'].min(), results_df['latitude'].max()
 
-    lon_pad = (lon_max - lon_min) * 0.15
-    lat_pad = (lat_max - lat_min) * 0.15
+    # Add 2% padding
+    lon_pad = (lon_max - lon_min) * 0.02
+    lat_pad = (lat_max - lat_min) * 0.02
 
     ax.set_xlim(lon_min - lon_pad, lon_max + lon_pad)
     ax.set_ylim(lat_min - lat_pad, lat_max + lat_pad)
@@ -895,8 +1858,14 @@ def create_weather_visualization(results_df, value_column, target_date, output_f
     plt.close()
 
 
-def create_visualization(results_df, target_date, output_file, coastline_points=None, galicia_land=None):
-    """Create beautiful moisture map visualization overlaid on Galicia map"""
+def create_visualization(results_df, target_date, output_file, coastline_points=None, galicia_land=None,
+                         auto_range=False, hide_markers=None):
+    """Create beautiful moisture map visualization overlaid on Galicia map
+    
+    Args:
+        auto_range: If True, auto-range colorbar. If False, use fixed 0.07-0.4 range
+        hide_markers: Set of marker types to hide: 'real', 'predicted', 'virtual'
+    """
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap
     from scipy.interpolate import griddata
@@ -904,6 +1873,9 @@ def create_visualization(results_df, target_date, output_file, coastline_points=
     import numpy as np
     import contextily as ctx
     from shapely.geometry import Point
+    
+    if hide_markers is None:
+        hide_markers = set()
 
     fig, ax = plt.subplots(figsize=(16, 12))
 
@@ -911,14 +1883,27 @@ def create_visualization(results_df, target_date, output_file, coastline_points=
     colors = ['#8B4513', '#D2691E', '#F4A460', '#90EE90', '#32CD32', '#228B22', '#4682B4', '#1E90FF']
     n_bins = 100
     cmap = LinearSegmentedColormap.from_list('moisture', colors, N=n_bins)
+    
+    # Determine value range for colorbar
+    if auto_range:
+        vmin = results_df['moisture'].min()
+        vmax = results_df['moisture'].max()
+    else:
+        vmin = 0.07
+        vmax = 0.40
 
-    # Get coordinate bounds with extra padding for extrapolation
-    lon_min, lon_max = results_df['longitude'].min(), results_df['longitude'].max()
-    lat_min, lat_max = results_df['latitude'].min(), results_df['latitude'].max()
+    # Get coordinate bounds from Galicia boundary (consistent across all maps)
+    # Fall back to station data if boundary not available
+    if galicia_land is not None:
+        bounds = galicia_land.bounds  # (minx, miny, maxx, maxy)
+        lon_min, lat_min, lon_max, lat_max = bounds
+    else:
+        lon_min, lon_max = results_df['longitude'].min(), results_df['longitude'].max()
+        lat_min, lat_max = results_df['latitude'].min(), results_df['latitude'].max()
 
-    # Add padding
-    lon_pad = (lon_max - lon_min) * 0.15
-    lat_pad = (lat_max - lat_min) * 0.15
+    # Add 10% padding
+    lon_pad = (lon_max - lon_min) * 0.02
+    lat_pad = (lat_max - lat_min) * 0.02
 
     # Set axis limits
     ax.set_xlim(lon_min - lon_pad, lon_max + lon_pad)
@@ -998,36 +1983,49 @@ def create_visualization(results_df, target_date, output_file, coastline_points=
     # Plot interpolated moisture as semi-transparent overlay (50% opacity)
     moisture_plot = ax.contourf(
         grid_lon_mesh, grid_lat_mesh, grid_moisture,
-        levels=20, cmap=cmap, alpha=0.5, extend='both', zorder=2
+        levels=np.linspace(vmin, vmax, 21), cmap=cmap, alpha=0.5, extend='both', zorder=2
     )
 
     # Plot station points
     real_data = results_df[results_df['type'] == 'real']
     pred_data = results_df[results_df['type'] == 'predicted']
+    virtual_data = results_df[results_df['type'] == 'virtual'] if 'type' in results_df.columns else pd.DataFrame()
+
+    # Virtual data: small black dots (plot first so they're behind real stations)
+    if len(virtual_data) > 0 and 'virtual' not in hide_markers:
+        scatter_virtual = ax.scatter(
+            virtual_data['longitude'], virtual_data['latitude'],
+            c='black', s=3,  # Small black dots
+            marker='.', label=f'Virtual grid ({len(virtual_data)} pts)',
+            zorder=7, alpha=0.6
+        )
 
     # Real data: solid circles with black outline
-    scatter_real = ax.scatter(
-        real_data['longitude'], real_data['latitude'],
-        c=real_data['moisture'], s=150, cmap=cmap,
-        edgecolors='black', linewidths=2.5,
-        marker='o', label='Real data (sensors)',
-        vmin=station_values.min(), vmax=station_values.max(), zorder=10
-    )
+    if 'real' not in hide_markers:
+        scatter_real = ax.scatter(
+            real_data['longitude'], real_data['latitude'],
+            c=real_data['moisture'], s=150, cmap=cmap,
+            edgecolors='black', linewidths=2.5,
+            marker='o', label='Real data (sensors)',
+            vmin=vmin, vmax=vmax, zorder=10
+        )
 
     # Predicted data: triangles with gray outline
-    if len(pred_data) > 0:
+    if len(pred_data) > 0 and 'predicted' not in hide_markers:
         scatter_pred = ax.scatter(
             pred_data['longitude'], pred_data['latitude'],
             c=pred_data['moisture'], s=130, cmap=cmap,
             edgecolors='white', linewidths=2,
             marker='^', label='Predicted (no sensor)',
-            vmin=station_values.min(), vmax=station_values.max(), zorder=9
+            vmin=vmin, vmax=vmax, zorder=9
         )
 
-    # Add colorbar
+    # Add colorbar with percentage formatting
     cbar = plt.colorbar(moisture_plot, ax=ax, pad=0.02, shrink=0.8)
     cbar.set_label('Soil Moisture (%)', fontsize=14, weight='bold')
     cbar.ax.tick_params(labelsize=11)
+    # Format tick labels as percentages
+    cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x*100:.1f}'))
 
     # Labels and title
     ax.set_xlabel('Longitude', fontsize=13, weight='bold')
@@ -1037,21 +2035,28 @@ def create_visualization(results_df, target_date, output_file, coastline_points=
         fontsize=18, weight='bold', pad=20
     )
 
-    # Legend with better styling
-    legend = ax.legend(loc='upper right', fontsize=12, framealpha=0.95,
-                       edgecolor='black', fancybox=True, shadow=True)
-    legend.get_frame().set_facecolor('white')
+    # Legend with better styling (only if there are visible items)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        legend = ax.legend(loc='upper right', fontsize=12, framealpha=0.95,
+                           edgecolor='black', fancybox=True, shadow=True)
+        legend.get_frame().set_facecolor('white')
 
     # Grid
     ax.grid(True, alpha=0.3, linestyle='--')
 
     # Stats text box
-    stats_text = (
-        f"Stations: {len(results_df)} total\n"
-        f"Real: {len(real_data)} | Predicted: {len(pred_data)}\n"
-        f"Range: {station_values.min():.1f}% - {station_values.max():.1f}%\n"
-        f"Mean: {station_values.mean():.1f}%"
-    )
+    stats_lines = [
+        f"Stations: {len(real_data) + len(pred_data)} total",
+        f"Real: {len(real_data)} | Predicted: {len(pred_data)}"
+    ]
+    if len(virtual_data) > 0:
+        stats_lines.append(f"Virtual grid: {len(virtual_data)}")
+    stats_lines.extend([
+        f"Range: {vmin:.1%} - {vmax:.1%}",
+        f"Mean: {station_values.mean():.1%}"
+    ])
+    stats_text = "\n".join(stats_lines)
     ax.text(
         0.02, 0.98, stats_text,
         transform=ax.transAxes,
@@ -1070,15 +2075,34 @@ if __name__ == "__main__":
     parser.add_argument('--date', type=str, default="2025-10-25", help='Target date (YYYY-MM-DD), default: most recent')
     parser.add_argument('--output', type=str, default='galicia_moisture_map.png', help='Output file path')
     parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'], help='Device to use')
-    parser.add_argument('--include-weather-maps', action='store_false',
+    parser.add_argument('--include-weather-maps', action='store_true',
                        help='Also create cumulative precipitation and water balance maps')
+    parser.add_argument('--virtual-grid', type=int, default=None,
+                       help='Create NxN grid of virtual stations (e.g., 100 for 100x100 grid)')
+    parser.add_argument('--auto-range', action='store_true',
+                       help='Auto-range moisture colorbar based on data (default: fixed 0.07-0.4)')
+    parser.add_argument('--hide-markers', type=str, default=None,
+                       help='Comma-separated list of markers to hide: real,predicted,virtual (e.g., --hide-markers predicted,virtual)')
+    parser.add_argument('--real-moisture-only', action='store_true',
+                       help='Draw map using only real moisture stations (no predictions)')
+    parser.add_argument('--all-maps', action='store_true',
+                       help='Create all map variants efficiently (moisture, novirtual, realonly, precipitation, water_balance)')
 
     args = parser.parse_args()
+    
+    # Parse hide-markers into a set
+    hide_markers = set()
+    if args.hide_markers:
+        hide_markers = set(m.strip().lower() for m in args.hide_markers.split(','))
 
     create_moisture_map(
         model_path=args.model,
         target_date=args.date,
         output_file=args.output,
         device=args.device,
-        include_weather_maps=args.include_weather_maps
+        include_weather_maps=args.include_weather_maps,
+        virtual_grid_size=args.virtual_grid,
+        auto_range=args.auto_range,
+        hide_markers=hide_markers,
+        real_moisture_only=args.real_moisture_only
     )
