@@ -16,7 +16,14 @@ from pathlib import Path
 import zipfile
 
 from augmented_live import AugmentedLiveDataset
-from model_loader import load_model
+
+# Model loader - optional, only needed for inference
+try:
+    from model_loader import load_model
+    MODEL_LOADER_AVAILABLE = True
+except ImportError:
+    MODEL_LOADER_AVAILABLE = False
+    load_model = None  # Will raise error if actually used
 
 # PyTorch imports - optional, only needed for Dataset class
 try:
