@@ -25,6 +25,70 @@ from Moisturizer import MeteoGaliciaCollector, SoilMoistureSequenceDataset
 from model_loader import load_model
 
 
+def expand_canonical_to_augmented_stats(canonical_stats, n_params, n_nearby):
+    """
+    Expand canonical per-feature-type stats to augmented layout.
+
+    Canonical stats have:
+        - target_feature_mins/maxs: [n_params] for target station features
+        - nearby_feature_mins/maxs: [1 + n_params + 1] for (distance, params, soil_moisture)
+        - target_min/max: scalar for target (soil moisture prediction target)
+
+    Augmented layout is:
+        - [n_params] target features
+        - For each of n_nearby stations: [1 + n_params + 1] = (distance, params, soil_moisture)
+
+    Total: n_params + n_nearby * (1 + n_params + 1)
+
+    Args:
+        canonical_stats: dict-like with canonical stat arrays
+        n_params: number of weather parameters per station
+        n_nearby: number of nearby stations in the augmented layout
+
+    Returns:
+        dict with 'feature_mins', 'feature_maxs', 'target_min', 'target_max'
+    """
+    target_feat_mins = np.asarray(canonical_stats['target_feature_mins'])
+    target_feat_maxs = np.asarray(canonical_stats['target_feature_maxs'])
+    nearby_feat_mins = np.asarray(canonical_stats['nearby_feature_mins'])
+    nearby_feat_maxs = np.asarray(canonical_stats['nearby_feature_maxs'])
+
+    # Handle 0-d arrays for target_min/max
+    target_min_val = canonical_stats['target_min']
+    target_max_val = canonical_stats['target_max']
+    if hasattr(target_min_val, 'ndim'):
+        target_min = float(target_min_val.item()) if target_min_val.ndim == 0 else float(target_min_val[0])
+        target_max = float(target_max_val.item()) if target_max_val.ndim == 0 else float(target_max_val[0])
+    else:
+        target_min = float(target_min_val)
+        target_max = float(target_max_val)
+
+    # Build augmented layout
+    nearby_features_per_station = 1 + n_params + 1  # distance + params + soil_moisture
+    n_output_features = n_params + n_nearby * nearby_features_per_station
+
+    feature_mins = np.full(n_output_features, np.inf, dtype=np.float32)
+    feature_maxs = np.full(n_output_features, -np.inf, dtype=np.float32)
+
+    # Target station features
+    feature_mins[:n_params] = target_feat_mins[:n_params]
+    feature_maxs[:n_params] = target_feat_maxs[:n_params]
+
+    # Nearby station features (replicated for each nearby slot)
+    for i in range(n_nearby):
+        start_idx = n_params + i * nearby_features_per_station
+        end_idx = start_idx + nearby_features_per_station
+        feature_mins[start_idx:end_idx] = nearby_feat_mins
+        feature_maxs[start_idx:end_idx] = nearby_feat_maxs
+
+    return {
+        'feature_mins': feature_mins,
+        'feature_maxs': feature_maxs,
+        'target_min': target_min,
+        'target_max': target_max,
+    }
+
+
 def load_coastline_data(lon_min, lon_max, lat_min, lat_max, padding=0.15, cache_dir=None):
     """
     Load and prepare coastline data early to fail fast if there are issues.
@@ -1328,21 +1392,23 @@ def create_moisture_map(
         norm_stats_path=str(collector.data_dir / "normalization_stats_augmented.npz")
     )
 
-    # Load normalization stats (MUST be augmented stats, not canonical base stats!)
-    norm_stats_path = str(collector.data_dir / "normalization_stats_augmented.npz")
-    norm_stats = np.load(norm_stats_path)
-
-    # Validate this is augmented stats with expected layout
+    # Load canonical normalization stats and expand to augmented layout
+    # This allows flexibility for any n_nearby configuration
     n_params = len(filtered_params)
-    n_nearby = 4
-    expected_features = n_params + (1 + n_params + 1) * n_nearby  # target + nearby*(dist + params + soil)
-    actual_features = len(norm_stats['feature_mins'])
-    if actual_features != expected_features:
-        raise ValueError(
-            f"Normalization stats mismatch! Expected {expected_features} features (augmented layout), "
-            f"got {actual_features}. Make sure you're using normalization_stats_augmented.npz, "
-            f"not the canonical normalization_stats.npz"
-        )
+    n_nearby = 4  # TODO: make this configurable based on model
+
+    canonical_stats_path = str(collector.data_dir / "normalization_stats.npz")
+    canonical_stats = np.load(canonical_stats_path)
+
+    # Check if this is canonical format (has target_feature_mins) or old augmented format
+    if 'target_feature_mins' in canonical_stats:
+        # Canonical format - expand to augmented layout
+        print(f"  Using canonical stats, expanding to {n_nearby}-nearby augmented layout...")
+        norm_stats = expand_canonical_to_augmented_stats(canonical_stats, n_params, n_nearby)
+    else:
+        # Old augmented format - use directly (backward compatibility)
+        print(f"  Using legacy augmented stats format...")
+        norm_stats = canonical_stats
 
     # Build fast lookup for timeseries data
     print("\nBuilding fast timeseries lookup...")
@@ -1477,7 +1543,7 @@ def create_moisture_map(
             pred_normalized = predictions_normalized[i].item()  # Extract scalar same as original
             pred_denorm = denormalize_soil_moisture(
                 pred_normalized,
-                str(collector.data_dir / "normalization_stats_augmented.npz")
+                str(collector.data_dir / "normalization_stats.npz")
             )
 
             predicted_results.append({
@@ -1587,7 +1653,7 @@ def create_moisture_map(
                 pred_normalized = predictions_normalized[i].item()
                 pred_denorm = denormalize_soil_moisture(
                     pred_normalized,
-                    str(collector.data_dir / "normalization_stats_augmented.npz")
+                    str(collector.data_dir / "normalization_stats.npz")
                 )
                 
                 virtual_results.append({
