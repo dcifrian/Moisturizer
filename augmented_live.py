@@ -365,86 +365,241 @@ class AugmentedLiveDataset(Dataset):
 
     def _compute_normalization_stats(self):
         """
-        Compute normalization stats from base dataset samples.
-        
-        This computes stats for the AUGMENTED layout (n_nearby_in_features stations)
-        by sampling from the base dataset (n_nearby_available stations) and computing
-        ranges across all nearby stations.
+        Compute normalization stats from base dataset.
+
+        OPTIMIZED: Uses vectorized numpy operations over ALL samples instead of
+        sampling + Python loops. This is ~100-1000x faster.
+
+        For AUGMENTED datasets: computes ONE range per feature type across ALL
+        nearby stations (not per slot) because augmentation shuffles stations
+        between slots.
         """
-        num_samples_for_stats = min(10000, self.n_base_samples)
-        sample_indices = np.random.choice(
-            self.n_base_samples,
-            size=num_samples_for_stats,
-            replace=False
-        )
+        print(f"   Computing stats over ALL {self.n_base_samples:,} base samples (vectorized)...")
 
-        print(f"   Sampling {num_samples_for_stats} samples from base dataset...")
+        invalid_markers = np.array([-9999.0, -1000.0], dtype=np.float32)
 
-        # Initialize min/max tracking for augmented feature layout
-        self.feature_mins = np.full(self.n_output_features, np.inf, dtype=np.float32)
-        self.feature_maxs = np.full(self.n_output_features, -np.inf, dtype=np.float32)
-        self.target_min = np.inf
-        self.target_max = -np.inf
-
-        invalid_markers = [-9999.0, -1000.0]
-        
         # Features per station in base dataset
         base_nearby_features_per_station = 1 + len(self.feature_params) + 1  # distance + features + soil
 
-        for idx in sample_indices:
-            # Get sample from base dataset
-            if self._base_dataset is not None:
+        # Initialize output arrays for augmented layout
+        self.feature_mins = np.full(self.n_output_features, np.inf, dtype=np.float32)
+        self.feature_maxs = np.full(self.n_output_features, -np.inf, dtype=np.float32)
+
+        if self.base_features is not None:
+            # FAST PATH: Precomputed arrays - fully vectorized
+            # base_features shape: (n_samples, seq_length, n_features)
+            features = self.base_features
+            targets = self.base_targets
+
+            # Process in chunks to manage memory (mmap still needs to load data)
+            chunk_size = min(10000, self.n_base_samples)
+
+            # Track per-feature-type stats (not per-slot)
+            target_feat_mins = np.full(self.n_target_features, np.inf, dtype=np.float32)
+            target_feat_maxs = np.full(self.n_target_features, -np.inf, dtype=np.float32)
+            nearby_feat_mins = np.full(base_nearby_features_per_station, np.inf, dtype=np.float32)
+            nearby_feat_maxs = np.full(base_nearby_features_per_station, -np.inf, dtype=np.float32)
+            target_min = np.inf
+            target_max = -np.inf
+
+            for chunk_start in range(0, self.n_base_samples, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, self.n_base_samples)
+
+                # Load chunk (triggers mmap read)
+                chunk_features = features[chunk_start:chunk_end]  # (chunk, seq, feats)
+                chunk_targets = targets[chunk_start:chunk_end]    # (chunk, 1)
+
+                # Target stats - exclude invalid markers
+                valid_targets = chunk_targets[(chunk_targets != -9999.0) & (chunk_targets != -1000.0)]
+                if len(valid_targets) > 0:
+                    target_min = min(target_min, valid_targets.min())
+                    target_max = max(target_max, valid_targets.max())
+
+                # Target station features (vectorized across chunk and seq_length)
+                target_feats = chunk_features[:, :, :self.n_target_features]  # (chunk, seq, n_target)
+                for feat_idx in range(self.n_target_features):
+                    feat_data = target_feats[:, :, feat_idx].ravel()
+                    valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                    if len(valid) > 0:
+                        target_feat_mins[feat_idx] = min(target_feat_mins[feat_idx], valid.min())
+                        target_feat_maxs[feat_idx] = max(target_feat_maxs[feat_idx], valid.max())
+
+                # Nearby station features - reshape to (chunk, seq, n_nearby, feats_per_nearby)
+                nearby_data = chunk_features[:, :, self.n_target_features:]
+                nearby_reshaped = nearby_data.reshape(
+                    chunk_end - chunk_start,
+                    self.seq_length,
+                    self.n_nearby_available,
+                    base_nearby_features_per_station
+                )
+
+                # Compute stats per feature TYPE across ALL nearby stations (vectorized)
+                for feat_idx in range(base_nearby_features_per_station):
+                    feat_data = nearby_reshaped[:, :, :, feat_idx].ravel()
+                    valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                    if len(valid) > 0:
+                        nearby_feat_mins[feat_idx] = min(nearby_feat_mins[feat_idx], valid.min())
+                        nearby_feat_maxs[feat_idx] = max(nearby_feat_maxs[feat_idx], valid.max())
+
+            # Expand to augmented layout
+            # Target features: direct copy
+            self.feature_mins[:self.n_target_features] = target_feat_mins
+            self.feature_maxs[:self.n_target_features] = target_feat_maxs
+
+            # Nearby features: replicate to all output slots
+            for slot in range(self.n_nearby_in_features):
+                start_idx = self.n_target_features + (slot * self.nearby_features_per_station)
+                end_idx = start_idx + self.nearby_features_per_station
+                self.feature_mins[start_idx:end_idx] = nearby_feat_mins
+                self.feature_maxs[start_idx:end_idx] = nearby_feat_maxs
+
+            self.target_min = float(target_min)
+            self.target_max = float(target_max)
+
+        else:
+            # SLOW PATH: Dataset wrapper - must iterate (but vectorize per-sample)
+            print(f"   Warning: Using dataset iteration (slower than precomputed arrays)")
+
+            target_feat_mins = np.full(self.n_target_features, np.inf, dtype=np.float32)
+            target_feat_maxs = np.full(self.n_target_features, -np.inf, dtype=np.float32)
+            nearby_feat_mins = np.full(base_nearby_features_per_station, np.inf, dtype=np.float32)
+            nearby_feat_maxs = np.full(base_nearby_features_per_station, -np.inf, dtype=np.float32)
+            target_min = np.inf
+            target_max = -np.inf
+
+            from tqdm import tqdm
+            for idx in tqdm(range(self.n_base_samples), desc="   Computing stats"):
                 sample = self._base_dataset[int(idx)]
                 features = sample['features'].numpy()
                 target = sample['target'].numpy()[0]
-            else:
-                # Using precomputed arrays
-                features = self.base_features[int(idx)]
-                target = self.base_targets[int(idx)][0]
 
-            # Target stats
-            if target not in invalid_markers:
-                self.target_min = min(self.target_min, target)
-                self.target_max = max(self.target_max, target)
+                # Target stats
+                if target not in invalid_markers:
+                    target_min = min(target_min, target)
+                    target_max = max(target_max, target)
 
-            # Target station features (first n_target_features columns)
-            target_feats = features[:, :self.n_target_features]
-            for feat_idx in range(self.n_target_features):
-                feat_values = target_feats[:, feat_idx]
-                valid = feat_values[(feat_values != -1000.0) & (feat_values != -9999.0)]
-                if len(valid) > 0:
-                    self.feature_mins[feat_idx] = min(self.feature_mins[feat_idx], valid.min())
-                    self.feature_maxs[feat_idx] = max(self.feature_maxs[feat_idx], valid.max())
+                # Target station features
+                target_feats = features[:, :self.n_target_features]
+                for feat_idx in range(self.n_target_features):
+                    feat_data = target_feats[:, feat_idx]
+                    valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                    if len(valid) > 0:
+                        target_feat_mins[feat_idx] = min(target_feat_mins[feat_idx], valid.min())
+                        target_feat_maxs[feat_idx] = max(target_feat_maxs[feat_idx], valid.max())
 
-            # Nearby stations: Extract all n_nearby_available stations' data
-            nearby_start = self.n_target_features
-            nearby_base = features[:, nearby_start:].reshape(
-                self.seq_length, self.n_nearby_available, base_nearby_features_per_station
-            )
+                # Nearby features - compute per TYPE
+                nearby_data = features[:, self.n_target_features:].reshape(
+                    self.seq_length, self.n_nearby_available, base_nearby_features_per_station
+                )
+                for feat_idx in range(base_nearby_features_per_station):
+                    feat_data = nearby_data[:, :, feat_idx].ravel()
+                    valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                    if len(valid) > 0:
+                        nearby_feat_mins[feat_idx] = min(nearby_feat_mins[feat_idx], valid.min())
+                        nearby_feat_maxs[feat_idx] = max(nearby_feat_maxs[feat_idx], valid.max())
 
-            # For each feature across ALL nearby stations (they share the same range)
-            for nearby_feat_idx in range(base_nearby_features_per_station):
-                feat_across_stations = nearby_base[:, :, nearby_feat_idx]
-                valid = feat_across_stations[
-                    (feat_across_stations != -1000.0) & (feat_across_stations != -9999.0)
-                ]
+            # Expand to augmented layout
+            self.feature_mins[:self.n_target_features] = target_feat_mins
+            self.feature_maxs[:self.n_target_features] = target_feat_maxs
+            for slot in range(self.n_nearby_in_features):
+                start_idx = self.n_target_features + (slot * self.nearby_features_per_station)
+                end_idx = start_idx + self.nearby_features_per_station
+                self.feature_mins[start_idx:end_idx] = nearby_feat_mins
+                self.feature_maxs[start_idx:end_idx] = nearby_feat_maxs
 
-                if len(valid) > 0:
-                    feat_min = valid.min()
-                    feat_max = valid.max()
-                    
-                    # Apply same range to all output slots (n_nearby_in_features)
-                    for slot in range(self.n_nearby_in_features):
-                        aug_feat_idx = (
-                            self.n_target_features +
-                            (slot * self.nearby_features_per_station) +
-                            nearby_feat_idx
-                        )
-                        self.feature_mins[aug_feat_idx] = min(self.feature_mins[aug_feat_idx], feat_min)
-                        self.feature_maxs[aug_feat_idx] = max(self.feature_maxs[aug_feat_idx], feat_max)
+            self.target_min = float(target_min)
+            self.target_max = float(target_max)
 
-        self.target_min = float(self.target_min)
-        self.target_max = float(self.target_max)
+        print(f"   ✓ Stats computed over {self.n_base_samples:,} samples")
+
+    def save_normalization_stats(self, path: str):
+        """
+        Save canonical normalization stats that can be reused.
+
+        Saves per-feature-type stats (not expanded to slots) plus metadata.
+        This allows efficient reuse across different augmentation configurations.
+        """
+        # Extract canonical stats from expanded arrays
+        n_params = len(self.feature_params)
+        nearby_features_per_station = 1 + n_params + 1
+
+        # Target features: first n_params
+        target_feature_mins = self.feature_mins[:n_params].copy()
+        target_feature_maxs = self.feature_maxs[:n_params].copy()
+
+        # Nearby features: from first slot (all slots have same values)
+        nearby_start = n_params
+        nearby_feature_mins = self.feature_mins[nearby_start:nearby_start + nearby_features_per_station].copy()
+        nearby_feature_maxs = self.feature_maxs[nearby_start:nearby_start + nearby_features_per_station].copy()
+
+        np.savez(
+            path,
+            # Canonical per-feature-type stats
+            target_feature_mins=target_feature_mins,
+            target_feature_maxs=target_feature_maxs,
+            nearby_feature_mins=nearby_feature_mins,
+            nearby_feature_maxs=nearby_feature_maxs,
+            target_min=np.array([self.target_min]),
+            target_max=np.array([self.target_max]),
+            # Metadata for compatibility checking
+            n_params=np.array([n_params]),
+            n_base_samples=np.array([self.n_base_samples]),
+            seq_length=np.array([self.seq_length]),
+            feature_params=np.array(self.feature_params, dtype='U50'),
+        )
+        print(f"   ✓ Saved canonical stats to {path}")
+
+    def load_normalization_stats(self, path: str) -> bool:
+        """
+        Load canonical normalization stats and expand to current layout.
+
+        Returns True if stats were loaded successfully, False if incompatible.
+        """
+        try:
+            stats = np.load(path, allow_pickle=True)
+
+            # Check compatibility
+            saved_n_params = int(stats['n_params'][0])
+            saved_feature_params = list(stats['feature_params'])
+
+            if saved_n_params != len(self.feature_params):
+                print(f"   Warning: Stats have {saved_n_params} params, need {len(self.feature_params)}")
+                return False
+
+            if saved_feature_params != self.feature_params:
+                print(f"   Warning: Feature params don't match")
+                return False
+
+            # Load canonical stats
+            target_feature_mins = stats['target_feature_mins']
+            target_feature_maxs = stats['target_feature_maxs']
+            nearby_feature_mins = stats['nearby_feature_mins']
+            nearby_feature_maxs = stats['nearby_feature_maxs']
+            self.target_min = float(stats['target_min'][0])
+            self.target_max = float(stats['target_max'][0])
+
+            # Expand to current augmented layout
+            self.feature_mins = np.full(self.n_output_features, np.inf, dtype=np.float32)
+            self.feature_maxs = np.full(self.n_output_features, -np.inf, dtype=np.float32)
+
+            # Target features
+            self.feature_mins[:len(target_feature_mins)] = target_feature_mins
+            self.feature_maxs[:len(target_feature_maxs)] = target_feature_maxs
+
+            # Nearby features: replicate to all slots
+            n_params = len(self.feature_params)
+            for slot in range(self.n_nearby_in_features):
+                start_idx = n_params + (slot * self.nearby_features_per_station)
+                end_idx = start_idx + self.nearby_features_per_station
+                self.feature_mins[start_idx:end_idx] = nearby_feature_mins
+                self.feature_maxs[start_idx:end_idx] = nearby_feature_maxs
+
+            print(f"   ✓ Loaded stats from {path} ({int(stats['n_base_samples'][0]):,} samples)")
+            return True
+
+        except Exception as e:
+            print(f"   Warning: Could not load stats: {e}")
+            return False
 
     def __len__(self) -> int:
         """Total number of augmented samples"""
