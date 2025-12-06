@@ -2506,7 +2506,7 @@ def loadDatasetLiveAugmented():
     print("STEP 2: Creating train/val/test splits")
     print("=" * 60)
 
-    train_ds, val_ds, test_ds = AugmentedLiveDatasetV2.train_val_test_split(
+    train_ds, val_ds, test_ds = AugmentedLiveDataset.train_val_test_split(
         dataset,
         val_stations_ratio=0.15,
         test_stations_ratio=0.0
