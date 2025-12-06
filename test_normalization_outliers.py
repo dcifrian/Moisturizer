@@ -16,6 +16,16 @@ Usage:
 
     # Analyze a subset of samples:
     python test_normalization_outliers.py --max-samples 100000
+
+    # Save stats to file:
+    python test_normalization_outliers.py --save-stats outlier_stats.npz
+
+Graceful stopping:
+    Press Ctrl+C once to stop gracefully (saves data collected so far)
+    Press Ctrl+C twice to force quit without saving
+    Or send SIGUSR1: kill -USR1 <pid>
+
+    Checkpoints are saved every 50k samples to /tmp/outlier_checkpoint.npz
 """
 
 import argparse
@@ -24,9 +34,27 @@ import torch
 from collections import defaultdict
 from tqdm import tqdm
 import sys
+import signal
+
+# Global flag for graceful interruption
+_stop_requested = False
+_partial_stats = None
+
+def _signal_handler(signum, frame):
+    """Handle SIGINT (Ctrl+C) or SIGUSR1 for graceful stop."""
+    global _stop_requested
+    if _stop_requested:
+        print("\n\nForce quit requested. Exiting without saving...")
+        sys.exit(1)
+    print("\n\nGraceful stop requested. Finishing current sample and saving...")
+    _stop_requested = True
+
+# Register signal handlers
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGUSR1, _signal_handler)
 
 
-def analyze_outliers(dataset, max_samples=None, batch_size=1000):
+def analyze_outliers(dataset, max_samples=None, batch_size=1000, checkpoint_path=None):
     """
     Analyze normalization outliers across the dataset.
 
@@ -60,7 +88,17 @@ def analyze_outliers(dataset, max_samples=None, batch_size=1000):
     invalid_counts = np.zeros(n_features, dtype=np.int64)
 
     # Process samples
-    for idx in tqdm(range(n_samples), desc="Analyzing", unit="sample"):
+    global _stop_requested, _partial_stats
+    samples_processed = 0
+    checkpoint_interval = 50000  # Save checkpoint every 50k samples
+
+    pbar = tqdm(range(n_samples), desc="Analyzing", unit="sample")
+    for idx in pbar:
+        # Check for graceful stop request
+        if _stop_requested:
+            print(f"\nStopped at sample {idx:,}/{n_samples:,} ({100*idx/n_samples:.1f}%)")
+            break
+
         sample = dataset[idx]
         features = sample['features'].numpy()  # [seq_length, n_features]
 
@@ -103,9 +141,30 @@ def analyze_outliers(dataset, max_samples=None, batch_size=1000):
                     extreme_idx = np.argmax(np.abs(valid_values))
                     worst_values[feat_idx] = valid_values[extreme_idx]
 
+        samples_processed = idx + 1
+
+        # Periodic checkpoint
+        if checkpoint_path and samples_processed % checkpoint_interval == 0:
+            _partial_stats = {
+                'n_features': n_features,
+                'n_samples': samples_processed,
+                'n_samples_total': n_samples,
+                'seq_length': seq_length,
+                'mild_outlier_counts': mild_outlier_counts.copy(),
+                'severe_outlier_counts': severe_outlier_counts.copy(),
+                'deviation_sums': deviation_sums.copy(),
+                'worst_values': worst_values.copy(),
+                'total_values': total_values.copy(),
+                'invalid_counts': invalid_counts.copy(),
+                'partial': True,
+            }
+            np.savez(checkpoint_path, **_partial_stats)
+            pbar.set_postfix({'checkpoint': f'{samples_processed:,}'})
+
     return {
         'n_features': n_features,
-        'n_samples': n_samples,
+        'n_samples': samples_processed,  # Actual samples processed (may be less if interrupted)
+        'n_samples_requested': n_samples,
         'seq_length': seq_length,
         'mild_outlier_counts': mild_outlier_counts,
         'severe_outlier_counts': severe_outlier_counts,
@@ -113,6 +172,7 @@ def analyze_outliers(dataset, max_samples=None, batch_size=1000):
         'worst_values': worst_values,
         'total_values': total_values,
         'invalid_counts': invalid_counts,
+        'partial': _stop_requested,
     }
 
 
@@ -271,16 +331,28 @@ def main():
     else:
         full_feature_names = None
 
-    # Run analysis
-    stats = analyze_outliers(dataset, max_samples=max_samples)
+    # Run analysis with checkpointing
+    checkpoint_path = "/tmp/outlier_checkpoint.npz"
+    print(f"\nCheckpoints will be saved to: {checkpoint_path}")
+    print("Press Ctrl+C to stop gracefully and save partial results\n")
+
+    stats = analyze_outliers(dataset, max_samples=max_samples, checkpoint_path=checkpoint_path)
 
     # Print report
     print_report(stats, full_feature_names)
 
-    # Save stats if requested
-    if args.save_stats:
-        np.savez(args.save_stats, **stats)
-        print(f"\nStatistics saved to {args.save_stats}")
+    # Determine save path
+    save_path = args.save_stats
+    if save_path is None and stats.get('partial', False):
+        save_path = "outlier_stats_partial.npz"
+        print(f"\nPartial results will be auto-saved to: {save_path}")
+
+    # Save stats
+    if save_path:
+        np.savez(save_path, **stats)
+        print(f"\nStatistics saved to {save_path}")
+        if stats.get('partial', False):
+            print(f"Note: This is PARTIAL data ({stats['n_samples']:,}/{stats['n_samples_requested']:,} samples)")
 
 
 if __name__ == "__main__":
