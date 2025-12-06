@@ -570,10 +570,14 @@ class MeteoGaliciaCollector:
             stations_df: Optional[pd.DataFrame] = None,
             coverage_threshold: float = 0.25,
             soil_moisture_param: str = "HS_CV_AVG_-0.2m",
-            add_coordinate_features: bool = True
+            add_coordinate_features: bool = True,
+            force_recompute: bool = False
     ) -> Tuple[Dict[str, float], List[str]]:
         """
         Analyze parameter coverage and return parameters above threshold.
+
+        Results are cached to avoid re-computation (~30s savings). Cache is
+        invalidated if coverage_threshold or number of days in data changes.
 
         Can analyze from either:
         1. timeseries_df + stations_df (for buildDataset - before ml_ready_dataset exists)
@@ -585,12 +589,51 @@ class MeteoGaliciaCollector:
             coverage_threshold: Minimum fraction of stations that must have data (0.0 to 1.0)
             soil_moisture_param: Soil moisture parameter to exclude (it's the target, not a feature!)
             add_coordinate_features: If True, add altitude/utmx/utmy to filtered params
+            force_recompute: If True, ignore cache and recompute
 
         Returns:
             Tuple of (coverage_dict, filtered_params):
             - coverage_dict: Dictionary mapping parameter_code to coverage percentage
             - filtered_params: List of parameters that meet the coverage threshold (excluding soil moisture)
         """
+        cache_path = self.data_dir / "filtered_params_cache.npz"
+
+        # Try to load from cache first
+        if not force_recompute and cache_path.exists():
+            try:
+                cache = np.load(cache_path, allow_pickle=True)
+                cached_threshold = float(cache['coverage_threshold'])
+                cached_n_days = int(cache['n_days'])
+                cached_add_coords = bool(cache['add_coordinate_features'])
+
+                # Get current n_days from timeseries
+                if timeseries_df is None:
+                    ts_file = self.data_dir / "raw_timeseries.csv"
+                    if ts_file.exists():
+                        # Quick check: count unique dates without loading full DataFrame
+                        current_n_days = len(pd.read_csv(ts_file, usecols=['date'])['date'].unique())
+                    else:
+                        current_n_days = -1
+                else:
+                    current_n_days = timeseries_df['date'].nunique()
+
+                # Validate cache
+                if (cached_threshold == coverage_threshold and
+                    cached_n_days == current_n_days and
+                    cached_add_coords == add_coordinate_features):
+
+                    filtered_params = list(cache['filtered_params'])
+                    coverage = dict(zip(cache['coverage_params'], cache['coverage_values']))
+                    print(f"✓ Loaded cached filtered_params ({len(filtered_params)} params, "
+                          f"{cached_n_days} days, {cached_threshold*100:.0f}% threshold)")
+                    return coverage, filtered_params
+                else:
+                    print(f"Cache invalidated: threshold={cached_threshold}→{coverage_threshold}, "
+                          f"days={cached_n_days}→{current_n_days}, coords={cached_add_coords}→{add_coordinate_features}")
+            except Exception as e:
+                print(f"Could not load cache: {e}")
+
+        # Load data if not provided
         if timeseries_df is None:
             timeseries_df = pd.read_csv(self.data_dir / "raw_timeseries.csv")
         if stations_df is None:
@@ -601,6 +644,7 @@ class MeteoGaliciaCollector:
         # Get stations with soil moisture
         soil_moisture_stations = stations_df[stations_df['has_soil_moisture']]['station_id'].tolist()
         all_params = timeseries_df['parameter_code'].unique()
+        n_days = timeseries_df['date'].nunique()
 
         print(f"Analyzing {len(all_params)} parameters on {len(soil_moisture_stations)} stations with soil moisture...")
         print(f"Coverage threshold: {coverage_threshold * 100:.0f}%")
@@ -640,6 +684,21 @@ class MeteoGaliciaCollector:
             print(f"✓ Added {len(coordinate_features)} coordinate features: {coordinate_features}")
 
         print(f"\nTotal filtered parameters: {len(filtered_params)}")
+
+        # Save to cache
+        try:
+            np.savez(
+                cache_path,
+                filtered_params=np.array(filtered_params, dtype='U50'),
+                coverage_params=np.array(list(coverage.keys()), dtype='U50'),
+                coverage_values=np.array(list(coverage.values()), dtype=np.float32),
+                coverage_threshold=np.array([coverage_threshold]),
+                n_days=np.array([n_days]),
+                add_coordinate_features=np.array([add_coordinate_features]),
+            )
+            print(f"✓ Cached filtered_params to {cache_path}")
+        except Exception as e:
+            print(f"Warning: Could not save cache: {e}")
 
         return coverage, filtered_params
 
