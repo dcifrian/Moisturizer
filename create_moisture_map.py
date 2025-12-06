@@ -1328,8 +1328,21 @@ def create_moisture_map(
         norm_stats_path=str(collector.data_dir / "normalization_stats_augmented.npz")
     )
 
-    # Load normalization stats
-    norm_stats = np.load(str(collector.data_dir / "normalization_stats_augmented.npz"))
+    # Load normalization stats (MUST be augmented stats, not canonical base stats!)
+    norm_stats_path = str(collector.data_dir / "normalization_stats_augmented.npz")
+    norm_stats = np.load(norm_stats_path)
+
+    # Validate this is augmented stats with expected layout
+    n_params = len(filtered_params)
+    n_nearby = 4
+    expected_features = n_params + (1 + n_params + 1) * n_nearby  # target + nearby*(dist + params + soil)
+    actual_features = len(norm_stats['feature_mins'])
+    if actual_features != expected_features:
+        raise ValueError(
+            f"Normalization stats mismatch! Expected {expected_features} features (augmented layout), "
+            f"got {actual_features}. Make sure you're using normalization_stats_augmented.npz, "
+            f"not the canonical normalization_stats.npz"
+        )
 
     # Build fast lookup for timeseries data
     print("\nBuilding fast timeseries lookup...")
@@ -1464,7 +1477,7 @@ def create_moisture_map(
             pred_normalized = predictions_normalized[i].item()  # Extract scalar same as original
             pred_denorm = denormalize_soil_moisture(
                 pred_normalized,
-                str(collector.data_dir / "normalization_stats.npz")
+                str(collector.data_dir / "normalization_stats_augmented.npz")
             )
 
             predicted_results.append({
@@ -1574,7 +1587,7 @@ def create_moisture_map(
                 pred_normalized = predictions_normalized[i].item()
                 pred_denorm = denormalize_soil_moisture(
                     pred_normalized,
-                    str(collector.data_dir / "normalization_stats.npz")
+                    str(collector.data_dir / "normalization_stats_augmented.npz")
                 )
                 
                 virtual_results.append({

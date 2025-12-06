@@ -23,6 +23,13 @@ from functools import partial
 from tqdm import tqdm
 
 
+def _safe_scalar_from_array(arr):
+    """Safely extract scalar from numpy array (handles 0-d, 1-d, and scalar)."""
+    if hasattr(arr, 'ndim'):
+        return float(arr.item()) if arr.ndim == 0 else float(arr[0])
+    return float(arr)
+
+
 def _process_batch_direct_write(args):
     """
     Worker function that writes DIRECTLY to memmap files (no queue, no pickling!).
@@ -412,8 +419,8 @@ def generate_all_augmentations_sequential(
                 target_feature_maxs = stats['target_feature_maxs']
                 nearby_feature_mins = stats['nearby_feature_mins']
                 nearby_feature_maxs = stats['nearby_feature_maxs']
-                target_min = float(stats['target_min'][0]) if hasattr(stats['target_min'], '__len__') else float(stats['target_min'])
-                target_max = float(stats['target_max'][0]) if hasattr(stats['target_max'], '__len__') else float(stats['target_max'])
+                target_min = _safe_scalar_from_array(stats['target_min'])
+                target_max = _safe_scalar_from_array(stats['target_max'])
 
                 # Expand to augmented layout
                 feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
@@ -437,8 +444,8 @@ def generate_all_augmentations_sequential(
                 print(f"   Warning: Old stats format, using per-slot stats")
                 feature_mins = stats['feature_mins']
                 feature_maxs = stats['feature_maxs']
-                target_min = float(stats['target_min'][0]) if hasattr(stats['target_min'], '__len__') else float(stats['target_min'])
-                target_max = float(stats['target_max'][0]) if hasattr(stats['target_max'], '__len__') else float(stats['target_max'])
+                target_min = _safe_scalar_from_array(stats['target_min'])
+                target_max = _safe_scalar_from_array(stats['target_max'])
 
             base_stats = {
                 'feature_mins': feature_mins,
@@ -876,8 +883,8 @@ def generate_all_augmentations_batched(
                 target_feature_maxs = stats['target_feature_maxs']
                 nearby_feature_mins = stats['nearby_feature_mins']
                 nearby_feature_maxs = stats['nearby_feature_maxs']
-                target_min = float(stats['target_min'][0]) if hasattr(stats['target_min'], '__len__') else float(stats['target_min'])
-                target_max = float(stats['target_max'][0]) if hasattr(stats['target_max'], '__len__') else float(stats['target_max'])
+                target_min = _safe_scalar_from_array(stats['target_min'])
+                target_max = _safe_scalar_from_array(stats['target_max'])
 
                 # Expand to augmented layout
                 feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
@@ -901,8 +908,8 @@ def generate_all_augmentations_batched(
                 print(f"   Warning: Old stats format, using per-slot stats")
                 feature_mins = stats['feature_mins']
                 feature_maxs = stats['feature_maxs']
-                target_min = float(stats['target_min'][0]) if hasattr(stats['target_min'], '__len__') else float(stats['target_min'])
-                target_max = float(stats['target_max'][0]) if hasattr(stats['target_max'], '__len__') else float(stats['target_max'])
+                target_min = _safe_scalar_from_array(stats['target_min'])
+                target_max = _safe_scalar_from_array(stats['target_max'])
 
             print(f"   Feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
             print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")

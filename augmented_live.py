@@ -586,8 +586,15 @@ class AugmentedLiveDataset(Dataset):
             target_feature_maxs = stats['target_feature_maxs']
             nearby_feature_mins = stats['nearby_feature_mins']
             nearby_feature_maxs = stats['nearby_feature_maxs']
-            self.target_min = float(stats['target_min'][0])
-            self.target_max = float(stats['target_max'][0])
+            # Handle 0-d, 1-d arrays and scalars
+            target_min_val = stats['target_min']
+            target_max_val = stats['target_max']
+            if hasattr(target_min_val, 'ndim'):
+                self.target_min = float(target_min_val.item()) if target_min_val.ndim == 0 else float(target_min_val[0])
+                self.target_max = float(target_max_val.item()) if target_max_val.ndim == 0 else float(target_max_val[0])
+            else:
+                self.target_min = float(target_min_val)
+                self.target_max = float(target_max_val)
 
             # Expand to current augmented layout
             self.feature_mins = np.full(self.n_output_features, np.inf, dtype=np.float32)
