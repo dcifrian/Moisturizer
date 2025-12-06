@@ -188,17 +188,28 @@ class AugmentedLiveDataset(Dataset):
         
         # Compute or load normalization stats
         if normalize:
-            if norm_stats_path and Path(norm_stats_path).exists():
-                print(f"\n4. Loading normalization stats from {norm_stats_path}...")
-                stats = np.load(norm_stats_path)
-                instance.feature_mins = stats['feature_mins']
-                instance.feature_maxs = stats['feature_maxs']
-                instance.target_min = float(stats['target_min'])
-                instance.target_max = float(stats['target_max'])
-            else:
-                print(f"\n4. Computing normalization stats from base dataset...")
+            # Default path for canonical stats
+            canonical_stats_path = norm_stats_path
+            if canonical_stats_path is None:
+                # Use a standard location next to base dataset
+                if precomputed_path:
+                    canonical_stats_path = str(Path(precomputed_path).parent / "normalization_stats_canonical.npz")
+                else:
+                    canonical_stats_path = "normalization_stats_canonical.npz"
+
+            print(f"\n4. Loading/computing normalization stats...")
+
+            # Try to load canonical stats first
+            loaded = False
+            if Path(canonical_stats_path).exists():
+                loaded = instance.load_normalization_stats(canonical_stats_path)
+
+            if not loaded:
+                # Compute and save for future use
+                print(f"   Computing stats (this only needs to be done once)...")
                 instance._compute_normalization_stats()
-            
+                instance.save_normalization_stats(canonical_stats_path)
+
             instance.normalize = True
             instance.normalized_invalid_marker = -2.0
             print(f"   Feature range: [{instance.feature_mins.min():.2f}, {instance.feature_maxs.max():.2f}]")

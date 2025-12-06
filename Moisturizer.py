@@ -1373,29 +1373,48 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         )
 
     def _compute_norm_stats_from_precomputed(self):
-        """Compute normalization statistics from precomputed data"""
+        """
+        Compute normalization statistics from precomputed data.
+
+        Computes both per-slot stats (for base dataset) and canonical per-feature-type
+        stats (for augmented datasets). The canonical stats are computed by finding
+        min/max across ALL nearby station slots for each feature type.
+        """
         print("Computing min/max for each feature (excluding invalid values)...")
 
+        n_samples = len(self.precomputed_data['features'])
+        seq_length = self.precomputed_data['features'].shape[1]
         n_features = self.precomputed_data['features'].shape[2]
+
+        # Per-slot stats (for base dataset normalization)
         feature_mins = np.full(n_features, np.inf, dtype=np.float32)
         feature_maxs = np.full(n_features, -np.inf, dtype=np.float32)
+
+        # Canonical per-feature-type stats (for augmented datasets)
+        n_params = len(self.feature_params)
+        nearby_features_per_station = 1 + n_params + 1  # distance + params + soil
+        target_feat_mins = np.full(n_params, np.inf, dtype=np.float32)
+        target_feat_maxs = np.full(n_params, -np.inf, dtype=np.float32)
+        nearby_feat_mins = np.full(nearby_features_per_station, np.inf, dtype=np.float32)
+        nearby_feat_maxs = np.full(nearby_features_per_station, -np.inf, dtype=np.float32)
 
         # Invalid markers to exclude
         invalid_markers = [-9999.0, self.missing_value]
 
         # Process in batches to save memory
         batch_size = 1000
-        for i in range(0, len(self.precomputed_data['features']), batch_size):
-            end_i = min(i + batch_size, len(self.precomputed_data['features']))
+        for i in range(0, n_samples, batch_size):
+            end_i = min(i + batch_size, n_samples)
             features_batch = self.precomputed_data['features'][i:end_i]
             masks_batch = self.precomputed_data['masks'][i:end_i]
 
+            # Per-slot stats
             for feat_idx in range(n_features):
                 feat_data = features_batch[:, :, feat_idx]
                 feat_mask = masks_batch[:, :, feat_idx]
 
                 # Get valid data (masked and not invalid marker)
-                valid_mask = feat_mask  # Now boolean, no need for > 0
+                valid_mask = feat_mask.copy()
                 for marker in invalid_markers:
                     valid_mask &= (feat_data != marker)
 
@@ -1404,6 +1423,27 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 if len(valid_data) > 0:
                     feature_mins[feat_idx] = min(feature_mins[feat_idx], valid_data.min())
                     feature_maxs[feat_idx] = max(feature_maxs[feat_idx], valid_data.max())
+
+            # Canonical target feature stats
+            target_feats = features_batch[:, :, :n_params]
+            for feat_idx in range(n_params):
+                feat_data = target_feats[:, :, feat_idx].ravel()
+                valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                if len(valid) > 0:
+                    target_feat_mins[feat_idx] = min(target_feat_mins[feat_idx], valid.min())
+                    target_feat_maxs[feat_idx] = max(target_feat_maxs[feat_idx], valid.max())
+
+            # Canonical nearby feature stats (across ALL nearby stations)
+            nearby_data = features_batch[:, :, n_params:]
+            nearby_reshaped = nearby_data.reshape(
+                end_i - i, seq_length, self.n_nearest, nearby_features_per_station
+            )
+            for feat_idx in range(nearby_features_per_station):
+                feat_data = nearby_reshaped[:, :, :, feat_idx].ravel()
+                valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                if len(valid) > 0:
+                    nearby_feat_mins[feat_idx] = min(nearby_feat_mins[feat_idx], valid.min())
+                    nearby_feat_maxs[feat_idx] = max(nearby_feat_maxs[feat_idx], valid.max())
 
         # Compute for target as well
         targets = self.precomputed_data['targets']
@@ -1414,11 +1454,23 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         target_min = valid_targets.min() if len(valid_targets) > 0 else 0.0
         target_max = valid_targets.max() if len(valid_targets) > 0 else 1.0
 
+        # Store both formats
         self.norm_stats = {
+            # Per-slot stats (for base dataset)
             'feature_mins': feature_mins,
             'feature_maxs': feature_maxs,
             'target_min': target_min,
-            'target_max': target_max
+            'target_max': target_max,
+            # Canonical per-feature-type stats (for augmented datasets)
+            'target_feature_mins': target_feat_mins,
+            'target_feature_maxs': target_feat_maxs,
+            'nearby_feature_mins': nearby_feat_mins,
+            'nearby_feature_maxs': nearby_feat_maxs,
+            # Metadata
+            'n_params': n_params,
+            'n_base_samples': n_samples,
+            'seq_length': seq_length,
+            'feature_params': self.feature_params,
         }
 
         print(f"  Feature min range: [{feature_mins.min():.2f}, {feature_mins.max():.2f}]")
@@ -1545,15 +1597,26 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
             is_normalized = True
 
-            # Save normalization statistics
+            # Save normalization statistics (canonical format for reuse by augmented datasets)
             if norm_stats_path:
                 print(f"Saving normalization stats to {norm_stats_path}...")
                 np.savez(
                     norm_stats_path,
+                    # Per-slot stats (for base dataset)
                     feature_mins=self.norm_stats['feature_mins'],
                     feature_maxs=self.norm_stats['feature_maxs'],
-                    target_min=self.norm_stats['target_min'],
-                    target_max=self.norm_stats['target_max']
+                    target_min=np.array([self.norm_stats['target_min']]),
+                    target_max=np.array([self.norm_stats['target_max']]),
+                    # Canonical per-feature-type stats (for augmented datasets)
+                    target_feature_mins=self.norm_stats['target_feature_mins'],
+                    target_feature_maxs=self.norm_stats['target_feature_maxs'],
+                    nearby_feature_mins=self.norm_stats['nearby_feature_mins'],
+                    nearby_feature_maxs=self.norm_stats['nearby_feature_maxs'],
+                    # Metadata
+                    n_params=np.array([self.norm_stats['n_params']]),
+                    n_base_samples=np.array([self.norm_stats['n_base_samples']]),
+                    seq_length=np.array([self.norm_stats['seq_length']]),
+                    feature_params=np.array(self.norm_stats['feature_params'], dtype='U50'),
                 )
 
         # Save to disk as individual .npy files (memory-mappable)

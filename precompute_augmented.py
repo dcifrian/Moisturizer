@@ -390,76 +390,70 @@ def generate_all_augmentations_sequential(
     masks_size_gb = total_samples * seq_length * total_features * 1 / 1e9
     print(f"   Dataset size: {features_size_gb:.1f}GB features + {masks_size_gb:.1f}GB masks = {features_size_gb + masks_size_gb:.1f}GB total")
 
-    # Compute augmented stats from base dataset if requested
+    # Load or compute augmented stats from base dataset if requested
     base_stats = None
     if use_base_stats:
-        print(f"\n4. Computing augmented dataset stats from base dataset (5 nearby)...")
-        print(f"   Using base stats for more accurate normalization")
+        print(f"\n4. Loading normalization stats...")
 
-        # Sample from base dataset to compute stats
-        num_samples_for_stats = min(10000, len(base_dataset.sample_index))
-        sample_indices = np.random.choice(len(base_dataset.sample_index),
-                                         size=num_samples_for_stats, replace=False)
-
-        print(f"   Sampling {num_samples_for_stats} samples from base dataset...")
-
-        # Initialize min/max tracking
+        # Try to load canonical stats from file first
+        canonical_stats_path = Path(data_dir) / "normalization_stats.npz"
         target_features_count = len(filtered_params)
         nearby_features_per_station_calc = 1 + len(filtered_params) + 1  # distance + features + soil
         augmented_total_features = target_features_count + (nearby_features_per_station_calc * n_nearby_in_features)
 
-        feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
-        feature_maxs = np.full(augmented_total_features, -np.inf, dtype=np.float32)
-        target_min = np.inf
-        target_max = -np.inf
+        if canonical_stats_path.exists():
+            print(f"   Loading from {canonical_stats_path}...")
+            stats = np.load(canonical_stats_path, allow_pickle=True)
 
-        for idx in tqdm(sample_indices, desc="   Computing stats"):
-            sample = base_dataset[int(idx)]
-            features = sample['features'].numpy()
-            target = sample['target'].numpy()[0]
+            # Check if canonical format is available
+            if 'target_feature_mins' in stats:
+                # Use canonical per-feature-type stats
+                target_feature_mins = stats['target_feature_mins']
+                target_feature_maxs = stats['target_feature_maxs']
+                nearby_feature_mins = stats['nearby_feature_mins']
+                nearby_feature_maxs = stats['nearby_feature_maxs']
+                target_min = float(stats['target_min'][0]) if hasattr(stats['target_min'], '__len__') else float(stats['target_min'])
+                target_max = float(stats['target_max'][0]) if hasattr(stats['target_max'], '__len__') else float(stats['target_max'])
 
-            # Target stats
-            if target != -1000.0 and target != -9999.0:
-                target_min = min(target_min, target)
-                target_max = max(target_max, target)
+                # Expand to augmented layout
+                feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
+                feature_maxs = np.full(augmented_total_features, -np.inf, dtype=np.float32)
 
-            # Target station features (unchanged)
-            target_feats = features[:, :target_features_count]
-            for feat_idx in range(target_features_count):
-                feat_values = target_feats[:, feat_idx]
-                valid = feat_values[(feat_values != -1000.0) & (feat_values != -9999.0)]
-                if len(valid) > 0:
-                    feature_mins[feat_idx] = min(feature_mins[feat_idx], valid.min())
-                    feature_maxs[feat_idx] = max(feature_maxs[feat_idx], valid.max())
+                # Target features
+                feature_mins[:len(target_feature_mins)] = target_feature_mins
+                feature_maxs[:len(target_feature_maxs)] = target_feature_maxs
 
-            # Nearby stations: Extract all 5 stations' data
-            nearby_start = target_features_count
-            nearby_base = features[:, nearby_start:].reshape(seq_length, n_nearby_available,
-                                                            nearby_features_per_station_calc)
+                # Nearby features: replicate to all slots
+                for slot in range(n_nearby_in_features):
+                    start_idx = target_features_count + (slot * nearby_features_per_station_calc)
+                    end_idx = start_idx + nearby_features_per_station_calc
+                    feature_mins[start_idx:end_idx] = nearby_feature_mins
+                    feature_maxs[start_idx:end_idx] = nearby_feature_maxs
 
-            # For each feature across nearby stations
-            for nearby_feat_idx in range(nearby_features_per_station_calc):
-                feat_across_stations = nearby_base[:, :, nearby_feat_idx]
-                valid = feat_across_stations[(feat_across_stations != -1000.0) &
-                                            (feat_across_stations != -9999.0)]
+                n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
+                print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
+            else:
+                # Fallback: use per-slot stats (old format)
+                print(f"   Warning: Old stats format, using per-slot stats")
+                feature_mins = stats['feature_mins']
+                feature_maxs = stats['feature_maxs']
+                target_min = float(stats['target_min'][0]) if hasattr(stats['target_min'], '__len__') else float(stats['target_min'])
+                target_max = float(stats['target_max'][0]) if hasattr(stats['target_max'], '__len__') else float(stats['target_max'])
 
-                if len(valid) > 0:
-                    # Apply same range to all 4 slots
-                    for slot in range(n_nearby_in_features):
-                        aug_feat_idx = target_features_count + (slot * nearby_features_per_station_calc) + nearby_feat_idx
-                        feature_mins[aug_feat_idx] = min(feature_mins[aug_feat_idx], valid.min())
-                        feature_maxs[aug_feat_idx] = max(feature_maxs[aug_feat_idx], valid.max())
+            base_stats = {
+                'feature_mins': feature_mins,
+                'feature_maxs': feature_maxs,
+                'target_min': target_min,
+                'target_max': target_max
+            }
 
-        base_stats = {
-            'feature_mins': feature_mins,
-            'feature_maxs': feature_maxs,
-            'target_min': float(target_min),
-            'target_max': float(target_max)
-        }
-
-        print(f"   Feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
-        print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
-        print(f"   → Will normalize during generation")
+            print(f"   Feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
+            print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
+            print(f"   → Will normalize during generation")
+        else:
+            print(f"   ✗ Stats file not found: {canonical_stats_path}")
+            print(f"   Run dataset build first to create normalization stats")
+            use_base_stats = False
 
     # Create memory-mapped arrays (write directly, no temp batches!)
     step_num = 5 if use_base_stats else 4
@@ -861,90 +855,78 @@ def generate_all_augmentations_batched(
         num_workers = max(1, (logical_cores // 2) - 1)
         print(f"   Auto-detected {num_workers} workers (physical cores - 1)")
 
-    # Compute augmented stats from base dataset if requested (saves ~2 hours!)
+    # Load augmented stats from canonical stats file (saves ~2 hours!)
     base_stats = None
     if use_base_stats:
-        print(f"\n4. Computing augmented dataset stats from base dataset (5 nearby)...")
-        print(f"   Key insight: Since augmentation permutes 4 of 5 nearby stations,")
-        print(f"   each nearby slot can be ANY of the 5 stations.")
-        print(f"   Therefore: Range for each nearby feature = min/max across ALL 5 stations.")
-        print()
+        print(f"\n4. Loading normalization stats...")
 
-        # Sample from base dataset to compute stats
-        num_samples_for_stats = min(10000, len(base_dataset.sample_index))
-        sample_indices = np.random.choice(len(base_dataset.sample_index),
-                                         size=num_samples_for_stats, replace=False)
-
-        print(f"   Sampling {num_samples_for_stats} samples from base dataset...")
-
-        # Initialize min/max tracking
+        canonical_stats_path = Path(data_dir) / "normalization_stats.npz"
         target_features_count = len(filtered_params)
         nearby_features_per_station = 1 + len(filtered_params) + 1  # distance + features + soil
         augmented_total_features = target_features_count + (nearby_features_per_station * n_nearby_in_features)
 
-        feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
-        feature_maxs = np.full(augmented_total_features, -np.inf, dtype=np.float32)
-        target_min = np.inf
-        target_max = -np.inf
+        if canonical_stats_path.exists():
+            print(f"   Loading from {canonical_stats_path}...")
+            stats = np.load(canonical_stats_path, allow_pickle=True)
 
-        for idx in tqdm(sample_indices, desc="   Computing stats"):
-            sample = base_dataset[int(idx)]
-            features = sample['features'].numpy()
-            target = sample['target'].numpy()[0]
+            # Check if canonical format is available
+            if 'target_feature_mins' in stats:
+                # Use canonical per-feature-type stats
+                target_feature_mins = stats['target_feature_mins']
+                target_feature_maxs = stats['target_feature_maxs']
+                nearby_feature_mins = stats['nearby_feature_mins']
+                nearby_feature_maxs = stats['nearby_feature_maxs']
+                target_min = float(stats['target_min'][0]) if hasattr(stats['target_min'], '__len__') else float(stats['target_min'])
+                target_max = float(stats['target_max'][0]) if hasattr(stats['target_max'], '__len__') else float(stats['target_max'])
 
-            # Target stats
-            if target != -1000.0 and target != -9999.0:
-                target_min = min(target_min, target)
-                target_max = max(target_max, target)
+                # Expand to augmented layout
+                feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
+                feature_maxs = np.full(augmented_total_features, -np.inf, dtype=np.float32)
 
-            # Target station features (unchanged)
-            target_feats = features[:, :target_features_count]
-            for feat_idx in range(target_features_count):
-                feat_values = target_feats[:, feat_idx]
-                valid = feat_values[(feat_values != -1000.0) & (feat_values != -9999.0)]
-                if len(valid) > 0:
-                    feature_mins[feat_idx] = min(feature_mins[feat_idx], valid.min())
-                    feature_maxs[feat_idx] = max(feature_maxs[feat_idx], valid.max())
+                # Target features
+                feature_mins[:len(target_feature_mins)] = target_feature_mins
+                feature_maxs[:len(target_feature_maxs)] = target_feature_maxs
 
-            # Nearby stations: Extract all 5 stations' data
-            nearby_start = target_features_count
-            nearby_base = features[:, nearby_start:].reshape(seq_length, n_nearby_available,
-                                                            nearby_features_per_station)
+                # Nearby features: replicate to all slots
+                for slot in range(n_nearby_in_features):
+                    start_idx = target_features_count + (slot * nearby_features_per_station)
+                    end_idx = start_idx + nearby_features_per_station
+                    feature_mins[start_idx:end_idx] = nearby_feature_mins
+                    feature_maxs[start_idx:end_idx] = nearby_feature_maxs
 
-            # For each feature across nearby stations (distance, features, soil):
-            # The augmented dataset will have 4 stations, each slot can be ANY of the 5
-            for nearby_feat_idx in range(nearby_features_per_station):
-                feat_across_stations = nearby_base[:, :, nearby_feat_idx]
-                valid = feat_across_stations[(feat_across_stations != -1000.0) &
-                                            (feat_across_stations != -9999.0)]
+                n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
+                print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
+            else:
+                # Fallback: use per-slot stats (old format)
+                print(f"   Warning: Old stats format, using per-slot stats")
+                feature_mins = stats['feature_mins']
+                feature_maxs = stats['feature_maxs']
+                target_min = float(stats['target_min'][0]) if hasattr(stats['target_min'], '__len__') else float(stats['target_min'])
+                target_max = float(stats['target_max'][0]) if hasattr(stats['target_max'], '__len__') else float(stats['target_max'])
 
-                if len(valid) > 0:
-                    # Apply same range to all 4 slots
-                    for slot in range(n_nearby_in_features):
-                        aug_feat_idx = target_features_count + (slot * nearby_features_per_station) + nearby_feat_idx
-                        feature_mins[aug_feat_idx] = min(feature_mins[aug_feat_idx], valid.min())
-                        feature_maxs[aug_feat_idx] = max(feature_maxs[aug_feat_idx], valid.max())
+            print(f"   Feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
+            print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
+            print(f"   → Workers will normalize data during generation (saves ~2 hours!)")
 
-        print(f"   ✓ Computed augmented stats from base dataset")
-        print(f"   Feature range: [{feature_mins[~np.isinf(feature_mins)].min():.2f}, {feature_maxs[~np.isinf(feature_maxs)].max():.2f}]")
-        print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
-        print(f"   → Workers will normalize data during generation (saves ~2 hours!)")
+            # Create stats dict
+            base_stats = {
+                'feature_mins': feature_mins,
+                'feature_maxs': feature_maxs,
+                'target_min': target_min,
+                'target_max': target_max
+            }
 
-        # Create stats dict
-        base_stats = {
-            'feature_mins': feature_mins,
-            'feature_maxs': feature_maxs,
-            'target_min': target_min,
-            'target_max': target_max
-        }
-
-        # Add stats to aug_params for workers
-        aug_params['normalize'] = True
-        aug_params['feature_mins'] = feature_mins
-        aug_params['feature_maxs'] = feature_maxs
-        aug_params['target_min'] = float(target_min)
-        aug_params['target_max'] = float(target_max)
-        aug_params['invalid_markers'] = [-9999.0, -1000.0]
+            # Add stats to aug_params for workers
+            aug_params['normalize'] = True
+            aug_params['feature_mins'] = feature_mins
+            aug_params['feature_maxs'] = feature_maxs
+            aug_params['target_min'] = float(target_min)
+            aug_params['target_max'] = float(target_max)
+            aug_params['invalid_markers'] = [-9999.0, -1000.0]
+        else:
+            print(f"   ✗ Stats file not found: {canonical_stats_path}")
+            print(f"   Run dataset build first to create normalization stats")
+            use_base_stats = False
 
     print(f"\n{'5' if use_base_stats else '4'}. Creating memmap files and processing in parallel (direct write, no serialization!)...")
     print(f"   Total batches: {num_batches}")
@@ -1076,15 +1058,16 @@ def generate_all_augmentations_batched(
         # Save normalization flag
         np.save(output_path / "is_normalized.npy", np.array([True], dtype=bool))
 
-        # Save normalization stats (copy from base dataset)
+        # Save normalization stats in canonical format
         np.savez(
             norm_stats_path,
+            # Per-slot stats (for direct use)
             feature_mins=base_stats['feature_mins'],
             feature_maxs=base_stats['feature_maxs'],
-            target_min=base_stats['target_min'],
-            target_max=base_stats['target_max']
+            target_min=np.array([base_stats['target_min']]),
+            target_max=np.array([base_stats['target_max']]),
         )
-        print(f"   ✓ Saved normalization stats (copied from base dataset)")
+        print(f"   ✓ Saved normalization stats")
         print(f"   ✓ Saved to: {output_path}")
 
         print("\n" + "=" * 70)

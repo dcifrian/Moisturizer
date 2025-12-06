@@ -206,8 +206,11 @@ def predict_for_station(model, dataset, station_id, end_date, device='cuda'):
 def denormalize_soil_moisture(normalized_value, norm_stats_path):
     """Convert from [-1, 1] back to original soil moisture range"""
     norm_stats = np.load(norm_stats_path)
-    target_min = float(norm_stats['target_min'])
-    target_max = float(norm_stats['target_max'])
+    # Handle both scalar and array formats
+    target_min_val = norm_stats['target_min']
+    target_max_val = norm_stats['target_max']
+    target_min = float(target_min_val[0]) if hasattr(target_min_val, '__len__') else float(target_min_val)
+    target_max = float(target_max_val[0]) if hasattr(target_max_val, '__len__') else float(target_max_val)
 
     # Denormalize: value in [-1, 1] -> original range
     original = (normalized_value + 1.0) / 2.0 * (target_max - target_min) + target_min
