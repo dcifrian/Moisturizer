@@ -2211,7 +2211,7 @@ def build_dense_feature_array(
     return features_array, mask_array, station_ids, date_index
 
 
-def buildDataset(seq_length: int = 64, days: int = 3705):
+def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[datetime] = None, force_refresh: bool = False):
     """
     Build the complete dataset with optimizations
 
@@ -2219,47 +2219,100 @@ def buildDataset(seq_length: int = 64, days: int = 3705):
         seq_length: Number of days in each sequence (default: 64)
         days: Number of days of historical data to collect (default: 3705 = ~10 years,
               maximum range without losing stations with moisture data)
+        end_date: End date for data collection (default: None = use current date)
+        force_refresh: If True, force re-download even if cached data exists
 
     Returns:
         Tuple of (train_dataset, val_dataset, test_dataset)
     """
     collector = MeteoGaliciaCollector()
 
-    # Step 1: Discover stations with soil moisture
-    print("=" * 60)
-    print("STEP 1: Discovering stations")
-    print("=" * 60)
-    stations_df = collector.discover_stations_with_soil_moisture(force_refresh=False)
+    # Determine end date
+    if end_date is None:
+        actual_end_date = datetime.now()
+        end_date_str = None  # Will be treated as "current" for caching
+    else:
+        actual_end_date = end_date
+        end_date_str = actual_end_date.strftime('%Y-%m-%d')
 
-    # Step 2: Calculate nearest stations
-    print("\n" + "=" * 60)
-    print("STEP 2: Calculating nearest stations")
-    print("=" * 60)
-    nearest_df = collector.calculate_nearest_stations(stations_df, n_nearest=4)
+    start_date = actual_end_date - timedelta(days=days)
 
-    # Step 3: Build historical dataset
-    print("\n" + "=" * 60)
-    print("STEP 3: Building historical dataset")
-    print("=" * 60)
+    # Check if we can use cached data
+    metadata_path = collector.data_dir / "dataset_metadata.json"
+    can_use_cache = False
 
-    # Get all stations (not just those with soil moisture)
-    all_station_ids = stations_df['station_id'].tolist()
+    if not force_refresh and collector.timeseries_file.exists() and metadata_path.exists():
+        try:
+            with open(metadata_path, 'r') as f:
+                cached_meta = json.load(f)
 
-    # Use ALL sensors from MeteoGalicia API
-    # This includes all 42 available parameters (temperature, humidity, wind, solar radiation, etc.)
-    parameters = collector.ALL_SENSORS
+            cached_days = cached_meta.get('n_days')
+            cached_end_date = cached_meta.get('end_date')  # None or date string
 
-    # Collect specified days of data
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
+            # Cache is valid if:
+            # - n_days matches
+            # - AND (requested end_date is None OR matches cached end_date)
+            if cached_days == days:
+                if end_date_str is None or end_date_str == cached_end_date:
+                    can_use_cache = True
+                    print(f"✓ Found cached dataset matching parameters:")
+                    print(f"  - Days: {days}")
+                    print(f"  - End date: {cached_end_date or 'current (at time of collection)'}")
+        except (json.JSONDecodeError, IOError):
+            pass  # Invalid metadata, will rebuild
 
-    timeseries_df = collector.build_historical_dataset(
-        station_ids=all_station_ids,
-        parameter_ids=parameters,
-        start_date=start_date,
-        end_date=end_date,
-        chunk_days=30
-    )
+    if can_use_cache:
+        print("\n" + "=" * 60)
+        print("USING CACHED DATA (skipping download)")
+        print("=" * 60)
+        print(f"Loading from {collector.timeseries_file}")
+        timeseries_df = pd.read_csv(collector.timeseries_file)
+        stations_df = pd.read_csv(collector.stations_file)
+        nearest_df = pd.read_csv(collector.nearest_file)
+    else:
+        # Step 1: Discover stations with soil moisture
+        print("=" * 60)
+        print("STEP 1: Discovering stations")
+        print("=" * 60)
+        stations_df = collector.discover_stations_with_soil_moisture(force_refresh=force_refresh)
+
+        # Step 2: Calculate nearest stations
+        print("\n" + "=" * 60)
+        print("STEP 2: Calculating nearest stations")
+        print("=" * 60)
+        nearest_df = collector.calculate_nearest_stations(stations_df, n_nearest=4)
+
+        # Step 3: Build historical dataset
+        print("\n" + "=" * 60)
+        print("STEP 3: Building historical dataset")
+        print("=" * 60)
+
+        # Get all stations (not just those with soil moisture)
+        all_station_ids = stations_df['station_id'].tolist()
+
+        # Use ALL sensors from MeteoGalicia API
+        parameters = collector.ALL_SENSORS
+
+        timeseries_df = collector.build_historical_dataset(
+            station_ids=all_station_ids,
+            parameter_ids=parameters,
+            start_date=start_date,
+            end_date=actual_end_date,
+            chunk_days=30,
+            force_refresh=force_refresh
+        )
+
+        # Save metadata for future cache validation
+        metadata = {
+            'n_days': days,
+            'end_date': end_date_str,  # None if current date was used
+            'actual_end_date': actual_end_date.strftime('%Y-%m-%d'),
+            'start_date': start_date.strftime('%Y-%m-%d'),
+            'created_at': datetime.now().isoformat(),
+        }
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        print(f"✓ Saved dataset metadata to {metadata_path}")
 
     # Step 4: Analyze parameter coverage from timeseries
     print("\n" + "=" * 60)
