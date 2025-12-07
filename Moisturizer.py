@@ -2230,43 +2230,42 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
     # Determine end date
     if end_date is None:
         actual_end_date = datetime.now()
-        end_date_str = None  # Will be treated as "current" for caching
     else:
         actual_end_date = end_date
-        end_date_str = actual_end_date.strftime('%Y-%m-%d')
 
-    start_date = actual_end_date - timedelta(days=days)
+    requested_start = (actual_end_date - timedelta(days=days)).strftime('%Y-%m-%d')
+    requested_end = actual_end_date.strftime('%Y-%m-%d')
 
-    # Check if we can use cached data
-    metadata_path = collector.data_dir / "dataset_metadata.json"
+    # Check if we can use cached data by examining the CSV directly
     can_use_cache = False
+    timeseries_df = None
 
-    if not force_refresh and collector.timeseries_file.exists() and metadata_path.exists():
+    if not force_refresh and collector.timeseries_file.exists():
         try:
-            with open(metadata_path, 'r') as f:
-                cached_meta = json.load(f)
-
-            cached_days = cached_meta.get('n_days')
-            cached_end_date = cached_meta.get('end_date')  # None or date string
+            # Load CSV and check date range
+            timeseries_df = pd.read_csv(collector.timeseries_file)
+            cached_dates = pd.to_datetime(timeseries_df['date'])
+            cached_start = cached_dates.min().strftime('%Y-%m-%d')
+            cached_end = cached_dates.max().strftime('%Y-%m-%d')
+            cached_days = (cached_dates.max() - cached_dates.min()).days
 
             # Cache is valid if:
-            # - n_days matches
-            # - AND (requested end_date is None OR matches cached end_date)
-            if cached_days == days:
-                if end_date_str is None or end_date_str == cached_end_date:
+            # - Number of days matches (within 1 day tolerance for edge cases)
+            # - AND (end_date is None OR cached end_date matches requested)
+            if abs(cached_days - days) <= 1:
+                if end_date is None or cached_end == requested_end:
                     can_use_cache = True
                     print(f"✓ Found cached dataset matching parameters:")
-                    print(f"  - Days: {days}")
-                    print(f"  - End date: {cached_end_date or 'current (at time of collection)'}")
-        except (json.JSONDecodeError, IOError):
-            pass  # Invalid metadata, will rebuild
+                    print(f"  - Date range: {cached_start} to {cached_end} ({cached_days} days)")
+        except Exception as e:
+            print(f"  Warning: Could not validate cache: {e}")
+            timeseries_df = None
 
     if can_use_cache:
         print("\n" + "=" * 60)
         print("USING CACHED DATA (skipping download)")
         print("=" * 60)
-        print(f"Loading from {collector.timeseries_file}")
-        timeseries_df = pd.read_csv(collector.timeseries_file)
+        # timeseries_df already loaded above
         stations_df = pd.read_csv(collector.stations_file)
         nearest_df = pd.read_csv(collector.nearest_file)
     else:
@@ -2296,23 +2295,11 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
         timeseries_df = collector.build_historical_dataset(
             station_ids=all_station_ids,
             parameter_ids=parameters,
-            start_date=start_date,
+            start_date=actual_end_date - timedelta(days=days),
             end_date=actual_end_date,
             chunk_days=30,
             force_refresh=force_refresh
         )
-
-        # Save metadata for future cache validation
-        metadata = {
-            'n_days': days,
-            'end_date': end_date_str,  # None if current date was used
-            'actual_end_date': actual_end_date.strftime('%Y-%m-%d'),
-            'start_date': start_date.strftime('%Y-%m-%d'),
-            'created_at': datetime.now().isoformat(),
-        }
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-        print(f"✓ Saved dataset metadata to {metadata_path}")
 
     # Step 4: Analyze parameter coverage from timeseries
     print("\n" + "=" * 60)
