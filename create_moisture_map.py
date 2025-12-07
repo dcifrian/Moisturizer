@@ -1101,6 +1101,190 @@ def find_nearest_stations_with_soil_moisture(virtual_station, stations_df, stati
     return result[:n_max]
 
 
+def debug_find_worst_offenders(
+    virtual_sequences,  # List of (station_info, features_norm, mask) for virtual stations
+    predicted_sequences,  # List of (station_info, features_norm, mask) for predicted stations
+    virtual_results,  # Results with moisture predictions
+    predicted_results,  # Results with moisture predictions
+    stations_df,
+    stations_lookup,
+    nearest_lookup,
+    feature_params,
+    norm_stats,
+    n_nearby=4,
+    top_n=5
+):
+    """
+    Find virtual stations that are close to predicted (triangle) stations but have
+    very different moisture predictions. Compare the ACTUAL NORMALIZED FEATURES
+    that were sent to the model.
+    """
+    if not virtual_results or not predicted_results:
+        print("No virtual or predicted results to compare")
+        return
+    
+    print("\n" + "=" * 80)
+    print("DEBUG: Finding worst offenders (virtual vs predicted station discrepancies)")
+    print("=" * 80)
+    
+    # Build lookup from station_id/grid_id to sequence data
+    virtual_seq_lookup = {}
+    for station_info, features_norm, mask in virtual_sequences:
+        key = (station_info['longitude'], station_info['latitude'])
+        virtual_seq_lookup[key] = (features_norm, mask, station_info)
+    
+    pred_seq_lookup = {}
+    for station_info, features_norm, mask in predicted_sequences:
+        sid = station_info['station_id']
+        pred_seq_lookup[sid] = (features_norm, mask, station_info)
+    
+    # Build arrays for fast distance computation
+    virtual_coords = np.array([[v['longitude'], v['latitude']] for v in virtual_results])
+    virtual_moisture = np.array([v['moisture'] for v in virtual_results])
+    
+    pred_coords = np.array([[p['longitude'], p['latitude']] for p in predicted_results])
+    pred_moisture = np.array([p['moisture'] for p in predicted_results])
+    pred_ids = [p['station_id'] for p in predicted_results]
+    
+    # Use approximate conversion: 1 degree ≈ 111km
+    deg_to_km = 111.0
+    
+    offenders = []
+    for i, vr in enumerate(virtual_results):
+        # Find nearest predicted station
+        dists_deg = np.sqrt(np.sum((pred_coords - virtual_coords[i])**2, axis=1))
+        nearest_idx = np.argmin(dists_deg)
+        dist_km = dists_deg[nearest_idx] * deg_to_km
+        
+        # Only consider if within 1km
+        if dist_km > 1.0:
+            continue
+        
+        moisture_diff = abs(virtual_moisture[i] - pred_moisture[nearest_idx])
+        score = moisture_diff / (dist_km + 0.1)
+        
+        offenders.append({
+            'virtual_idx': i,
+            'virtual_result': vr,
+            'pred_idx': nearest_idx,
+            'pred_result': predicted_results[nearest_idx],
+            'pred_station_id': pred_ids[nearest_idx],
+            'dist_km': dist_km,
+            'moisture_diff': moisture_diff,
+            'score': score
+        })
+    
+    offenders.sort(key=lambda x: -x['score'])
+    
+    print(f"\nFound {len(offenders)} virtual stations within 1km of a predicted station")
+    if not offenders:
+        print("No offenders found!")
+        return
+        
+    print(f"Showing top {min(top_n, len(offenders))} worst offenders:\n")
+    
+    # Feature structure: target_features + n_nearby * (distance + features + soil_moisture)
+    n_target_features = len(feature_params)
+    nearby_features_per_station = len(feature_params) + 1 + 1  # features + distance + soil_moisture
+    
+    for rank, off in enumerate(offenders[:top_n]):
+        vr = off['virtual_result']
+        pr = off['pred_result']
+        pred_sid = off['pred_station_id']
+        
+        print(f"\n{'='*70}")
+        print(f"OFFENDER #{rank+1} (score: {off['score']:.3f})")
+        print(f"{'='*70}")
+        print(f"Virtual station: ({vr['longitude']:.4f}, {vr['latitude']:.4f})")
+        print(f"Predicted station {pred_sid}: ({pr['longitude']:.4f}, {pr['latitude']:.4f})")
+        print(f"Distance between them: {off['dist_km']*1000:.1f}m")
+        print(f"\nMOISTURE PREDICTION:")
+        print(f"  Virtual:   {vr['moisture']:.4f}")
+        print(f"  Predicted: {pr['moisture']:.4f}")
+        print(f"  Difference: {off['moisture_diff']:.4f}")
+        
+        # Get actual normalized sequences
+        vkey = (vr['longitude'], vr['latitude'])
+        if vkey not in virtual_seq_lookup:
+            print(f"  WARNING: Could not find virtual sequence for {vkey}")
+            continue
+        v_features, v_mask, _ = virtual_seq_lookup[vkey]
+        
+        if pred_sid not in pred_seq_lookup:
+            print(f"  WARNING: Could not find predicted sequence for station {pred_sid}")
+            continue
+        p_features, p_mask, _ = pred_seq_lookup[pred_sid]
+        
+        # Compare the ACTUAL normalized features (last timestep, index -1)
+        print(f"\n--- ACTUAL NORMALIZED FEATURES SENT TO MODEL (last timestep) ---")
+        print(f"  Comparing what the model actually saw for each station")
+        
+        # Compute differences for target station features
+        print(f"\n  TARGET STATION FEATURES (first {n_target_features} features):")
+        print(f"  {'Idx':>4s}  {'Parameter':25s}  {'Pred':>10s}  {'Virtual':>10s}  {'Diff':>10s}")
+        print(f"  {'-'*4}  {'-'*25}  {'-'*10}  {'-'*10}  {'-'*10}")
+        
+        target_diffs = []
+        for f_idx in range(n_target_features):
+            param = feature_params[f_idx] if f_idx < len(feature_params) else f"feat_{f_idx}"
+            p_val = p_features[-1, f_idx]  # Last timestep
+            v_val = v_features[-1, f_idx]
+            diff = abs(p_val - v_val)
+            target_diffs.append((f_idx, param, p_val, v_val, diff))
+        
+        # Sort by diff and show top 10
+        target_diffs.sort(key=lambda x: -x[4])
+        for f_idx, param, p_val, v_val, diff in target_diffs[:10]:
+            print(f"  {f_idx:4d}  {param:25s}  {p_val:10.4f}  {v_val:10.4f}  {diff:10.4f}")
+        
+        # Compare context station features (nearby stations with soil moisture)
+        print(f"\n  CONTEXT STATION FEATURES ({n_nearby} nearest soil moisture stations):")
+
+        for n_idx in range(n_nearby):
+            offset = n_target_features + n_idx * nearby_features_per_station
+            
+            # Distance feature
+            dist_idx = offset
+            p_dist = p_features[-1, dist_idx]
+            v_dist = v_features[-1, dist_idx]
+            
+            print(f"\n  Context station {n_idx+1}:")
+            print(f"    Distance (normalized): Pred={p_dist:.4f}, Virtual={v_dist:.4f}, Diff={abs(p_dist-v_dist):.4f}")
+            
+            # Soil moisture feature (last in the group)
+            soil_idx = offset + 1 + len(feature_params)
+            p_soil = p_features[-1, soil_idx]
+            v_soil = v_features[-1, soil_idx]
+            print(f"    Soil moisture (norm):  Pred={p_soil:.4f}, Virtual={v_soil:.4f}, Diff={abs(p_soil-v_soil):.4f}")
+            
+            # Check a few weather features for this context station
+            context_diffs = []
+            for f_idx_rel, param in enumerate(feature_params[:5]):  # First 5 params
+                feat_idx = offset + 1 + f_idx_rel
+                p_val = p_features[-1, feat_idx]
+                v_val = v_features[-1, feat_idx]
+                context_diffs.append((param, p_val, v_val, abs(p_val - v_val)))
+            
+            context_diffs.sort(key=lambda x: -x[3])
+            if context_diffs[0][3] > 0.01:  # Only show if there's meaningful difference
+                print(f"    Largest feature diffs:")
+                for param, p_val, v_val, diff in context_diffs[:3]:
+                    print(f"      {param}: Pred={p_val:.4f}, Virt={v_val:.4f}, Diff={diff:.4f}")
+        
+        # Overall statistics
+        all_diffs = np.abs(p_features[-1, :] - v_features[-1, :])
+        print(f"\n  SUMMARY:")
+        print(f"    Total features: {len(all_diffs)}")
+        print(f"    Max diff: {np.max(all_diffs):.4f}")
+        print(f"    Mean diff: {np.mean(all_diffs):.4f}")
+        print(f"    Features with diff > 0.1: {np.sum(all_diffs > 0.1)}")
+        print(f"    Features with diff > 0.5: {np.sum(all_diffs > 0.5)}")
+    
+    print("\n" + "=" * 80)
+    print("END DEBUG")
+    print("=" * 80)
+
+
 def create_moisture_map(
     model_path,
     target_date=None,
@@ -1467,6 +1651,22 @@ def create_moisture_map(
                 })
             
             print(f"  ✓ {len(virtual_results)} virtual grid predictions complete")
+        
+        # Debug: find worst offenders (virtual stations with large moisture diff from nearby predicted)
+        # Pass the actual normalized sequences so we can compare what went into the model
+        debug_find_worst_offenders(
+            virtual_sequences=virtual_sequences,
+            predicted_sequences=sequences_to_predict,
+            virtual_results=virtual_results,
+            predicted_results=predicted_results,
+            stations_df=stations_df,
+            stations_lookup=stations_lookup,
+            nearest_lookup=nearest_lookup,
+            feature_params=filtered_params,
+            norm_stats=norm_stats,
+            n_nearby=n_nearby,
+            top_n=5
+        )
 
     # Combine all results
     all_results = real_results + predicted_results + virtual_results
