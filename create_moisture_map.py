@@ -1111,6 +1111,7 @@ def debug_find_worst_offenders(
     nearest_lookup,
     feature_params,
     norm_stats,
+    n_nearby=4,
     top_n=5
 ):
     """
@@ -1182,9 +1183,8 @@ def debug_find_worst_offenders(
         
     print(f"Showing top {min(top_n, len(offenders))} worst offenders:\n")
     
-    # Feature structure: target_features + n_nearest * (distance + features + soil_moisture)
+    # Feature structure: target_features + n_nearby * (distance + features + soil_moisture)
     n_target_features = len(feature_params)
-    n_nearest = 4
     nearby_features_per_station = len(feature_params) + 1 + 1  # features + distance + soil_moisture
     
     for rank, off in enumerate(offenders[:top_n]):
@@ -1238,9 +1238,9 @@ def debug_find_worst_offenders(
             print(f"  {f_idx:4d}  {param:25s}  {p_val:10.4f}  {v_val:10.4f}  {diff:10.4f}")
         
         # Compare context station features (nearby stations with soil moisture)
-        print(f"\n  CONTEXT STATION FEATURES (4 nearest soil moisture stations):")
-        
-        for n_idx in range(n_nearest):
+        print(f"\n  CONTEXT STATION FEATURES ({n_nearby} nearest soil moisture stations):")
+
+        for n_idx in range(n_nearby):
             offset = n_target_features + n_idx * nearby_features_per_station
             
             # Distance feature
@@ -1295,7 +1295,8 @@ def create_moisture_map(
     auto_range=False,  # If False, use fixed range 0.07-0.4
     hide_markers=None,  # Set of markers to hide: {'real', 'predicted', 'virtual'}
     real_moisture_only=False,  # If True, only use real moisture stations for the map
-    all_maps=False  # If True, create all map variants efficiently (reuses data)
+    all_maps=False,  # If True, create all map variants efficiently (reuses data)
+    n_nearby=4  # Number of nearby stations used in the model's input
 ):
     """
     Create a beautiful moisture map of all Galicia
@@ -1378,24 +1379,8 @@ def create_moisture_map(
         coverage_threshold=0.25
     )
 
-    # Create dataset - pass pre-loaded DataFrames
-    print("\nLoading dataset...")
-    dataset = SoilMoistureSequenceDataset(
-        timeseries=timeseries_df,  # Pass DataFrame directly instead of path
-        stations=stations_df,
-        nearest=nearest_df,
-        seq_length=64,
-        n_nearest=4,
-        feature_params=filtered_params,
-        precomputed_path=str(collector.data_dir / "precomputed_sequences"),  # .npy directory
-        normalize=True,
-        norm_stats_path=str(collector.data_dir / "normalization_stats_augmented.npz")
-    )
-
     # Load canonical normalization stats and expand to augmented layout
-    # This allows flexibility for any n_nearby configuration
     n_params = len(filtered_params)
-    n_nearby = 4  # TODO: make this configurable based on model
 
     canonical_stats_path = str(collector.data_dir / "normalization_stats.npz")
     canonical_stats = np.load(canonical_stats_path)
@@ -1493,7 +1478,7 @@ def create_moisture_map(
                     feature_params=filtered_params,
                     norm_stats=norm_stats,
                     seq_length=64,
-                    n_nearest=4
+                    n_nearest=n_nearby
                 )
 
                 if sequence_data is not None:
@@ -1609,7 +1594,7 @@ def create_moisture_map(
                     feature_params=filtered_params,
                     norm_stats=norm_stats,
                     seq_length=64,
-                    n_nearest=4
+                    n_nearest=n_nearby
                 )
                 
                 if sequence_data is not None:
@@ -1679,6 +1664,7 @@ def create_moisture_map(
             nearest_lookup=nearest_lookup,
             feature_params=filtered_params,
             norm_stats=norm_stats,
+            n_nearby=n_nearby,
             top_n=5
         )
 
@@ -2275,6 +2261,8 @@ if __name__ == "__main__":
                        help='Draw map using only real moisture stations (no predictions)')
     parser.add_argument('--all-maps', action='store_true',
                        help='Create all map variants efficiently (moisture, novirtual, realonly, precipitation, water_balance)')
+    parser.add_argument('--n-nearby', type=int, default=4,
+                       help='Number of nearby stations used in model input (default: 4)')
 
     args = parser.parse_args()
     
@@ -2293,5 +2281,6 @@ if __name__ == "__main__":
         auto_range=args.auto_range,
         hide_markers=hide_markers,
         real_moisture_only=args.real_moisture_only,
-        all_maps=args.all_maps
+        all_maps=args.all_maps,
+        n_nearby=args.n_nearby
     )

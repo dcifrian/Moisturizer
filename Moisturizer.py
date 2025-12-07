@@ -2561,7 +2561,7 @@ if __name__ == "__main__":
     # Check if precomputed data exists
     collector = MeteoGaliciaCollector()
     precomputed_path = collector.data_dir / "precomputed_sequences_augmented"
-    norm_stats_path = collector.data_dir / "normalization_stats_augmented.npz"
+    norm_stats_path = collector.data_dir / "normalization_stats.npz"  # Canonical stats
     features_file = precomputed_path / "features.npy"
 
     if not features_file.exists():
