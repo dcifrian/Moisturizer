@@ -1602,7 +1602,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 if soil_station_ids[idx] != target_station_id:
                     neighbors.append({
                         'station_id': int(soil_station_ids[idx]),
-                        'distance': float(distances[idx]) / 1000.0  # Convert to km
+                        'distance': float(distances[idx])  # Keep in meters (UTM units)
                     })
 
             comprehensive_neighbors[target_station_id] = neighbors
@@ -1758,10 +1758,12 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         print(f"  Target (soil moisture) range: [{self.norm_stats['target_min']:.4f}, {self.norm_stats['target_max']:.4f}]")
         print(f"  Nearby slots: {max_nearby} (comprehensive per-slot stats stored)")
 
-        # Show sample of per-slot distance ranges
+        # Show sample of per-slot distance ranges (convert m to km for readability)
         print(f"  Distance ranges by slot:")
         for slot in range(min(5, max_nearby)):
-            print(f"    Slot {slot}: [{nearby_slot_mins[slot, 0]:.1f}, {nearby_slot_maxs[slot, 0]:.1f}] km")
+            min_km = nearby_slot_mins[slot, 0] / 1000.0
+            max_km = nearby_slot_maxs[slot, 0] / 1000.0
+            print(f"    Slot {slot}: [{min_km:.1f}, {max_km:.1f}] km")
         if max_nearby > 5:
             print(f"    ... (showing first 5 of {max_nearby} slots)")
 
