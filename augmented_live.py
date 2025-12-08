@@ -562,7 +562,10 @@ class AugmentedLiveDataset(Dataset):
 
     def load_normalization_stats(self, path: str) -> bool:
         """
-        Load canonical normalization stats and expand to current layout.
+        Load canonical normalization stats and expand to current augmented layout.
+
+        For augmented datasets, we need to aggregate stats across all available slots
+        because any slot can receive data from any of the available stations.
 
         Returns True if stats were loaded successfully, False if incompatible.
         """
@@ -584,9 +587,8 @@ class AugmentedLiveDataset(Dataset):
             # Load canonical stats
             target_feature_mins = stats['target_feature_mins']
             target_feature_maxs = stats['target_feature_maxs']
-            nearby_feature_mins = stats['nearby_feature_mins']
-            nearby_feature_maxs = stats['nearby_feature_maxs']
-            # Handle 0-d, 1-d arrays and scalars
+
+            # Handle 0-d, 1-d arrays and scalars for target min/max
             target_min_val = stats['target_min']
             target_max_val = stats['target_max']
             if hasattr(target_min_val, 'ndim'):
@@ -596,6 +598,28 @@ class AugmentedLiveDataset(Dataset):
                 self.target_min = float(target_min_val)
                 self.target_max = float(target_max_val)
 
+            # Check for new per-slot format vs old format
+            if 'nearby_slot_mins' in stats:
+                # New per-slot format: [n_nearby_slots, nearby_features_per_station]
+                nearby_slot_mins = np.asarray(stats['nearby_slot_mins'])
+                nearby_slot_maxs = np.asarray(stats['nearby_slot_maxs'])
+                n_slots_available = nearby_slot_mins.shape[0]
+
+                if self.n_nearby_available > n_slots_available:
+                    print(f"   Warning: n_nearby_available ({self.n_nearby_available}) > available slots in stats ({n_slots_available})")
+                    return False
+
+                # For augmented: aggregate stats across available slots
+                # (any slot can receive data from any of the available stations)
+                nearby_feature_mins = nearby_slot_mins[:self.n_nearby_available, :].min(axis=0)
+                nearby_feature_maxs = nearby_slot_maxs[:self.n_nearby_available, :].max(axis=0)
+                print(f"   Using per-slot stats, aggregating {self.n_nearby_available} slots for augmentation")
+            else:
+                # Old format: single set of nearby stats (pre-aggregated)
+                nearby_feature_mins = stats['nearby_feature_mins']
+                nearby_feature_maxs = stats['nearby_feature_maxs']
+                print(f"   Warning: Using old stats format (single nearby stats). Consider regenerating dataset.")
+
             # Expand to current augmented layout
             self.feature_mins = np.full(self.n_output_features, np.inf, dtype=np.float32)
             self.feature_maxs = np.full(self.n_output_features, -np.inf, dtype=np.float32)
@@ -604,7 +628,8 @@ class AugmentedLiveDataset(Dataset):
             self.feature_mins[:len(target_feature_mins)] = target_feature_mins
             self.feature_maxs[:len(target_feature_maxs)] = target_feature_maxs
 
-            # Nearby features: replicate to all slots
+            # Nearby features: replicate aggregated stats to all output slots
+            # (since all slots can see any available station's data due to permutations)
             n_params = len(self.feature_params)
             for slot in range(self.n_nearby_in_features):
                 start_idx = n_params + (slot * self.nearby_features_per_station)

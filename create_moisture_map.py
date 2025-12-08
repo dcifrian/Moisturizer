@@ -25,33 +25,37 @@ from Moisturizer import MeteoGaliciaCollector, SoilMoistureSequenceDataset
 from model_loader import load_model
 
 
-def expand_canonical_to_augmented_stats(canonical_stats, n_params, n_nearby):
+def expand_canonical_to_augmented_stats(canonical_stats, n_params, n_nearby_in_features,
+                                        n_nearby_available=None, augmented=False):
     """
-    Expand canonical per-feature-type stats to augmented layout.
+    Expand per-slot canonical stats to the feature layout needed for inference.
 
     Canonical stats have:
         - target_feature_mins/maxs: [n_params] for target station features
-        - nearby_feature_mins/maxs: [1 + n_params + 1] for (distance, params, soil_moisture)
+        - nearby_slot_mins/maxs: [n_nearby_slots, nearby_features_per_station] per-slot stats
         - target_min/max: scalar for target (soil moisture prediction target)
+        - n_nearby_slots: number of slots stored in the canonical stats
 
-    Augmented layout is:
+    Output layout is:
         - [n_params] target features
-        - For each of n_nearby stations: [1 + n_params + 1] = (distance, params, soil_moisture)
+        - For each of n_nearby_in_features stations: [1 + n_params + 1] = (distance, params, soil)
 
-    Total: n_params + n_nearby * (1 + n_params + 1)
+    For non-augmented models: use per-slot stats directly (first n_nearby_in_features slots)
+    For augmented models: compute min/max across n_nearby_available slots for each feature type
 
     Args:
         canonical_stats: dict-like with canonical stat arrays
         n_params: number of weather parameters per station
-        n_nearby: number of nearby stations in the augmented layout
+        n_nearby_in_features: number of nearby stations in the model's input
+        n_nearby_available: for augmented, how many nearby were available for permutations
+                           (ignored if augmented=False)
+        augmented: whether the model was trained with augmentation
 
     Returns:
         dict with 'feature_mins', 'feature_maxs', 'target_min', 'target_max'
     """
     target_feat_mins = np.asarray(canonical_stats['target_feature_mins'])
     target_feat_maxs = np.asarray(canonical_stats['target_feature_maxs'])
-    nearby_feat_mins = np.asarray(canonical_stats['nearby_feature_mins'])
-    nearby_feat_maxs = np.asarray(canonical_stats['nearby_feature_maxs'])
 
     # Handle 0-d arrays for target_min/max
     target_min_val = canonical_stats['target_min']
@@ -63,23 +67,64 @@ def expand_canonical_to_augmented_stats(canonical_stats, n_params, n_nearby):
         target_min = float(target_min_val)
         target_max = float(target_max_val)
 
-    # Build augmented layout
-    nearby_features_per_station = 1 + n_params + 1  # distance + params + soil_moisture
-    n_output_features = n_params + n_nearby * nearby_features_per_station
+    # Check for new per-slot format vs old format
+    if 'nearby_slot_mins' in canonical_stats:
+        # New per-slot format
+        nearby_slot_mins = np.asarray(canonical_stats['nearby_slot_mins'])
+        nearby_slot_maxs = np.asarray(canonical_stats['nearby_slot_maxs'])
+        n_slots_available = nearby_slot_mins.shape[0]
+        nearby_features_per_station = nearby_slot_mins.shape[1]
+    elif 'nearby_feature_mins' in canonical_stats:
+        # Old format (single set of nearby stats) - treat as 1 slot repeated
+        old_nearby_mins = np.asarray(canonical_stats['nearby_feature_mins'])
+        old_nearby_maxs = np.asarray(canonical_stats['nearby_feature_maxs'])
+        nearby_features_per_station = len(old_nearby_mins)
+        # Fake per-slot by repeating
+        n_slots_available = n_nearby_in_features
+        nearby_slot_mins = np.tile(old_nearby_mins, (n_slots_available, 1))
+        nearby_slot_maxs = np.tile(old_nearby_maxs, (n_slots_available, 1))
+        print(f"  Warning: Using old stats format (single nearby stats). Consider regenerating dataset.")
+    else:
+        raise ValueError("Canonical stats missing nearby stats (neither nearby_slot_mins nor nearby_feature_mins)")
+
+    # Build output layout
+    n_output_features = n_params + n_nearby_in_features * nearby_features_per_station
 
     feature_mins = np.full(n_output_features, np.inf, dtype=np.float32)
     feature_maxs = np.full(n_output_features, -np.inf, dtype=np.float32)
 
-    # Target station features
+    # Target station features (same for any configuration)
     feature_mins[:n_params] = target_feat_mins[:n_params]
     feature_maxs[:n_params] = target_feat_maxs[:n_params]
 
-    # Nearby station features (replicated for each nearby slot)
-    for i in range(n_nearby):
-        start_idx = n_params + i * nearby_features_per_station
-        end_idx = start_idx + nearby_features_per_station
-        feature_mins[start_idx:end_idx] = nearby_feat_mins
-        feature_maxs[start_idx:end_idx] = nearby_feat_maxs
+    if augmented:
+        # Augmented: each slot sees data from any of the n_nearby_available stations
+        # So for each feature type, take min across all available slots and max across all
+        if n_nearby_available is None:
+            raise ValueError("n_nearby_available required for augmented=True")
+        if n_nearby_available > n_slots_available:
+            raise ValueError(f"n_nearby_available ({n_nearby_available}) > available slots in stats ({n_slots_available})")
+
+        # Compute aggregated stats across the available slots
+        agg_mins = nearby_slot_mins[:n_nearby_available, :].min(axis=0)
+        agg_maxs = nearby_slot_maxs[:n_nearby_available, :].max(axis=0)
+
+        # Apply to all output slots (they all see the same range due to permutations)
+        for i in range(n_nearby_in_features):
+            start_idx = n_params + i * nearby_features_per_station
+            end_idx = start_idx + nearby_features_per_station
+            feature_mins[start_idx:end_idx] = agg_mins
+            feature_maxs[start_idx:end_idx] = agg_maxs
+    else:
+        # Non-augmented: use per-slot stats directly (full range utilization)
+        if n_nearby_in_features > n_slots_available:
+            raise ValueError(f"n_nearby_in_features ({n_nearby_in_features}) > available slots in stats ({n_slots_available})")
+
+        for i in range(n_nearby_in_features):
+            start_idx = n_params + i * nearby_features_per_station
+            end_idx = start_idx + nearby_features_per_station
+            feature_mins[start_idx:end_idx] = nearby_slot_mins[i]
+            feature_maxs[start_idx:end_idx] = nearby_slot_maxs[i]
 
     return {
         'feature_mins': feature_mins,
@@ -1296,7 +1341,9 @@ def create_moisture_map(
     hide_markers=None,  # Set of markers to hide: {'real', 'predicted', 'virtual'}
     real_moisture_only=False,  # If True, only use real moisture stations for the map
     all_maps=False,  # If True, create all map variants efficiently (reuses data)
-    n_nearby=4  # Number of nearby stations used in the model's input
+    n_nearby=4,  # Number of nearby stations used in the model's input
+    augmented=False,  # Whether the model was trained with augmentation
+    n_nearby_available=None  # For augmented: how many nearby stations were available for permutations
 ):
     """
     Create a beautiful moisture map of all Galicia
@@ -1318,6 +1365,9 @@ def create_moisture_map(
                   - {base}_moisture_map_realonly.png (real sensor data only)
                   - {base}_precipitation.png (cumulative precipitation)
                   - {base}_water_balance.png (cumulative water balance)
+        augmented: Whether the model was trained with augmentation (permuted nearby stations)
+        n_nearby_available: For augmented models, how many nearby stations were available
+                           for permutations during training (required if augmented=True)
     """
     if hide_markers is None:
         hide_markers = set()
@@ -1388,8 +1438,12 @@ def create_moisture_map(
     # Check if this is canonical format (has target_feature_mins) or old augmented format
     if 'target_feature_mins' in canonical_stats:
         # Canonical format - expand to augmented layout
-        print(f"  Using canonical stats, expanding to {n_nearby}-nearby augmented layout...")
-        norm_stats = expand_canonical_to_augmented_stats(canonical_stats, n_params, n_nearby)
+        aug_str = f"augmented (n_nearby_available={n_nearby_available})" if augmented else "non-augmented"
+        print(f"  Using canonical stats, expanding to {n_nearby}-nearby {aug_str} layout...")
+        norm_stats = expand_canonical_to_augmented_stats(
+            canonical_stats, n_params, n_nearby,
+            n_nearby_available=n_nearby_available, augmented=augmented
+        )
     else:
         # Old augmented format - use directly (backward compatibility)
         print(f"  Using legacy augmented stats format...")
@@ -2263,6 +2317,10 @@ if __name__ == "__main__":
                        help='Create all map variants efficiently (moisture, novirtual, realonly, precipitation, water_balance)')
     parser.add_argument('--n-nearby', type=int, default=4,
                        help='Number of nearby stations used in model input (default: 4)')
+    parser.add_argument('--augmented', action='store_true',
+                       help='Model was trained with augmentation (permuted nearby stations)')
+    parser.add_argument('--n-nearby-available', type=int, default=None,
+                       help='For augmented models: how many nearby stations were available for permutations')
 
     args = parser.parse_args()
     
@@ -2282,5 +2340,7 @@ if __name__ == "__main__":
         hide_markers=hide_markers,
         real_moisture_only=args.real_moisture_only,
         all_maps=args.all_maps,
-        n_nearby=args.n_nearby
+        n_nearby=args.n_nearby,
+        augmented=args.augmented,
+        n_nearby_available=args.n_nearby_available
     )

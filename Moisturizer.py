@@ -1435,9 +1435,12 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         """
         Compute normalization statistics from precomputed data.
 
-        Computes both per-slot stats (for base dataset) and canonical per-feature-type
-        stats (for augmented datasets). The canonical stats are computed by finding
-        min/max across ALL nearby station slots for each feature type.
+        Computes:
+        - Per-slot stats for the full feature vector (for base dataset normalization)
+        - Per-slot nearby stats: separate min/max for each nearby station slot
+          This enables:
+          - Non-augmented: use per-slot stats directly for full range utilization
+          - Augmented: compute min/max across available slots for each feature type
         """
         print("Computing min/max for each feature (excluding invalid values)...")
 
@@ -1445,17 +1448,20 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         seq_length = self.precomputed_data['features'].shape[1]
         n_features = self.precomputed_data['features'].shape[2]
 
-        # Per-slot stats (for base dataset normalization)
+        # Per-slot stats for full feature vector (for base dataset normalization)
         feature_mins = np.full(n_features, np.inf, dtype=np.float32)
         feature_maxs = np.full(n_features, -np.inf, dtype=np.float32)
 
-        # Canonical per-feature-type stats (for augmented datasets)
+        # Target feature stats (same for any configuration)
         n_params = len(self.feature_params)
         nearby_features_per_station = 1 + n_params + 1  # distance + params + soil
         target_feat_mins = np.full(n_params, np.inf, dtype=np.float32)
         target_feat_maxs = np.full(n_params, -np.inf, dtype=np.float32)
-        nearby_feat_mins = np.full(nearby_features_per_station, np.inf, dtype=np.float32)
-        nearby_feat_maxs = np.full(nearby_features_per_station, -np.inf, dtype=np.float32)
+
+        # Per-slot nearby stats: [n_nearest, nearby_features_per_station]
+        # Each slot has its own stats (closer stations may have different ranges than farther ones)
+        nearby_slot_mins = np.full((self.n_nearest, nearby_features_per_station), np.inf, dtype=np.float32)
+        nearby_slot_maxs = np.full((self.n_nearest, nearby_features_per_station), -np.inf, dtype=np.float32)
 
         # Invalid markers to exclude
         invalid_markers = [-9999.0, self.missing_value]
@@ -1467,7 +1473,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             features_batch = self.precomputed_data['features'][i:end_i]
             masks_batch = self.precomputed_data['masks'][i:end_i]
 
-            # Per-slot stats
+            # Per-slot stats for full feature vector
             for feat_idx in range(n_features):
                 feat_data = features_batch[:, :, feat_idx]
                 feat_mask = masks_batch[:, :, feat_idx]
@@ -1483,7 +1489,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                     feature_mins[feat_idx] = min(feature_mins[feat_idx], valid_data.min())
                     feature_maxs[feat_idx] = max(feature_maxs[feat_idx], valid_data.max())
 
-            # Canonical target feature stats
+            # Target feature stats
             target_feats = features_batch[:, :, :n_params]
             for feat_idx in range(n_params):
                 feat_data = target_feats[:, :, feat_idx].ravel()
@@ -1492,19 +1498,20 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                     target_feat_mins[feat_idx] = min(target_feat_mins[feat_idx], valid.min())
                     target_feat_maxs[feat_idx] = max(target_feat_maxs[feat_idx], valid.max())
 
-            # Canonical nearby feature stats (across ALL nearby stations)
+            # Per-slot nearby stats
             nearby_data = features_batch[:, :, n_params:]
             nearby_reshaped = nearby_data.reshape(
                 end_i - i, seq_length, self.n_nearest, nearby_features_per_station
             )
-            for feat_idx in range(nearby_features_per_station):
-                feat_data = nearby_reshaped[:, :, :, feat_idx].ravel()
-                valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
-                if len(valid) > 0:
-                    nearby_feat_mins[feat_idx] = min(nearby_feat_mins[feat_idx], valid.min())
-                    nearby_feat_maxs[feat_idx] = max(nearby_feat_maxs[feat_idx], valid.max())
+            for slot_idx in range(self.n_nearest):
+                for feat_idx in range(nearby_features_per_station):
+                    feat_data = nearby_reshaped[:, :, slot_idx, feat_idx].ravel()
+                    valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                    if len(valid) > 0:
+                        nearby_slot_mins[slot_idx, feat_idx] = min(nearby_slot_mins[slot_idx, feat_idx], valid.min())
+                        nearby_slot_maxs[slot_idx, feat_idx] = max(nearby_slot_maxs[slot_idx, feat_idx], valid.max())
 
-        # Compute for target as well
+        # Compute for target (soil moisture prediction target) as well
         targets = self.precomputed_data['targets']
         valid_targets = targets.copy()
         for marker in invalid_markers:
@@ -1513,18 +1520,20 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         target_min = valid_targets.min() if len(valid_targets) > 0 else 0.0
         target_max = valid_targets.max() if len(valid_targets) > 0 else 1.0
 
-        # Store both formats
+        # Store stats
         self.norm_stats = {
-            # Per-slot stats (for base dataset)
+            # Per-slot stats for full feature vector (for base dataset)
             'feature_mins': feature_mins,
             'feature_maxs': feature_maxs,
             'target_min': target_min,
             'target_max': target_max,
-            # Canonical per-feature-type stats (for augmented datasets)
+            # Target feature stats (same for any configuration)
             'target_feature_mins': target_feat_mins,
             'target_feature_maxs': target_feat_maxs,
-            'nearby_feature_mins': nearby_feat_mins,
-            'nearby_feature_maxs': nearby_feat_maxs,
+            # Per-slot nearby stats: [n_nearby_slots, nearby_features_per_station]
+            'nearby_slot_mins': nearby_slot_mins,
+            'nearby_slot_maxs': nearby_slot_maxs,
+            'n_nearby_slots': self.n_nearest,
             # Metadata
             'n_params': n_params,
             'n_base_samples': n_samples,
@@ -1535,6 +1544,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         print(f"  Feature min range: [{feature_mins.min():.2f}, {feature_mins.max():.2f}]")
         print(f"  Feature max range: [{feature_maxs.min():.2f}, {feature_maxs.max():.2f}]")
         print(f"  Target range: [{target_min:.2f}, {target_max:.2f}]")
+        print(f"  Nearby slots: {self.n_nearest} (per-slot stats stored)")
 
     def _apply_normalization(self, features, target, mask):
         """
@@ -1656,21 +1666,23 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
             is_normalized = True
 
-            # Save normalization statistics (canonical format for reuse by augmented datasets)
+            # Save normalization statistics (per-slot format for flexible reuse)
             if norm_stats_path:
                 print(f"Saving normalization stats to {norm_stats_path}...")
                 np.savez(
                     norm_stats_path,
-                    # Per-slot stats (for base dataset)
+                    # Per-slot stats for full feature vector (for base dataset)
                     feature_mins=self.norm_stats['feature_mins'],
                     feature_maxs=self.norm_stats['feature_maxs'],
                     target_min=np.array([self.norm_stats['target_min']]),
                     target_max=np.array([self.norm_stats['target_max']]),
-                    # Canonical per-feature-type stats (for augmented datasets)
+                    # Target feature stats
                     target_feature_mins=self.norm_stats['target_feature_mins'],
                     target_feature_maxs=self.norm_stats['target_feature_maxs'],
-                    nearby_feature_mins=self.norm_stats['nearby_feature_mins'],
-                    nearby_feature_maxs=self.norm_stats['nearby_feature_maxs'],
+                    # Per-slot nearby stats: [n_nearby_slots, nearby_features_per_station]
+                    nearby_slot_mins=self.norm_stats['nearby_slot_mins'],
+                    nearby_slot_maxs=self.norm_stats['nearby_slot_maxs'],
+                    n_nearby_slots=np.array([self.norm_stats['n_nearby_slots']]),
                     # Metadata
                     n_params=np.array([self.norm_stats['n_params']]),
                     n_base_samples=np.array([self.norm_stats['n_base_samples']]),

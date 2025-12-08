@@ -417,10 +417,28 @@ def generate_all_augmentations_sequential(
                 # Use canonical per-feature-type stats
                 target_feature_mins = stats['target_feature_mins']
                 target_feature_maxs = stats['target_feature_maxs']
-                nearby_feature_mins = stats['nearby_feature_mins']
-                nearby_feature_maxs = stats['nearby_feature_maxs']
                 target_min = _safe_scalar_from_array(stats['target_min'])
                 target_max = _safe_scalar_from_array(stats['target_max'])
+
+                # Check for new per-slot format vs old format
+                if 'nearby_slot_mins' in stats:
+                    # New per-slot format: [n_nearby_slots, nearby_features_per_station]
+                    nearby_slot_mins = np.asarray(stats['nearby_slot_mins'])
+                    nearby_slot_maxs = np.asarray(stats['nearby_slot_maxs'])
+                    n_slots_available = nearby_slot_mins.shape[0]
+
+                    if n_nearby_available > n_slots_available:
+                        raise ValueError(f"n_nearby_available ({n_nearby_available}) > available slots in stats ({n_slots_available})")
+
+                    # For augmented: aggregate stats across available slots
+                    nearby_feature_mins = nearby_slot_mins[:n_nearby_available, :].min(axis=0)
+                    nearby_feature_maxs = nearby_slot_maxs[:n_nearby_available, :].max(axis=0)
+                    print(f"   Using per-slot stats, aggregating {n_nearby_available} slots for augmentation")
+                else:
+                    # Old format: single set of nearby stats (pre-aggregated)
+                    nearby_feature_mins = stats['nearby_feature_mins']
+                    nearby_feature_maxs = stats['nearby_feature_maxs']
+                    print(f"   Warning: Using old stats format. Consider regenerating dataset.")
 
                 # Expand to augmented layout
                 feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
@@ -430,7 +448,7 @@ def generate_all_augmentations_sequential(
                 feature_mins[:len(target_feature_mins)] = target_feature_mins
                 feature_maxs[:len(target_feature_maxs)] = target_feature_maxs
 
-                # Nearby features: replicate to all slots
+                # Nearby features: replicate aggregated stats to all slots
                 for slot in range(n_nearby_in_features):
                     start_idx = target_features_count + (slot * nearby_features_per_station_calc)
                     end_idx = start_idx + nearby_features_per_station_calc
@@ -881,10 +899,28 @@ def generate_all_augmentations_batched(
                 # Use canonical per-feature-type stats
                 target_feature_mins = stats['target_feature_mins']
                 target_feature_maxs = stats['target_feature_maxs']
-                nearby_feature_mins = stats['nearby_feature_mins']
-                nearby_feature_maxs = stats['nearby_feature_maxs']
                 target_min = _safe_scalar_from_array(stats['target_min'])
                 target_max = _safe_scalar_from_array(stats['target_max'])
+
+                # Check for new per-slot format vs old format
+                if 'nearby_slot_mins' in stats:
+                    # New per-slot format: [n_nearby_slots, nearby_features_per_station]
+                    nearby_slot_mins = np.asarray(stats['nearby_slot_mins'])
+                    nearby_slot_maxs = np.asarray(stats['nearby_slot_maxs'])
+                    n_slots_available = nearby_slot_mins.shape[0]
+
+                    if n_nearby_available > n_slots_available:
+                        raise ValueError(f"n_nearby_available ({n_nearby_available}) > available slots in stats ({n_slots_available})")
+
+                    # For augmented: aggregate stats across available slots
+                    nearby_feature_mins = nearby_slot_mins[:n_nearby_available, :].min(axis=0)
+                    nearby_feature_maxs = nearby_slot_maxs[:n_nearby_available, :].max(axis=0)
+                    print(f"   Using per-slot stats, aggregating {n_nearby_available} slots for augmentation")
+                else:
+                    # Old format: single set of nearby stats (pre-aggregated)
+                    nearby_feature_mins = stats['nearby_feature_mins']
+                    nearby_feature_maxs = stats['nearby_feature_maxs']
+                    print(f"   Warning: Using old stats format. Consider regenerating dataset.")
 
                 # Expand to augmented layout
                 feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
@@ -894,7 +930,7 @@ def generate_all_augmentations_batched(
                 feature_mins[:len(target_feature_mins)] = target_feature_mins
                 feature_maxs[:len(target_feature_maxs)] = target_feature_maxs
 
-                # Nearby features: replicate to all slots
+                # Nearby features: replicate aggregated stats to all slots
                 for slot in range(n_nearby_in_features):
                     start_idx = target_features_count + (slot * nearby_features_per_station)
                     end_idx = start_idx + nearby_features_per_station
