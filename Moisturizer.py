@@ -1555,7 +1555,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         - Non-augmented with any number of nearby stations: use per-slot stats directly
         - Augmented with any n_nearby_available: aggregate across available slots
 
-        Requires dense_arrays to be loaded.
+        Requires dense_arrays and stations_df to be loaded.
         """
         if self.dense_arrays is None:
             raise ValueError("Dense arrays must be loaded to compute comprehensive norm stats")
@@ -1563,12 +1563,52 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         print("Computing COMPREHENSIVE normalization stats from dense arrays...")
         print("  (This computes stats for ALL possible nearby stations, not just n_nearest)")
 
-        # Find maximum number of nearby stations available across all target stations
-        max_nearby = 0
-        for station_id in self.target_stations:
-            nearby_list = self.nearest_stations_cache.get(station_id, [])
-            max_nearby = max(max_nearby, len(nearby_list))
+        # Compute ALL nearest neighbors from station coordinates (not from cached n_nearest)
+        print("  Computing ALL nearest neighbors from station coordinates...")
 
+        # Get stations with soil moisture (candidates for neighbors)
+        soil_moisture_stations = self.stations_df[self.stations_df['has_soil_moisture'] == True].copy()
+        soil_moisture_stations = soil_moisture_stations[
+            soil_moisture_stations['utmx'].notna() & soil_moisture_stations['utmy'].notna()
+        ]
+
+        soil_coords = soil_moisture_stations[['utmx', 'utmy']].values
+        soil_station_ids = soil_moisture_stations['station_id'].values
+
+        # Build comprehensive nearest neighbors for each target station
+        comprehensive_neighbors = {}  # station_id -> list of {station_id, distance} sorted by distance
+
+        for target_station_id in self.target_stations:
+            target_row = self.stations_df[self.stations_df['station_id'] == target_station_id]
+            if target_row.empty:
+                continue
+
+            target_utmx = target_row['utmx'].values[0]
+            target_utmy = target_row['utmy'].values[0]
+
+            if pd.isna(target_utmx) or pd.isna(target_utmy):
+                continue
+
+            # Calculate distances to all soil moisture stations
+            distances = np.sqrt(
+                (soil_coords[:, 0] - target_utmx) ** 2 +
+                (soil_coords[:, 1] - target_utmy) ** 2
+            )
+
+            # Sort by distance, exclude self
+            sorted_indices = np.argsort(distances)
+            neighbors = []
+            for idx in sorted_indices:
+                if soil_station_ids[idx] != target_station_id:
+                    neighbors.append({
+                        'station_id': int(soil_station_ids[idx]),
+                        'distance': float(distances[idx]) / 1000.0  # Convert to km
+                    })
+
+            comprehensive_neighbors[target_station_id] = neighbors
+
+        # Find maximum number of nearby stations
+        max_nearby = max(len(neighbors) for neighbors in comprehensive_neighbors.values()) if comprehensive_neighbors else 0
         print(f"  Maximum nearby stations available: {max_nearby}")
 
         n_params = len(self.feature_params)
@@ -1648,8 +1688,8 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                     target_min = min(target_min, target_val)
                     target_max = max(target_max, target_val)
 
-            # Get ALL nearby stations for this target
-            nearby_list = self.nearest_stations_cache.get(target_station_id, [])
+            # Get ALL nearby stations for this target (from comprehensive computation)
+            nearby_list = comprehensive_neighbors.get(target_station_id, [])
 
             # Process each nearby slot
             for slot_idx, nearby_info in enumerate(nearby_list):
