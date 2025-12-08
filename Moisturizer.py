@@ -1546,6 +1546,185 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         print(f"  Target range: [{target_min:.2f}, {target_max:.2f}]")
         print(f"  Nearby slots: {self.n_nearest} (per-slot stats stored)")
 
+    def _compute_comprehensive_norm_stats_from_dense(self):
+        """
+        Compute normalization statistics for ALL possible nearby stations using dense arrays.
+
+        Unlike _compute_norm_stats_from_precomputed (which only computes stats for n_nearest),
+        this method computes per-slot stats for ALL available nearby stations. This enables:
+        - Non-augmented with any number of nearby stations: use per-slot stats directly
+        - Augmented with any n_nearby_available: aggregate across available slots
+
+        Requires dense_arrays to be loaded.
+        """
+        if self.dense_arrays is None:
+            raise ValueError("Dense arrays must be loaded to compute comprehensive norm stats")
+
+        print("Computing COMPREHENSIVE normalization stats from dense arrays...")
+        print("  (This computes stats for ALL possible nearby stations, not just n_nearest)")
+
+        # Find maximum number of nearby stations available across all target stations
+        max_nearby = 0
+        for station_id in self.target_stations:
+            nearby_list = self.nearest_stations_cache.get(station_id, [])
+            max_nearby = max(max_nearby, len(nearby_list))
+
+        print(f"  Maximum nearby stations available: {max_nearby}")
+
+        n_params = len(self.feature_params)
+        nearby_features_per_station = 1 + n_params + 1  # distance + weather params + soil moisture
+
+        # Target feature stats (same for any configuration)
+        target_feat_mins = np.full(n_params, np.inf, dtype=np.float32)
+        target_feat_maxs = np.full(n_params, -np.inf, dtype=np.float32)
+
+        # Per-slot nearby stats: [max_nearby, nearby_features_per_station]
+        nearby_slot_mins = np.full((max_nearby, nearby_features_per_station), np.inf, dtype=np.float32)
+        nearby_slot_maxs = np.full((max_nearby, nearby_features_per_station), -np.inf, dtype=np.float32)
+
+        # Target (soil moisture prediction target) stats
+        target_min = np.inf
+        target_max = -np.inf
+
+        # Invalid markers
+        invalid_markers = [-9999.0, self.missing_value]
+
+        # Get soil moisture feature index in dense array
+        soil_idx_in_dense = None
+        if self.soil_moisture_param in self.dense_arrays['feature_params']:
+            soil_idx_in_dense = self.dense_arrays['feature_params'].index(self.soil_moisture_param)
+
+        # Feature indices in dense array (weather params only, not soil)
+        feature_indices = []
+        for param in self.feature_params:
+            if param in self.dense_arrays['feature_params']:
+                feature_indices.append(self.dense_arrays['feature_params'].index(param))
+            else:
+                print(f"  Warning: Feature {param} not found in dense arrays")
+                feature_indices.append(None)
+
+        print(f"  Processing {len(self.sample_index)} samples...")
+
+        n_samples = len(self.sample_index)
+
+        for idx in tqdm(range(n_samples), desc="Computing comprehensive stats"):
+            sample_info = self.sample_index[idx]
+            target_station_id = sample_info['target_station']
+            end_date = sample_info['end_date']
+            start_date = sample_info['start_date']
+
+            # Get target station index in dense array
+            target_idx = self.dense_station_to_idx.get(target_station_id)
+            if target_idx is None:
+                continue
+
+            # Get date indices
+            date_indices = []
+            current_date = start_date
+            while current_date <= end_date:
+                date_idx = self.dense_date_to_idx.get(current_date)
+                if date_idx is not None:
+                    date_indices.append(date_idx)
+                current_date += pd.Timedelta(days=1)
+
+            if not date_indices:
+                continue
+
+            # Target station features (weather params)
+            for feat_idx, dense_idx in enumerate(feature_indices):
+                if dense_idx is None:
+                    continue
+                feat_data = self.dense_arrays['features'][target_idx, date_indices, dense_idx]
+                valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                if len(valid) > 0:
+                    target_feat_mins[feat_idx] = min(target_feat_mins[feat_idx], valid.min())
+                    target_feat_maxs[feat_idx] = max(target_feat_maxs[feat_idx], valid.max())
+
+            # Target value (soil moisture at end_date)
+            if soil_idx_in_dense is not None:
+                end_date_idx = date_indices[-1]
+                target_val = self.dense_arrays['features'][target_idx, end_date_idx, soil_idx_in_dense]
+                if target_val not in invalid_markers:
+                    target_min = min(target_min, target_val)
+                    target_max = max(target_max, target_val)
+
+            # Get ALL nearby stations for this target
+            nearby_list = self.nearest_stations_cache.get(target_station_id, [])
+
+            # Process each nearby slot
+            for slot_idx, nearby_info in enumerate(nearby_list):
+                nearby_station_id = nearby_info['station_id']
+                nearby_distance = nearby_info['distance']
+
+                nearby_idx = self.dense_station_to_idx.get(nearby_station_id)
+                if nearby_idx is None:
+                    continue
+
+                # Feature 0: Distance (constant for this station pair)
+                nearby_slot_mins[slot_idx, 0] = min(nearby_slot_mins[slot_idx, 0], nearby_distance)
+                nearby_slot_maxs[slot_idx, 0] = max(nearby_slot_maxs[slot_idx, 0], nearby_distance)
+
+                # Features 1 to n_params: Weather parameters
+                for feat_idx, dense_idx in enumerate(feature_indices):
+                    if dense_idx is None:
+                        continue
+                    feat_data = self.dense_arrays['features'][nearby_idx, date_indices, dense_idx]
+                    valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                    if len(valid) > 0:
+                        out_feat_idx = 1 + feat_idx  # +1 for distance
+                        nearby_slot_mins[slot_idx, out_feat_idx] = min(
+                            nearby_slot_mins[slot_idx, out_feat_idx], valid.min()
+                        )
+                        nearby_slot_maxs[slot_idx, out_feat_idx] = max(
+                            nearby_slot_maxs[slot_idx, out_feat_idx], valid.max()
+                        )
+
+                # Feature n_params+1: Soil moisture
+                if soil_idx_in_dense is not None:
+                    soil_data = self.dense_arrays['features'][nearby_idx, date_indices, soil_idx_in_dense]
+                    valid = soil_data[(soil_data != -1000.0) & (soil_data != -9999.0)]
+                    if len(valid) > 0:
+                        soil_feat_idx = 1 + n_params  # distance + n_params
+                        nearby_slot_mins[slot_idx, soil_feat_idx] = min(
+                            nearby_slot_mins[slot_idx, soil_feat_idx], valid.min()
+                        )
+                        nearby_slot_maxs[slot_idx, soil_feat_idx] = max(
+                            nearby_slot_maxs[slot_idx, soil_feat_idx], valid.max()
+                        )
+
+        # For stats computation, we don't need the full feature vector stats
+        # (those are specific to the precomputed dataset's n_nearest)
+        # Instead, we store comprehensive per-slot stats
+
+        self.norm_stats = {
+            # Target feature stats (same for any configuration)
+            'target_feature_mins': target_feat_mins,
+            'target_feature_maxs': target_feat_maxs,
+            'target_min': float(target_min) if target_min != np.inf else 0.0,
+            'target_max': float(target_max) if target_max != -np.inf else 1.0,
+            # Per-slot nearby stats: [max_nearby_slots, nearby_features_per_station]
+            'nearby_slot_mins': nearby_slot_mins,
+            'nearby_slot_maxs': nearby_slot_maxs,
+            'n_nearby_slots': max_nearby,
+            # Metadata
+            'n_params': n_params,
+            'n_base_samples': n_samples,
+            'seq_length': self.seq_length,
+            'feature_params': self.feature_params,
+        }
+
+        print(f"  Target feature min range: [{target_feat_mins.min():.2f}, {target_feat_mins.max():.2f}]")
+        print(f"  Target feature max range: [{target_feat_maxs.min():.2f}, {target_feat_maxs.max():.2f}]")
+        print(f"  Target (soil moisture) range: [{self.norm_stats['target_min']:.4f}, {self.norm_stats['target_max']:.4f}]")
+        print(f"  Nearby slots: {max_nearby} (comprehensive per-slot stats stored)")
+
+        # Show sample of per-slot distance ranges
+        print(f"  Distance ranges by slot:")
+        for slot in range(min(5, max_nearby)):
+            print(f"    Slot {slot}: [{nearby_slot_mins[slot, 0]:.1f}, {nearby_slot_maxs[slot, 0]:.1f}] km")
+        if max_nearby > 5:
+            print(f"    ... (showing first 5 of {max_nearby} slots)")
+
     def _apply_normalization(self, features, target, mask):
         """
         Normalize features and target to [-1, 1] range
@@ -1653,9 +1832,42 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 'targets': all_targets,
                 'masks': all_masks
             }
+            # First compute stats from precomputed data (needed for feature_mins/maxs to normalize)
             self._compute_norm_stats_from_precomputed()
+            precomputed_norm_stats = self.norm_stats.copy()
 
-            print(f"Normalizing all data...")
+            # If dense_arrays available, compute COMPREHENSIVE per-slot stats for ALL nearby stations
+            # This enables flexible use for any augmentation configuration
+            if self.dense_arrays is not None:
+                print(f"\nComputing COMPREHENSIVE per-slot stats for ALL nearby stations...")
+                self._compute_comprehensive_norm_stats_from_dense()
+                comprehensive_norm_stats = self.norm_stats
+
+                # Merge: use precomputed feature_mins/maxs (for normalization of this specific dataset)
+                # but use comprehensive nearby_slot stats (for flexible augmentation support)
+                self.norm_stats = {
+                    # From precomputed: for normalizing this specific dataset
+                    'feature_mins': precomputed_norm_stats['feature_mins'],
+                    'feature_maxs': precomputed_norm_stats['feature_maxs'],
+                    'target_min': comprehensive_norm_stats['target_min'],
+                    'target_max': comprehensive_norm_stats['target_max'],
+                    # From comprehensive: for flexible augmentation
+                    'target_feature_mins': comprehensive_norm_stats['target_feature_mins'],
+                    'target_feature_maxs': comprehensive_norm_stats['target_feature_maxs'],
+                    'nearby_slot_mins': comprehensive_norm_stats['nearby_slot_mins'],
+                    'nearby_slot_maxs': comprehensive_norm_stats['nearby_slot_maxs'],
+                    'n_nearby_slots': comprehensive_norm_stats['n_nearby_slots'],
+                    # Metadata
+                    'n_params': comprehensive_norm_stats['n_params'],
+                    'n_base_samples': comprehensive_norm_stats['n_base_samples'],
+                    'seq_length': comprehensive_norm_stats['seq_length'],
+                    'feature_params': comprehensive_norm_stats['feature_params'],
+                }
+            else:
+                print("  Warning: Dense arrays not available, using precomputed stats only")
+                print("  (Per-slot stats will only cover n_nearest stations, not all available)")
+
+            print(f"\nNormalizing all data...")
             # Normalize all samples in-place
             for idx in tqdm(range(len(self.sample_index)), desc="Normalizing data"):
                 all_features[idx], all_targets[idx] = self._apply_normalization(
