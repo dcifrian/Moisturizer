@@ -14,7 +14,7 @@ import json
 import time
 from pathlib import Path
 import zipfile
-
+from tqdm import tqdm
 from augmented_live import AugmentedLiveDataset
 
 # Model loader - optional, only needed for inference
@@ -2425,7 +2425,7 @@ def build_dense_feature_array(
 
         print(f"    ✓ Filled coordinate features")
     # Vectorized approach - MUCH faster than iterrows()
-    from tqdm import tqdm
+
 
     # Pre-filter to only include stations we care about (soil moisture stations)
     timeseries_filtered = timeseries_df[

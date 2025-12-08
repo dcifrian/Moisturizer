@@ -1342,7 +1342,6 @@ def create_moisture_map(
     real_moisture_only=False,  # If True, only use real moisture stations for the map
     all_maps=False,  # If True, create all map variants efficiently (reuses data)
     n_nearby=4,  # Number of nearby stations used in the model's input
-    augmented=False,  # Whether the model was trained with augmentation
     n_nearby_available=None  # For augmented: how many nearby stations were available for permutations
 ):
     """
@@ -1365,10 +1364,10 @@ def create_moisture_map(
                   - {base}_moisture_map_realonly.png (real sensor data only)
                   - {base}_precipitation.png (cumulative precipitation)
                   - {base}_water_balance.png (cumulative water balance)
-        augmented: Whether the model was trained with augmentation (permuted nearby stations)
         n_nearby_available: For augmented models, how many nearby stations were available
-                           for permutations during training (required if augmented=True)
+                           for permutations during training
     """
+    augmented= n_nearby_available > n_nearby
     if hide_markers is None:
         hide_markers = set()
 
@@ -2317,9 +2316,7 @@ if __name__ == "__main__":
                        help='Create all map variants efficiently (moisture, novirtual, realonly, precipitation, water_balance)')
     parser.add_argument('--n-nearby', type=int, default=4,
                        help='Number of nearby stations used in model input (default: 4)')
-    parser.add_argument('--augmented', action='store_true',
-                       help='Model was trained with augmentation (permuted nearby stations)')
-    parser.add_argument('--n-nearby-available', type=int, default=None,
+    parser.add_argument('--n-nearby-available', type=int, default=5,
                        help='For augmented models: how many nearby stations were available for permutations')
 
     args = parser.parse_args()
@@ -2341,6 +2338,5 @@ if __name__ == "__main__":
         real_moisture_only=args.real_moisture_only,
         all_maps=args.all_maps,
         n_nearby=args.n_nearby,
-        augmented=args.augmented,
         n_nearby_available=args.n_nearby_available
     )
