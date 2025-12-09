@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -23,6 +24,11 @@ from pathlib import Path
 
 from Moisturizer import MeteoGaliciaCollector, SoilMoistureSequenceDataset
 from model_loader import load_model
+
+# Constants for distance calculations
+DEG_TO_KM = 111.0  # Approximate km per degree latitude
+IMPUTE_DISTANCE_THRESHOLD = 1.05  # 5% tolerance for including additional nearby stations
+OFFENDER_DISTANCE_KM = 1.0  # Max km distance to consider when debugging prediction offenders
 
 
 def expand_canonical_to_augmented_stats(canonical_stats, n_params, n_nearby_in_features,
@@ -1028,10 +1034,10 @@ def build_sequence_for_virtual_station(
                     mask[t, f_idx] = True
                 else:
                     # Nearest has missing data - check if we should impute from others
-                    # Allow imputation if any other station is within 5% of nearest distance
+                    # Allow imputation if any other station is within threshold of nearest distance
                     allow_impute = False
                     for i in range(1, len(interpolation_stations)):
-                        if interpolation_stations[i]['distance'] <= nearest_distance * 1.05:
+                        if interpolation_stations[i]['distance'] <= nearest_distance * IMPUTE_DISTANCE_THRESHOLD:
                             allow_impute = True
                             break
                     
@@ -1183,19 +1189,16 @@ def debug_find_worst_offenders(
     pred_coords = np.array([[p['longitude'], p['latitude']] for p in predicted_results])
     pred_moisture = np.array([p['moisture'] for p in predicted_results])
     pred_ids = [p['station_id'] for p in predicted_results]
-    
-    # Use approximate conversion: 1 degree ≈ 111km
-    deg_to_km = 111.0
-    
+
     offenders = []
     for i, vr in enumerate(virtual_results):
         # Find nearest predicted station
         dists_deg = np.sqrt(np.sum((pred_coords - virtual_coords[i])**2, axis=1))
         nearest_idx = np.argmin(dists_deg)
-        dist_km = dists_deg[nearest_idx] * deg_to_km
-        
-        # Only consider if within 1km
-        if dist_km > 1.0:
+        dist_km = dists_deg[nearest_idx] * DEG_TO_KM
+
+        # Only consider if within threshold distance
+        if dist_km > OFFENDER_DISTANCE_KM:
             continue
         
         moisture_diff = abs(virtual_moisture[i] - pred_moisture[nearest_idx])
@@ -1330,7 +1333,7 @@ def create_moisture_map(
     device='cuda',
     include_weather_maps=False,
     virtual_grid_size=100,  # Default to 100x100 grid
-    auto_range=False,  # If False, use fixed range 0.07-0.4
+    moisture_range=(0.07, 0.40),  # Fixed range tuple or 'auto' for data-based range
     hide_markers=None,  # Set of markers to hide: {'real', 'predicted', 'virtual'}
     real_moisture_only=False,  # If True, only use real moisture stations for the map
     all_maps=False,  # If True, create all map variants efficiently (reuses data)
@@ -1348,7 +1351,7 @@ def create_moisture_map(
         include_weather_maps: If True, also create cumulative precipitation and water balance maps
         virtual_grid_size: If set, create a NxN grid of virtual stations with interpolated
                           features and model-predicted soil moisture (e.g. 100 for 100 by 100 grid)
-        auto_range: If True, auto-range colorbar. If False, use fixed 0.07-0.4 range
+        moisture_range: Tuple (min, max) for colorbar range, or 'auto' for data-based range
         hide_markers: Set of marker types to hide: 'real', 'predicted', 'virtual'
         real_moisture_only: If True, only use real moisture stations (skip predictions)
         all_maps: If True, create all map variants efficiently by reusing data:
@@ -1742,7 +1745,7 @@ def create_moisture_map(
         create_visualization(
             results_df, target_date, full_file,
             coastline_points, galicia_land,
-            auto_range=auto_range,
+            moisture_range=moisture_range,
             hide_markers=hide_markers
         )
         print(f"✓ Full map saved to {full_file}")
@@ -1755,7 +1758,7 @@ def create_moisture_map(
         create_visualization(
             novirtual_df, target_date, novirtual_file,
             coastline_points, galicia_land,
-            auto_range=auto_range,
+            moisture_range=moisture_range,
             hide_markers=hide_markers
         )
         print(f"✓ No-virtual map saved to {novirtual_file}")
@@ -1767,7 +1770,7 @@ def create_moisture_map(
         create_visualization(
             realonly_df, target_date, realonly_file,
             coastline_points, galicia_land,
-            auto_range=auto_range,
+            moisture_range=moisture_range,
             hide_markers=hide_markers
         )
         print(f"✓ Real-only map saved to {realonly_file}")
@@ -1819,7 +1822,7 @@ def create_moisture_map(
         create_visualization(
             results_df, target_date, output_file,
             coastline_points, galicia_land,
-            auto_range=auto_range,
+            moisture_range=moisture_range,
             hide_markers=hide_markers
         )
         print(f"\n✓ Map saved to {output_file}")
@@ -2079,11 +2082,11 @@ def create_weather_visualization(results_df, value_column, target_date, output_f
 
 
 def create_visualization(results_df, target_date, output_file, coastline_points=None, galicia_land=None,
-                         auto_range=False, hide_markers=None):
+                         moisture_range=(0.07, 0.40), hide_markers=None):
     """Create beautiful moisture map visualization overlaid on Galicia map
-    
+
     Args:
-        auto_range: If True, auto-range colorbar. If False, use fixed 0.07-0.4 range
+        moisture_range: Tuple (min, max) for colorbar range, or 'auto' for data-based range
         hide_markers: Set of marker types to hide: 'real', 'predicted', 'virtual'
     """
     import matplotlib.pyplot as plt
@@ -2093,7 +2096,7 @@ def create_visualization(results_df, target_date, output_file, coastline_points=
     import numpy as np
     import contextily as ctx
     from shapely.geometry import Point
-    
+
     if hide_markers is None:
         hide_markers = set()
 
@@ -2103,14 +2106,13 @@ def create_visualization(results_df, target_date, output_file, coastline_points=
     colors = ['#8B4513', '#D2691E', '#F4A460', '#90EE90', '#32CD32', '#228B22', '#4682B4', '#1E90FF']
     n_bins = 100
     cmap = LinearSegmentedColormap.from_list('moisture', colors, N=n_bins)
-    
+
     # Determine value range for colorbar
-    if auto_range:
+    if moisture_range == 'auto':
         vmin = results_df['moisture'].min()
         vmax = results_df['moisture'].max()
     else:
-        vmin = 0.07
-        vmax = 0.40
+        vmin, vmax = moisture_range
 
     # Get coordinate bounds from Galicia boundary (consistent across all maps)
     # Fall back to station data if boundary not available
@@ -2299,8 +2301,8 @@ if __name__ == "__main__":
                        help='Also create cumulative precipitation and water balance maps')
     parser.add_argument('--virtual-grid', type=int, default=None,
                        help='Create NxN grid of virtual stations (e.g., 100 for 100x100 grid)')
-    parser.add_argument('--auto-range', action='store_true',
-                       help='Auto-range moisture colorbar based on data (default: fixed 0.07-0.4)')
+    parser.add_argument('--range', type=str, default='0.07,0.40',
+                       help='Moisture colorbar range: "MIN,MAX" (default: 0.07,0.40) or "auto" for data-based range')
     parser.add_argument('--hide-markers', type=str, default=None,
                        help='Comma-separated list of markers to hide: real,predicted,virtual (e.g., --hide-markers predicted,virtual)')
     parser.add_argument('--real-moisture-only', action='store_true',
@@ -2313,11 +2315,22 @@ if __name__ == "__main__":
                        help='For augmented models: how many nearby stations were available for permutations')
 
     args = parser.parse_args()
-    
+
     # Parse hide-markers into a set
     hide_markers = set()
     if args.hide_markers:
         hide_markers = set(m.strip().lower() for m in args.hide_markers.split(','))
+
+    # Parse --range argument: either "auto" or "min,max"
+    if args.range.lower() == 'auto':
+        moisture_range = 'auto'
+    else:
+        try:
+            parts = args.range.split(',')
+            moisture_range = (float(parts[0]), float(parts[1]))
+        except (ValueError, IndexError):
+            print(f"Error: Invalid --range format '{args.range}'. Use 'auto' or 'MIN,MAX' (e.g., '0.07,0.40')")
+            sys.exit(1)
 
     create_moisture_map(
         model_path=args.model,
@@ -2326,7 +2339,7 @@ if __name__ == "__main__":
         device=args.device,
         include_weather_maps=args.include_weather_maps,
         virtual_grid_size=args.virtual_grid,
-        auto_range=args.auto_range,
+        moisture_range=moisture_range,
         hide_markers=hide_markers,
         real_moisture_only=args.real_moisture_only,
         all_maps=args.all_maps,

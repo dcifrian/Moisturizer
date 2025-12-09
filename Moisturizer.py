@@ -5,6 +5,7 @@ with focus on soil moisture prediction from nearby stations
 """
 
 import os
+import argparse
 import requests
 import pandas as pd
 import numpy as np
@@ -34,6 +35,14 @@ except ImportError:
     TORCH_AVAILABLE = False
     print("Warning: PyTorch not available. SoilMoistureSequenceDataset will not work.")
     print("         Data collection functionality will still work normally.")
+
+# Invalid/missing data markers
+INVALID_MARKER_API = -9999.0       # Value returned by MeteoGalicia API for missing data
+INVALID_MARKER_MISSING = -1000.0   # Value we use to mark missing/unavailable data
+NORMALIZED_INVALID_MARKER = -2.0   # Value used after normalization (outside [-1, 1] range)
+
+# Default parameters
+DEFAULT_COVERAGE_THRESHOLD = 0.25  # Minimum data coverage for a parameter to be included
 
 
 class MeteoGaliciaCollector:
@@ -917,7 +926,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             target_stations: Optional[List[int]] = None,
             feature_params: Optional[List[str]] = None,
             soil_moisture_param: str = "HS_CV_AVG_-0.2m",
-            missing_value: float = -1000.0,
+            missing_value: float = INVALID_MARKER_MISSING,
             precomputed_path: Optional[str] = None,
             normalize: bool = True,
             norm_stats_path: Optional[str] = None,
@@ -1228,7 +1237,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 target_val = soil_moisture_lookup.get(key)
 
                 # Skip if no value or if value is invalid marker
-                if target_val is None or target_val == -9999.0 or target_val == self.missing_value or pd.isna(target_val):
+                if target_val is None or target_val == INVALID_MARKER_API or target_val == self.missing_value or pd.isna(target_val):
                     continue
 
                 # This sample has valid target and enough historical data
@@ -1489,7 +1498,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         nearby_slot_maxs = np.full((self.n_nearest, nearby_features_per_station), -np.inf, dtype=np.float32)
 
         # Invalid markers to exclude
-        invalid_markers = [-9999.0, self.missing_value]
+        invalid_markers = [INVALID_MARKER_API, self.missing_value]
 
         # Process in batches to save memory
         batch_size = 1000
@@ -1518,7 +1527,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             target_feats = features_batch[:, :, :n_params]
             for feat_idx in range(n_params):
                 feat_data = target_feats[:, :, feat_idx].ravel()
-                valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                valid = feat_data[(feat_data != INVALID_MARKER_MISSING) & (feat_data != INVALID_MARKER_API)]
                 if len(valid) > 0:
                     target_feat_mins[feat_idx] = min(target_feat_mins[feat_idx], valid.min())
                     target_feat_maxs[feat_idx] = max(target_feat_maxs[feat_idx], valid.max())
@@ -1531,7 +1540,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             for slot_idx in range(self.n_nearest):
                 for feat_idx in range(nearby_features_per_station):
                     feat_data = nearby_reshaped[:, :, slot_idx, feat_idx].ravel()
-                    valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                    valid = feat_data[(feat_data != INVALID_MARKER_MISSING) & (feat_data != INVALID_MARKER_API)]
                     if len(valid) > 0:
                         nearby_slot_mins[slot_idx, feat_idx] = min(nearby_slot_mins[slot_idx, feat_idx], valid.min())
                         nearby_slot_maxs[slot_idx, feat_idx] = max(nearby_slot_maxs[slot_idx, feat_idx], valid.max())
@@ -1652,7 +1661,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         target_max = -np.inf
 
         # Invalid markers
-        invalid_markers = [-9999.0, self.missing_value]
+        invalid_markers = [INVALID_MARKER_API, self.missing_value]
 
         # Get soil moisture feature index in dense array
         soil_idx_in_dense = None
@@ -1700,7 +1709,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 if dense_idx is None:
                     continue
                 feat_data = self.dense_arrays['features'][target_idx, date_indices, dense_idx]
-                valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                valid = feat_data[(feat_data != INVALID_MARKER_MISSING) & (feat_data != INVALID_MARKER_API)]
                 if len(valid) > 0:
                     target_feat_mins[feat_idx] = min(target_feat_mins[feat_idx], valid.min())
                     target_feat_maxs[feat_idx] = max(target_feat_maxs[feat_idx], valid.max())
@@ -1734,7 +1743,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                     if dense_idx is None:
                         continue
                     feat_data = self.dense_arrays['features'][nearby_idx, date_indices, dense_idx]
-                    valid = feat_data[(feat_data != -1000.0) & (feat_data != -9999.0)]
+                    valid = feat_data[(feat_data != INVALID_MARKER_MISSING) & (feat_data != INVALID_MARKER_API)]
                     if len(valid) > 0:
                         out_feat_idx = 1 + feat_idx  # +1 for distance
                         nearby_slot_mins[slot_idx, out_feat_idx] = min(
@@ -1747,7 +1756,7 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                 # Feature n_params+1: Soil moisture
                 if soil_idx_in_dense is not None:
                     soil_data = self.dense_arrays['features'][nearby_idx, date_indices, soil_idx_in_dense]
-                    valid = soil_data[(soil_data != -1000.0) & (soil_data != -9999.0)]
+                    valid = soil_data[(soil_data != INVALID_MARKER_MISSING) & (soil_data != INVALID_MARKER_API)]
                     if len(valid) > 0:
                         soil_feat_idx = 1 + n_params  # distance + n_params
                         nearby_slot_mins[slot_idx, soil_feat_idx] = min(
@@ -1795,10 +1804,10 @@ class SoilMoistureSequenceDataset(_BaseDataset):
     def _apply_normalization(self, features, target, mask):
         """
         Normalize features and target to [-1, 1] range
-        Invalid markers (-9999, missing_value) are changed to -2
+        Invalid markers are changed to NORMALIZED_INVALID_MARKER (-2.0)
         """
-        invalid_markers = [-9999.0, self.missing_value]
-        normalized_invalid_marker = -2.0
+        invalid_markers = [INVALID_MARKER_API, self.missing_value]
+        normalized_invalid_marker = NORMALIZED_INVALID_MARKER
 
         # Normalize features
         for feat_idx in range(features.shape[1]):
@@ -2371,7 +2380,7 @@ def build_dense_feature_array(
     stations_df: pd.DataFrame,
     feature_params: List[str],
     soil_moisture_param: str = "HS_CV_AVG_-0.2m",
-    missing_value: float = -1000.0
+    missing_value: float = INVALID_MARKER_MISSING
 ) -> Tuple[np.ndarray, np.ndarray, List[int], pd.DatetimeIndex]:
     """
     Build dense feature array for all stations × all dates × all parameters
@@ -2553,7 +2562,8 @@ def regenerate_nearest_stations(n_nearest: Optional[int] = None, data_dir: str =
 
 
 def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[datetime] = None,
-                 force_refresh: bool = False, n_nearest: Optional[int] = None):
+                 force_refresh: bool = False, n_nearest: Optional[int] = None,
+                 coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD):
     """
     Build the complete dataset with optimizations
 
@@ -2676,7 +2686,7 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
     coverage_dict, filtered_params = collector.analyze_parameter_coverage(
         timeseries_df=timeseries_df,
         stations_df=stations_df,
-        coverage_threshold=0.25,
+        coverage_threshold=coverage_threshold,
         soil_moisture_param="HS_CV_AVG_-0.2m",
         add_coordinate_features=True
     )
@@ -2697,7 +2707,7 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
         stations_df=stations_df,
         feature_params=filtered_params,
         soil_moisture_param="HS_CV_AVG_-0.2m",
-        missing_value=-1000.0
+        missing_value=INVALID_MARKER_MISSING
     )
 
     # Save dense arrays
@@ -2769,7 +2779,7 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
     )
     return train_ds, val_ds, test_ds
 
-def precomputeDataset():
+def precomputeDataset(coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD):
     """Precompute dataset sequences and save to disk for fast loading"""
     collector = MeteoGaliciaCollector()
 
@@ -2781,7 +2791,7 @@ def precomputeDataset():
     print("=" * 60)
 
     # Get filtered parameters
-    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=0.25)
+    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=coverage_threshold)
 
     if not filtered_params:
         print("\n✗ No parameters passed the threshold!")
@@ -2813,21 +2823,23 @@ def precomputeDataset():
     print(f"✓ Normalization stats saved to: {norm_stats_path}")
     print(f"\nYou can now use loadDataset() for fast loading!")
 
-def loadDataset(use_precomputed=True, normalize=True , precomputed_path = None, norm_stats_path = None):
+def loadDataset(use_precomputed=True, normalize=True, precomputed_path=None, norm_stats_path=None,
+                coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD):
     """
     Load PyTorch Dataset
 
     Args:
         use_precomputed: If True, load from precomputed file (much faster)
         normalize: If True, normalize data to [-1, 1] range
+        coverage_threshold: Minimum data coverage for a parameter to be included
     """
-    collector = MeteoGaliciaCollector() # Does nothing, just for the paths
+    collector = MeteoGaliciaCollector()  # Does nothing, just for the paths
     print("\n" + "=" * 60)
     print("STEP 1: Loading PyTorch Dataset")
     print("=" * 60)
 
     # Get filtered parameters
-    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=0.25)
+    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=coverage_threshold)
 
     if not filtered_params:
         print("\n✗ No parameters passed the threshold!")
@@ -2882,14 +2894,14 @@ def loadDataset(use_precomputed=True, normalize=True , precomputed_path = None, 
     )
     return train_ds, val_ds, test_ds
 
-def loadDatasetLiveAugmented():
-    collector = MeteoGaliciaCollector() # Does nothing, just for the paths
+def loadDatasetLiveAugmented(coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD):
+    collector = MeteoGaliciaCollector()  # Does nothing, just for the paths
     print("\n" + "=" * 60)
     print("STEP 1: Loading PyTorch Dataset")
     print("=" * 60)
 
     # Get filtered parameters
-    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=0.25)
+    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=coverage_threshold)
 
     if not filtered_params:
         print("\n✗ No parameters passed the threshold!")
@@ -2919,57 +2931,98 @@ def loadDatasetLiveAugmented():
     )
     return train_ds, val_ds, test_ds
 
-if __name__ == "__main2__":
-    buildDataset()
-
-# Example usage
 if __name__ == "__main__":
-    # Check if precomputed data exists
+    parser = argparse.ArgumentParser(
+        description='MeteoGalicia Soil Moisture Dataset Builder and Trainer',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python Moisturizer.py --build                    # Build dataset with default settings
+  python Moisturizer.py --train                    # Train model (builds if needed)
+  python Moisturizer.py --build --coverage 0.3     # Build with 30% coverage threshold
+  python Moisturizer.py --train --epochs 50        # Train for 50 epochs
+        """
+    )
+    parser.add_argument('--build', action='store_true',
+                       help='Build/rebuild the dataset')
+    parser.add_argument('--train', action='store_true',
+                       help='Train the model (will build dataset if needed)')
+    parser.add_argument('--coverage', type=float, default=DEFAULT_COVERAGE_THRESHOLD,
+                       help=f'Minimum data coverage threshold for parameters (default: {DEFAULT_COVERAGE_THRESHOLD})')
+    parser.add_argument('--epochs', type=int, default=20,
+                       help='Number of training epochs (default: 20)')
+    parser.add_argument('--batch-size', type=int, default=512,
+                       help='Training batch size (default: 512)')
+    parser.add_argument('--lr', type=float, default=4.1e-4,
+                       help='Initial learning rate (default: 4.1e-4)')
+
+    args = parser.parse_args()
+
+    # If no action specified, show help
+    if not args.build and not args.train:
+        parser.print_help()
+        print("\nNo action specified. Use --build to build dataset or --train to train model.")
+        exit(0)
+
     collector = MeteoGaliciaCollector()
     precomputed_path = collector.data_dir / "precomputed_sequences_augmented"
-    norm_stats_path = collector.data_dir / "normalization_stats.npz"  # Canonical stats
     features_file = precomputed_path / "features.npy"
 
-    if not features_file.exists():
+    if args.build:
         print("\n" + "=" * 60)
-        print("FIRST TIME SETUP: Precomputing dataset sequences")
+        print("BUILDING DATASET")
         print("=" * 60)
-        print("This will take ~30-60 minutes but only needs to be done once!")
-        print("Subsequent runs will be MUCH faster (10,000+ samples/sec)")
-        print("=" * 60)
-        input("Press Enter to start precomputation (or Ctrl+C to cancel)...")
-        precomputeDataset()
-        print("\n" + "=" * 60)
-        print("✓ Precomputation complete! Starting training...")
-        print("=" * 60)
+        print(f"Coverage threshold: {args.coverage}")
+        buildDataset(coverage_threshold=args.coverage)
 
-    #train_ds, val_ds, _ = loadDataset(use_precomputed=True, normalize=True,precomputed_path=precomputed_path,norm_stats_path=norm_stats_path)
-    train_ds, val_ds, _ = loadDatasetLiveAugmented()
+    if args.train:
+        # Check if precomputed data exists
+        if not features_file.exists():
+            print("\n" + "=" * 60)
+            print("FIRST TIME SETUP: Precomputing dataset sequences")
+            print("=" * 60)
+            print("This will take ~30-60 minutes but only needs to be done once!")
+            print("Subsequent runs will be MUCH faster (10,000+ samples/sec)")
+            print("=" * 60)
+            input("Press Enter to start precomputation (or Ctrl+C to cancel)...")
+            precomputeDataset(coverage_threshold=args.coverage)
+            print("\n" + "=" * 60)
+            print("✓ Precomputation complete! Starting training...")
+            print("=" * 60)
 
-    # After loading dataset, check one sample:
-    sample = train_ds[0]
-    features = sample['features']  # [64, total_features]
-    target = sample['target']  # [1]
+        train_ds, val_ds, _ = loadDatasetLiveAugmented(coverage_threshold=args.coverage)
 
-    print(f"\n=== Data Leakage Check ===")
-    print(f"Feature shape: {features.shape}")
-    print(f"Target value: {target.item():.4f}")
+        # Data leakage check
+        sample = train_ds[0]
+        features = sample['features']
+        target = sample['target']
 
-    # Check if target value appears anywhere in the target station features. Nearby stations may happen to have equal or similar values but that is ok.
-    # (it shouldn't if there's no leakage!)
-    features_np = features.numpy()
-    matches = (np.abs(features_np - target.item())[:,:26] < 0.001).sum()
-    print(f"Features matching target value: {matches}")
+        print(f"\n=== Data Leakage Check ===")
+        print(f"Feature shape: {features.shape}")
+        print(f"Target value: {target.item():.4f}")
 
-    if matches > 0:
-        print("⚠️  LEAKAGE DETECTED: Target value found in features!")
-    else:
-        print("✓ No obvious leakage detected")
+        features_np = features.numpy()
+        matches = (np.abs(features_np - target.item())[:, :26] < 0.001).sum()
+        print(f"Features matching target value: {matches}")
 
-    # Check last timestep specifically (most likely leak point)
-    last_timestep = features_np[-1, :]
-    last_matches = (np.abs(last_timestep - target.item()) < 0.001).sum()
-    print(f"Last timestep matches: {last_matches}")
+        if matches > 0:
+            print("⚠️  LEAKAGE DETECTED: Target value found in features!")
+        else:
+            print("✓ No obvious leakage detected")
 
-    trololo = load_model()
-    trololo.training_loop(train_data=train_ds,val_data=val_ds,lr=4.1e-4,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=20,batch_size=512,transfer=0)
+        last_timestep = features_np[-1, :]
+        last_matches = (np.abs(last_timestep - target.item()) < 0.001).sum()
+        print(f"Last timestep matches: {last_matches}")
+
+        # Train
+        model = load_model()
+        model.training_loop(
+            train_data=train_ds,
+            val_data=val_ds,
+            lr=args.lr,
+            lr_mid=args.lr * 0.975,  # Slightly lower mid-training LR
+            lr_min=3e-5,
+            n_epochs=args.epochs,
+            batch_size=args.batch_size,
+            transfer=0
+        )
