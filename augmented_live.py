@@ -598,27 +598,29 @@ class AugmentedLiveDataset(Dataset):
                 self.target_min = float(target_min_val)
                 self.target_max = float(target_max_val)
 
-            # Check for new per-slot format vs old format
-            if 'nearby_slot_mins' in stats:
-                # New per-slot format: [n_nearby_slots, nearby_features_per_station]
-                nearby_slot_mins = np.asarray(stats['nearby_slot_mins'])
-                nearby_slot_maxs = np.asarray(stats['nearby_slot_maxs'])
-                n_slots_available = nearby_slot_mins.shape[0]
+            # Require new per-slot format
+            if 'nearby_slot_mins' not in stats:
+                raise ValueError(
+                    "Stats file missing 'nearby_slot_mins' (old format not supported). "
+                    "Regenerate the base dataset with buildDataset() to create new format stats."
+                )
 
-                if self.n_nearby_available > n_slots_available:
-                    print(f"   Warning: n_nearby_available ({self.n_nearby_available}) > available slots in stats ({n_slots_available})")
-                    return False
+            # New per-slot format: [n_nearby_slots, nearby_features_per_station]
+            nearby_slot_mins = np.asarray(stats['nearby_slot_mins'])
+            nearby_slot_maxs = np.asarray(stats['nearby_slot_maxs'])
+            n_slots_available = nearby_slot_mins.shape[0]
 
-                # For augmented: aggregate stats across available slots
-                # (any slot can receive data from any of the available stations)
-                nearby_feature_mins = nearby_slot_mins[:self.n_nearby_available, :].min(axis=0)
-                nearby_feature_maxs = nearby_slot_maxs[:self.n_nearby_available, :].max(axis=0)
-                print(f"   Using per-slot stats, aggregating {self.n_nearby_available} slots for augmentation")
-            else:
-                # Old format: single set of nearby stats (pre-aggregated)
-                nearby_feature_mins = stats['nearby_feature_mins']
-                nearby_feature_maxs = stats['nearby_feature_maxs']
-                print(f"   Warning: Using old stats format (single nearby stats). Consider regenerating dataset.")
+            if self.n_nearby_available > n_slots_available:
+                raise ValueError(
+                    f"n_nearby_available ({self.n_nearby_available}) > available slots in stats ({n_slots_available}). "
+                    f"Regenerate nearest_stations.csv with more neighbors using regenerate_nearest_stations()."
+                )
+
+            # For augmented: aggregate stats across available slots
+            # (any slot can receive data from any of the available stations)
+            nearby_feature_mins = nearby_slot_mins[:self.n_nearby_available, :].min(axis=0)
+            nearby_feature_maxs = nearby_slot_maxs[:self.n_nearby_available, :].max(axis=0)
+            print(f"   Using per-slot stats, aggregating {self.n_nearby_available} slots for augmentation")
 
             # Expand to current augmented layout
             self.feature_mins = np.full(self.n_output_features, np.inf, dtype=np.float32)
@@ -640,9 +642,10 @@ class AugmentedLiveDataset(Dataset):
             print(f"   ✓ Loaded stats from {path} ({int(stats['n_base_samples'][0]):,} samples)")
             return True
 
+        except KeyError as e:
+            raise ValueError(f"Stats file missing required key {e}. Regenerate with buildDataset().")
         except Exception as e:
-            print(f"   Warning: Could not load stats: {e}")
-            return False
+            raise ValueError(f"Could not load stats from {path}: {e}")
 
     def __len__(self) -> int:
         """Total number of augmented samples"""

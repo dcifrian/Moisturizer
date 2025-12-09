@@ -421,24 +421,27 @@ def generate_all_augmentations_sequential(
                 target_max = _safe_scalar_from_array(stats['target_max'])
 
                 # Check for new per-slot format vs old format
-                if 'nearby_slot_mins' in stats:
-                    # New per-slot format: [n_nearby_slots, nearby_features_per_station]
-                    nearby_slot_mins = np.asarray(stats['nearby_slot_mins'])
-                    nearby_slot_maxs = np.asarray(stats['nearby_slot_maxs'])
-                    n_slots_available = nearby_slot_mins.shape[0]
+                if 'nearby_slot_mins' not in stats:
+                    raise ValueError(
+                        "Stats file missing 'nearby_slot_mins' (old format not supported). "
+                        "Regenerate the base dataset with buildDataset() to create new format stats."
+                    )
 
-                    if n_nearby_available > n_slots_available:
-                        raise ValueError(f"n_nearby_available ({n_nearby_available}) > available slots in stats ({n_slots_available})")
+                # New per-slot format: [n_nearby_slots, nearby_features_per_station]
+                nearby_slot_mins = np.asarray(stats['nearby_slot_mins'])
+                nearby_slot_maxs = np.asarray(stats['nearby_slot_maxs'])
+                n_slots_available = nearby_slot_mins.shape[0]
 
-                    # For augmented: aggregate stats across available slots
-                    nearby_feature_mins = nearby_slot_mins[:n_nearby_available, :].min(axis=0)
-                    nearby_feature_maxs = nearby_slot_maxs[:n_nearby_available, :].max(axis=0)
-                    print(f"   Using per-slot stats, aggregating {n_nearby_available} slots for augmentation")
-                else:
-                    # Old format: single set of nearby stats (pre-aggregated)
-                    nearby_feature_mins = stats['nearby_feature_mins']
-                    nearby_feature_maxs = stats['nearby_feature_maxs']
-                    print(f"   Warning: Using old stats format. Consider regenerating dataset.")
+                if n_nearby_available > n_slots_available:
+                    raise ValueError(
+                        f"n_nearby_available ({n_nearby_available}) > available slots in stats ({n_slots_available}). "
+                        f"Regenerate nearest_stations.csv with more neighbors using regenerate_nearest_stations()."
+                    )
+
+                # For augmented: aggregate stats across available slots
+                nearby_feature_mins = nearby_slot_mins[:n_nearby_available, :].min(axis=0)
+                nearby_feature_maxs = nearby_slot_maxs[:n_nearby_available, :].max(axis=0)
+                print(f"   Using per-slot stats, aggregating {n_nearby_available} slots for augmentation")
 
                 # Expand to augmented layout
                 feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
@@ -458,12 +461,10 @@ def generate_all_augmentations_sequential(
                 n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
                 print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
             else:
-                # Fallback: use per-slot stats (old format)
-                print(f"   Warning: Old stats format, using per-slot stats")
-                feature_mins = stats['feature_mins']
-                feature_maxs = stats['feature_maxs']
-                target_min = _safe_scalar_from_array(stats['target_min'])
-                target_max = _safe_scalar_from_array(stats['target_max'])
+                raise ValueError(
+                    "Stats file missing 'target_feature_mins' (old format not supported). "
+                    "Regenerate the base dataset with buildDataset() to create new format stats."
+                )
 
             base_stats = {
                 'feature_mins': feature_mins,
@@ -903,24 +904,27 @@ def generate_all_augmentations_batched(
                 target_max = _safe_scalar_from_array(stats['target_max'])
 
                 # Check for new per-slot format vs old format
-                if 'nearby_slot_mins' in stats:
-                    # New per-slot format: [n_nearby_slots, nearby_features_per_station]
-                    nearby_slot_mins = np.asarray(stats['nearby_slot_mins'])
-                    nearby_slot_maxs = np.asarray(stats['nearby_slot_maxs'])
-                    n_slots_available = nearby_slot_mins.shape[0]
+                if 'nearby_slot_mins' not in stats:
+                    raise ValueError(
+                        "Stats file missing 'nearby_slot_mins' (old format not supported). "
+                        "Regenerate the base dataset with buildDataset() to create new format stats."
+                    )
 
-                    if n_nearby_available > n_slots_available:
-                        raise ValueError(f"n_nearby_available ({n_nearby_available}) > available slots in stats ({n_slots_available})")
+                # New per-slot format: [n_nearby_slots, nearby_features_per_station]
+                nearby_slot_mins = np.asarray(stats['nearby_slot_mins'])
+                nearby_slot_maxs = np.asarray(stats['nearby_slot_maxs'])
+                n_slots_available = nearby_slot_mins.shape[0]
 
-                    # For augmented: aggregate stats across available slots
-                    nearby_feature_mins = nearby_slot_mins[:n_nearby_available, :].min(axis=0)
-                    nearby_feature_maxs = nearby_slot_maxs[:n_nearby_available, :].max(axis=0)
-                    print(f"   Using per-slot stats, aggregating {n_nearby_available} slots for augmentation")
-                else:
-                    # Old format: single set of nearby stats (pre-aggregated)
-                    nearby_feature_mins = stats['nearby_feature_mins']
-                    nearby_feature_maxs = stats['nearby_feature_maxs']
-                    print(f"   Warning: Using old stats format. Consider regenerating dataset.")
+                if n_nearby_available > n_slots_available:
+                    raise ValueError(
+                        f"n_nearby_available ({n_nearby_available}) > available slots in stats ({n_slots_available}). "
+                        f"Regenerate nearest_stations.csv with more neighbors using regenerate_nearest_stations()."
+                    )
+
+                # For augmented: aggregate stats across available slots
+                nearby_feature_mins = nearby_slot_mins[:n_nearby_available, :].min(axis=0)
+                nearby_feature_maxs = nearby_slot_maxs[:n_nearby_available, :].max(axis=0)
+                print(f"   Using per-slot stats, aggregating {n_nearby_available} slots for augmentation")
 
                 # Expand to augmented layout
                 feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
@@ -940,12 +944,10 @@ def generate_all_augmentations_batched(
                 n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
                 print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
             else:
-                # Fallback: use per-slot stats (old format)
-                print(f"   Warning: Old stats format, using per-slot stats")
-                feature_mins = stats['feature_mins']
-                feature_maxs = stats['feature_maxs']
-                target_min = _safe_scalar_from_array(stats['target_min'])
-                target_max = _safe_scalar_from_array(stats['target_max'])
+                raise ValueError(
+                    "Stats file missing 'target_feature_mins' (old format not supported). "
+                    "Regenerate the base dataset with buildDataset() to create new format stats."
+                )
 
             print(f"   Feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
             print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")

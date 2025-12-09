@@ -67,25 +67,18 @@ def expand_canonical_to_augmented_stats(canonical_stats, n_params, n_nearby_in_f
         target_min = float(target_min_val)
         target_max = float(target_max_val)
 
-    # Check for new per-slot format vs old format
-    if 'nearby_slot_mins' in canonical_stats:
-        # New per-slot format
-        nearby_slot_mins = np.asarray(canonical_stats['nearby_slot_mins'])
-        nearby_slot_maxs = np.asarray(canonical_stats['nearby_slot_maxs'])
-        n_slots_available = nearby_slot_mins.shape[0]
-        nearby_features_per_station = nearby_slot_mins.shape[1]
-    elif 'nearby_feature_mins' in canonical_stats:
-        # Old format (single set of nearby stats) - treat as 1 slot repeated
-        old_nearby_mins = np.asarray(canonical_stats['nearby_feature_mins'])
-        old_nearby_maxs = np.asarray(canonical_stats['nearby_feature_maxs'])
-        nearby_features_per_station = len(old_nearby_mins)
-        # Fake per-slot by repeating
-        n_slots_available = n_nearby_in_features
-        nearby_slot_mins = np.tile(old_nearby_mins, (n_slots_available, 1))
-        nearby_slot_maxs = np.tile(old_nearby_maxs, (n_slots_available, 1))
-        print(f"  Warning: Using old stats format (single nearby stats). Consider regenerating dataset.")
-    else:
-        raise ValueError("Canonical stats missing nearby stats (neither nearby_slot_mins nor nearby_feature_mins)")
+    # Require new per-slot format
+    if 'nearby_slot_mins' not in canonical_stats:
+        raise ValueError(
+            "Stats file missing 'nearby_slot_mins' (old format not supported). "
+            "Regenerate the base dataset with buildDataset() to create new format stats."
+        )
+
+    # New per-slot format
+    nearby_slot_mins = np.asarray(canonical_stats['nearby_slot_mins'])
+    nearby_slot_maxs = np.asarray(canonical_stats['nearby_slot_maxs'])
+    n_slots_available = nearby_slot_mins.shape[0]
+    nearby_features_per_station = nearby_slot_mins.shape[1]
 
     # Build output layout
     n_output_features = n_params + n_nearby_in_features * nearby_features_per_station

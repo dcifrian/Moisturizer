@@ -1931,8 +1931,10 @@ class SoilMoistureSequenceDataset(_BaseDataset):
                     'feature_params': comprehensive_norm_stats['feature_params'],
                 }
             else:
-                print("  Warning: Dense arrays not available, using precomputed stats only")
-                print("  (Per-slot stats will only cover n_nearest stations, not all available)")
+                raise ValueError(
+                    "Dense arrays not available - cannot compute comprehensive per-slot stats. "
+                    "Provide dense_array_path when creating the dataset to enable proper stats computation."
+                )
 
             print(f"\nNormalizing all data...")
             # Normalize all samples in-place
