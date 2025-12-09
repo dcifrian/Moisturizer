@@ -462,9 +462,10 @@ def generate_all_augmentations_sequential(
             print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
             print(f"   → Will normalize during generation")
         else:
-            print(f"   ✗ Stats file not found: {canonical_stats_path}")
-            print(f"   Run dataset build first to create normalization stats")
-            use_base_stats = False
+            raise FileNotFoundError(
+                f"use_base_stats=True but stats file not found: {canonical_stats_path}\n"
+                f"Run dataset build first with buildDataset() to create normalization stats."
+            )
 
     # Create memory-mapped arrays (write directly, no temp batches!)
     step_num = 5 if use_base_stats else 4
@@ -942,9 +943,10 @@ def generate_all_augmentations_batched(
             aug_params['target_max'] = float(target_max)
             aug_params['invalid_markers'] = [-9999.0, -1000.0]
         else:
-            print(f"   ✗ Stats file not found: {canonical_stats_path}")
-            print(f"   Run dataset build first to create normalization stats")
-            use_base_stats = False
+            raise FileNotFoundError(
+                f"use_base_stats=True but stats file not found: {canonical_stats_path}\n"
+                f"Run dataset build first with buildDataset() to create normalization stats."
+            )
 
     print(f"\n{'5' if use_base_stats else '4'}. Creating memmap files and processing in parallel (direct write, no serialization!)...")
     print(f"   Total batches: {num_batches}")

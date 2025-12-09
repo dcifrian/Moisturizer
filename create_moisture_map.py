@@ -618,13 +618,16 @@ def find_nearest_real_stations(virtual_station, stations_df, stations_lookup, n_
                 })
     
     if not valid_utm:
-        return []
-    
+        raise ValueError(
+            "No stations found with valid UTM coordinates. "
+            "This indicates a data integrity issue - all stations should have coordinates."
+        )
+
     # Compute approximate UTM for virtual station using inverse distance weighted interpolation
     # from nearest stations (by lat/lon)
     lons = np.array([s['longitude'] for s in valid_utm])
     lats = np.array([s['latitude'] for s in valid_utm])
-    
+
     ll_distances = np.sqrt((lons - virtual_lon)**2 + (lats - virtual_lat)**2)
     nearest_idx = np.argsort(ll_distances)[:6]  # Use 6 nearest for UTM interpolation
     
@@ -779,26 +782,23 @@ def get_elevation_from_srtm(lon, lat, cache_dir=None):
     
     if data is None:
         return None
-    
-    try:
-        from rasterio.transform import rowcol
-        
-        # Check if point is within bounds
-        if not (bounds.left <= lon <= bounds.right and bounds.bottom <= lat <= bounds.top):
-            return None
-        
-        # Convert lon/lat to row/col
-        row, col = rowcol(transform, lon, lat)
-        
-        # Check bounds
-        if 0 <= row < data.shape[0] and 0 <= col < data.shape[1]:
-            elev = data[row, col]
-            # SRTM uses -32768 as nodata
-            if elev > -1000:
-                return float(elev)
-    except Exception:
-        pass
-    
+
+    from rasterio.transform import rowcol
+
+    # Check if point is within bounds
+    if not (bounds.left <= lon <= bounds.right and bounds.bottom <= lat <= bounds.top):
+        return None
+
+    # Convert lon/lat to row/col
+    row, col = rowcol(transform, lon, lat)
+
+    # Check bounds
+    if 0 <= row < data.shape[0] and 0 <= col < data.shape[1]:
+        elev = data[row, col]
+        # SRTM uses -32768 as nodata
+        if elev > -1000:
+            return float(elev)
+
     return None
 
 
@@ -825,7 +825,8 @@ def get_elevation_from_open_elevation(lon, lat):
             data = response.json()
             if 'results' in data and len(data['results']) > 0:
                 return data['results'][0]['elevation']
-    except Exception:
+    except requests.RequestException:
+        # Network errors are expected for API fallback
         pass
     return None
 
@@ -1111,10 +1112,13 @@ def find_nearest_stations_with_soil_moisture(virtual_station, stations_df, stati
                     'utmx': coords['utmx'],
                     'utmy': coords['utmy']
                 })
-    
+
     if not valid_utm:
-        return []
-    
+        raise ValueError(
+            "No soil moisture stations found with valid UTM coordinates. "
+            "This indicates a data integrity issue - soil moisture stations should have coordinates."
+        )
+
     # Compute approximate UTM for virtual station using inverse distance weighted interpolation
     lons = np.array([s['longitude'] for s in valid_utm])
     lats = np.array([s['latitude'] for s in valid_utm])
@@ -1517,32 +1521,27 @@ def create_moisture_map(
                 })
         elif not real_moisture_only:
             # Build sequence for later batch inference (skip if real_moisture_only)
-            try:
-                sequence_data = build_sequence_for_any_station(
-                    station_id=station_id,
-                    end_date=target_date,
-                    timeseries_lookup=timeseries_lookup,
-                    nearest_lookup=nearest_lookup,  # Use pre-built dict
-                    stations_lookup=stations_lookup,  # Use pre-built dict
-                    feature_params=filtered_params,
-                    norm_stats=norm_stats,
-                    seq_length=64,
-                    n_nearest=n_nearby
-                )
+            sequence_data = build_sequence_for_any_station(
+                station_id=station_id,
+                end_date=target_date,
+                timeseries_lookup=timeseries_lookup,
+                nearest_lookup=nearest_lookup,  # Use pre-built dict
+                stations_lookup=stations_lookup,  # Use pre-built dict
+                feature_params=filtered_params,
+                norm_stats=norm_stats,
+                seq_length=64,
+                n_nearest=n_nearby
+            )
 
-                if sequence_data is not None:
-                    features_norm, mask = sequence_data
-                    station_info = {
-                        'station_id': station_id,
-                        'latitude': lat,
-                        'longitude': lon,
-                        'name': station.get('name', f'Station {station_id}')
-                    }
-                    sequences_to_predict.append((station_info, features_norm, mask))
-
-            except Exception as e:
-                print(f"  Warning: Could not build sequence for station {station_id}: {e}")
-                continue
+            if sequence_data is not None:
+                features_norm, mask = sequence_data
+                station_info = {
+                    'station_id': station_id,
+                    'latitude': lat,
+                    'longitude': lon,
+                    'name': station.get('name', f'Station {station_id}')
+                }
+                sequences_to_predict.append((station_info, features_norm, mask))
 
     print(f"✓ Phase 1 complete: {len(real_results)} real, {len(sequences_to_predict)} to predict")
 
@@ -1617,47 +1616,42 @@ def create_moisture_map(
         for i, vs in enumerate(virtual_stations):
             if i % 500 == 0:
                 print(f"    Processing virtual station {i+1}/{len(virtual_stations)}...")
-            
-            try:
-                # Find nearest real stations for feature interpolation
-                nearest_real = find_nearest_real_stations(vs, stations_df, stations_lookup, n_nearest=5)
-                
-                # Find nearest stations WITH soil moisture for context
-                nearest_soil = find_nearest_stations_with_soil_moisture(vs, stations_df, stations_lookup, n_max=10)
-                
-                if len(nearest_soil) < 4:
-                    continue  # Need at least 4 nearby soil moisture stations
-                
-                # Interpolate coordinate features (uses real elevation API for altitude)
-                virtual_coords_interp = interpolate_coordinate_features(vs, nearest_real, stations_lookup)
-                
-                # Build sequence
-                sequence_data = build_sequence_for_virtual_station(
-                    virtual_station=vs,
-                    end_date=target_date,
-                    timeseries_lookup=timeseries_lookup,
-                    nearest_real_stations=nearest_real,
-                    nearest_with_soil=nearest_soil,
-                    virtual_coords=virtual_coords_interp,
-                    stations_lookup=stations_lookup,
-                    feature_params=filtered_params,
-                    norm_stats=norm_stats,
-                    seq_length=64,
-                    n_nearest=n_nearby
-                )
-                
-                if sequence_data is not None:
-                    features_norm, mask = sequence_data
-                    station_info = {
-                        'grid_id': vs['grid_id'],
-                        'latitude': vs['latitude'],
-                        'longitude': vs['longitude']
-                    }
-                    virtual_sequences.append((station_info, features_norm, mask))
-                    
-            except Exception as e:
-                # Skip problematic virtual stations silently
-                continue
+
+            # Find nearest real stations for feature interpolation
+            nearest_real = find_nearest_real_stations(vs, stations_df, stations_lookup, n_nearest=5)
+
+            # Find nearest stations WITH soil moisture for context
+            nearest_soil = find_nearest_stations_with_soil_moisture(vs, stations_df, stations_lookup, n_max=10)
+
+            if len(nearest_soil) < 4:
+                continue  # Need at least 4 nearby soil moisture stations
+
+            # Interpolate coordinate features (uses real elevation API for altitude)
+            virtual_coords_interp = interpolate_coordinate_features(vs, nearest_real, stations_lookup)
+
+            # Build sequence
+            sequence_data = build_sequence_for_virtual_station(
+                virtual_station=vs,
+                end_date=target_date,
+                timeseries_lookup=timeseries_lookup,
+                nearest_real_stations=nearest_real,
+                nearest_with_soil=nearest_soil,
+                virtual_coords=virtual_coords_interp,
+                stations_lookup=stations_lookup,
+                feature_params=filtered_params,
+                norm_stats=norm_stats,
+                seq_length=64,
+                n_nearest=n_nearby
+            )
+
+            if sequence_data is not None:
+                features_norm, mask = sequence_data
+                station_info = {
+                    'grid_id': vs['grid_id'],
+                    'latitude': vs['latitude'],
+                    'longitude': vs['longitude']
+                }
+                virtual_sequences.append((station_info, features_norm, mask))
         
         print(f"  ✓ Built {len(virtual_sequences)} valid virtual station sequences")
         

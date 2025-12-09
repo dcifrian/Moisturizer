@@ -6,6 +6,7 @@ with focus on soil moisture prediction from nearby stations
 
 import os
 import argparse
+import warnings
 import requests
 import pandas as pd
 import numpy as np
@@ -1551,8 +1552,17 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         for marker in invalid_markers:
             valid_targets = valid_targets[valid_targets != marker]
 
-        target_min = valid_targets.min() if len(valid_targets) > 0 else 0.0
-        target_max = valid_targets.max() if len(valid_targets) > 0 else 1.0
+        if len(valid_targets) > 0:
+            target_min = valid_targets.min()
+            target_max = valid_targets.max()
+        else:
+            warnings.warn(
+                "No valid target values found in dataset! Using fallback range [0.0, 1.0]. "
+                "This indicates a data integrity issue - check coverage_threshold setting.",
+                stacklevel=2
+            )
+            target_min = 0.0
+            target_max = 1.0
 
         # Store stats
         self.norm_stats = {
@@ -1770,12 +1780,26 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         # (those are specific to the precomputed dataset's n_nearest)
         # Instead, we store comprehensive per-slot stats
 
+        # Handle case where no valid target data was found
+        if target_min == np.inf or target_max == -np.inf:
+            warnings.warn(
+                "No valid target values found during comprehensive stats computation! "
+                "Using fallback range [0.0, 1.0]. "
+                "This indicates a data integrity issue - check coverage_threshold setting.",
+                stacklevel=2
+            )
+            final_target_min = 0.0
+            final_target_max = 1.0
+        else:
+            final_target_min = float(target_min)
+            final_target_max = float(target_max)
+
         self.norm_stats = {
             # Target feature stats (same for any configuration)
             'target_feature_mins': target_feat_mins,
             'target_feature_maxs': target_feat_maxs,
-            'target_min': float(target_min) if target_min != np.inf else 0.0,
-            'target_max': float(target_max) if target_max != -np.inf else 1.0,
+            'target_min': final_target_min,
+            'target_max': final_target_max,
             # Per-slot nearby stats: [max_nearby_slots, nearby_features_per_station]
             'nearby_slot_mins': nearby_slot_mins,
             'nearby_slot_maxs': nearby_slot_maxs,
