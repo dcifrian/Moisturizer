@@ -224,7 +224,7 @@ class MeteoGaliciaCollector:
     def calculate_nearest_stations(
             self,
             stations_df: pd.DataFrame,
-            n_nearest: int = 4
+            n_nearest: Optional[int] = None
     ) -> pd.DataFrame:
         """
         Calculate n nearest stations WITH SOIL MOISTURE for each station using Euclidean distance on UTM coords
@@ -234,14 +234,13 @@ class MeteoGaliciaCollector:
 
         Args:
             stations_df: DataFrame with station metadata including utmx, utmy, has_soil_moisture
-            n_nearest: Number of nearest stations WITH SOIL MOISTURE to find
+            n_nearest: Number of nearest stations WITH SOIL MOISTURE to find.
+                      If None, uses all available (n_soil_moisture_stations - 1)
 
         Returns:
             DataFrame with columns: station_id, nearest_1_id, nearest_1_distance,
                                    nearest_2_id, nearest_2_distance, ...
         """
-        print(f"\nCalculating {n_nearest} nearest stations WITH SOIL MOISTURE for each station...")
-
         # Create coordinate matrix for distance calculation
         stations_df = stations_df.copy()
 
@@ -260,8 +259,23 @@ class MeteoGaliciaCollector:
             print("✗ No stations with soil moisture data found!")
             return pd.DataFrame()
 
+        # Calculate max possible neighbors (all soil moisture stations except self)
+        max_neighbors = len(soil_moisture_stations) - 1
+
+        if n_nearest is None:
+            n_nearest = max_neighbors
+            print(f"\nCalculating ALL {n_nearest} nearest stations WITH SOIL MOISTURE for each station...")
+        else:
+            if n_nearest > max_neighbors:
+                raise ValueError(
+                    f"Requested n_nearest={n_nearest} but only {max_neighbors} neighbors available "
+                    f"({len(soil_moisture_stations)} soil moisture stations - 1 for self)"
+                )
+            print(f"\nCalculating {n_nearest} nearest stations WITH SOIL MOISTURE for each station...")
+
         print(f"  Total stations with valid coordinates: {len(stations_with_coords)}")
         print(f"  Stations with soil moisture data: {len(soil_moisture_stations)}")
+        print(f"  Max possible neighbors: {max_neighbors}")
 
         # Get coordinates for all stations and for soil moisture stations only
         all_coords = stations_with_coords[['utmx', 'utmy']].values
@@ -1029,6 +1043,17 @@ class SoilMoistureSequenceDataset(_BaseDataset):
 
             self.nearest_stations_cache[station_id] = nearby_with_soil
         print(f"  Indexed {len(self.nearest_stations_cache)} station nearest neighbor lists")
+
+        # Validate that we have enough neighbors for the requested n_nearest
+        # This catches the case where nearest_stations.csv was built with fewer neighbors
+        n_neighbors_in_file = len([c for c in self.nearest_df.columns if c.startswith('nearest_') and c.endswith('_id')])
+        if n_neighbors_in_file < n_nearest:
+            raise ValueError(
+                f"nearest_stations.csv has only {n_neighbors_in_file} neighbors but n_nearest={n_nearest} requested. "
+                f"Regenerate nearest_stations.csv with more neighbors using:\n"
+                f"  from Moisturizer import regenerate_nearest_stations\n"
+                f"  regenerate_nearest_stations(n_nearest={n_nearest})"
+            )
 
         # Determine target stations
         if target_stations is None:
@@ -2477,14 +2502,15 @@ def build_dense_feature_array(
     return features_array, mask_array, station_ids, date_index
 
 
-def regenerate_nearest_stations(n_nearest: int = 5, data_dir: str = "./meteogalicia_data"):
+def regenerate_nearest_stations(n_nearest: Optional[int] = None, data_dir: str = "./meteogalicia_data"):
     """
     Regenerate nearest_stations.csv with a different number of neighbors.
 
     Use this when you need more neighbors than currently cached (e.g., for augmentation).
 
     Args:
-        n_nearest: Number of nearest neighbors to compute (default: 5)
+        n_nearest: Number of nearest neighbors to compute. If None, computes ALL available
+                  (n_soil_moisture_stations - 1).
         data_dir: Directory containing the dataset
 
     Returns:
@@ -2498,11 +2524,18 @@ def regenerate_nearest_stations(n_nearest: int = 5, data_dir: str = "./meteogali
 
     stations_df = pd.read_csv(collector.stations_file)
 
+    # Calculate max possible neighbors
+    n_soil_moisture = len(stations_df[stations_df['has_soil_moisture'] == True])
+    max_neighbors = n_soil_moisture - 1
+
+    if n_nearest is None:
+        n_nearest = max_neighbors
+
     # Check current neighbors
     if collector.nearest_file.exists():
         current_nearest = pd.read_csv(collector.nearest_file)
         n_current = len([c for c in current_nearest.columns if c.startswith('nearest_') and c.endswith('_id')])
-        print(f"Current nearest_stations.csv has {n_current} neighbors")
+        print(f"Current nearest_stations.csv has {n_current} neighbors (max possible: {max_neighbors})")
     else:
         n_current = 0
 
@@ -2518,7 +2551,7 @@ def regenerate_nearest_stations(n_nearest: int = 5, data_dir: str = "./meteogali
 
 
 def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[datetime] = None,
-                 force_refresh: bool = False, n_nearest: int = 5):
+                 force_refresh: bool = False, n_nearest: Optional[int] = None):
     """
     Build the complete dataset with optimizations
 
@@ -2528,7 +2561,9 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
               maximum range without losing stations with moisture data)
         end_date: End date for data collection (default: None = use current date)
         force_refresh: If True, force re-download even if cached data exists
-        n_nearest: Number of nearest stations to compute (default: 5, supports augmentation)
+        n_nearest: Number of nearest stations to compute. If None, computes ALL available
+                  neighbors (n_soil_moisture_stations - 1). This ensures maximum flexibility
+                  for augmentation and future use cases.
 
     Returns:
         Tuple of (train_dataset, val_dataset, test_dataset)
@@ -2577,13 +2612,22 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
         stations_df = pd.read_csv(collector.stations_file)
         nearest_df = pd.read_csv(collector.nearest_file)
 
+        # Calculate max possible neighbors
+        n_soil_moisture = len(stations_df[stations_df['has_soil_moisture'] == True])
+        max_neighbors = n_soil_moisture - 1
+
+        # Determine required neighbors
+        required_neighbors = max_neighbors if n_nearest is None else n_nearest
+
         # Check if nearest_df has enough neighbors
         n_neighbors_in_file = len([c for c in nearest_df.columns if c.startswith('nearest_') and c.endswith('_id')])
-        if n_neighbors_in_file < n_nearest:
-            print(f"\n⚠ Cached nearest_stations.csv has only {n_neighbors_in_file} neighbors, need {n_nearest}")
+        if n_neighbors_in_file < required_neighbors:
+            print(f"\n⚠ Cached nearest_stations.csv has only {n_neighbors_in_file} neighbors, need {required_neighbors}")
             print(f"  Regenerating nearest_stations.csv...")
             nearest_df = collector.calculate_nearest_stations(stations_df, n_nearest=n_nearest)
-            print(f"  ✓ Regenerated with {n_nearest} neighbors")
+            # Update n_neighbors_in_file after regeneration
+            n_neighbors_in_file = len([c for c in nearest_df.columns if c.startswith('nearest_') and c.endswith('_id')])
+            print(f"  ✓ Regenerated with {n_neighbors_in_file} neighbors")
     else:
         # Step 1: Discover stations with soil moisture
         print("=" * 60)
@@ -2616,6 +2660,10 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
             chunk_days=30,
             force_refresh=force_refresh
         )
+
+    # Determine actual number of neighbors in the file (for dataset creation)
+    n_neighbors_in_file = len([c for c in nearest_df.columns if c.startswith('nearest_') and c.endswith('_id')])
+    print(f"\n  nearest_stations.csv has {n_neighbors_in_file} neighbors")
 
     # Step 4: Analyze parameter coverage from timeseries
     print("\n" + "=" * 60)
@@ -2674,7 +2722,7 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),
         seq_length=seq_length,
-        n_nearest=n_nearest,
+        n_nearest=n_neighbors_in_file,  # Use actual number from file
         feature_params=filtered_params,
         dense_array_path=str(dense_array_path)
     )
