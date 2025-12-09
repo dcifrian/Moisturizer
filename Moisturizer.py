@@ -2477,7 +2477,48 @@ def build_dense_feature_array(
     return features_array, mask_array, station_ids, date_index
 
 
-def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[datetime] = None, force_refresh: bool = False):
+def regenerate_nearest_stations(n_nearest: int = 5, data_dir: str = "./meteogalicia_data"):
+    """
+    Regenerate nearest_stations.csv with a different number of neighbors.
+
+    Use this when you need more neighbors than currently cached (e.g., for augmentation).
+
+    Args:
+        n_nearest: Number of nearest neighbors to compute (default: 5)
+        data_dir: Directory containing the dataset
+
+    Returns:
+        DataFrame with nearest stations
+    """
+    collector = MeteoGaliciaCollector(data_dir=data_dir)
+
+    # Load existing stations
+    if not collector.stations_file.exists():
+        raise FileNotFoundError(f"stations_metadata.csv not found in {data_dir}")
+
+    stations_df = pd.read_csv(collector.stations_file)
+
+    # Check current neighbors
+    if collector.nearest_file.exists():
+        current_nearest = pd.read_csv(collector.nearest_file)
+        n_current = len([c for c in current_nearest.columns if c.startswith('nearest_') and c.endswith('_id')])
+        print(f"Current nearest_stations.csv has {n_current} neighbors")
+    else:
+        n_current = 0
+
+    if n_current >= n_nearest:
+        print(f"Already have {n_current} neighbors, no regeneration needed")
+        return pd.read_csv(collector.nearest_file)
+
+    print(f"Regenerating nearest_stations.csv with {n_nearest} neighbors...")
+    nearest_df = collector.calculate_nearest_stations(stations_df, n_nearest=n_nearest)
+    print(f"✓ Saved to {collector.nearest_file}")
+
+    return nearest_df
+
+
+def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[datetime] = None,
+                 force_refresh: bool = False, n_nearest: int = 5):
     """
     Build the complete dataset with optimizations
 
@@ -2487,6 +2528,7 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
               maximum range without losing stations with moisture data)
         end_date: End date for data collection (default: None = use current date)
         force_refresh: If True, force re-download even if cached data exists
+        n_nearest: Number of nearest stations to compute (default: 5, supports augmentation)
 
     Returns:
         Tuple of (train_dataset, val_dataset, test_dataset)
@@ -2534,6 +2576,14 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
         # timeseries_df already loaded above
         stations_df = pd.read_csv(collector.stations_file)
         nearest_df = pd.read_csv(collector.nearest_file)
+
+        # Check if nearest_df has enough neighbors
+        n_neighbors_in_file = len([c for c in nearest_df.columns if c.startswith('nearest_') and c.endswith('_id')])
+        if n_neighbors_in_file < n_nearest:
+            print(f"\n⚠ Cached nearest_stations.csv has only {n_neighbors_in_file} neighbors, need {n_nearest}")
+            print(f"  Regenerating nearest_stations.csv...")
+            nearest_df = collector.calculate_nearest_stations(stations_df, n_nearest=n_nearest)
+            print(f"  ✓ Regenerated with {n_nearest} neighbors")
     else:
         # Step 1: Discover stations with soil moisture
         print("=" * 60)
@@ -2545,7 +2595,7 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
         print("\n" + "=" * 60)
         print("STEP 2: Calculating nearest stations")
         print("=" * 60)
-        nearest_df = collector.calculate_nearest_stations(stations_df, n_nearest=4)
+        nearest_df = collector.calculate_nearest_stations(stations_df, n_nearest=n_nearest)
 
         # Step 3: Build historical dataset
         print("\n" + "=" * 60)
@@ -2624,7 +2674,7 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),
         seq_length=seq_length,
-        n_nearest=4,
+        n_nearest=n_nearest,
         feature_params=filtered_params,
         dense_array_path=str(dense_array_path)
     )
