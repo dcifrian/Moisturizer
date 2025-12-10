@@ -26,6 +26,11 @@ from Moisturizer import (
     MeteoGaliciaCollector,
     SoilMoistureSequenceDataset,
     expand_canonical_to_augmented_stats,
+    normalize_features,
+    denormalize_target,
+    INVALID_MARKER_API,
+    INVALID_MARKER_MISSING,
+    NORMALIZED_INVALID_MARKER,
 )
 from model_loader import load_model
 
@@ -227,9 +232,7 @@ def denormalize_soil_moisture(normalized_value, norm_stats_path):
         target_min = float(target_min_val)
         target_max = float(target_max_val)
 
-    # Denormalize: value in [-1, 1] -> original range
-    original = (normalized_value + 1.0) / 2.0 * (target_max - target_min) + target_min
-    return original
+    return denormalize_target(normalized_value, target_min, target_max)
 
 
 def get_real_soil_moisture_from_lookup(timeseries_lookup, station_id, date):
@@ -409,8 +412,6 @@ def build_sequence_for_any_station(
 
 def apply_normalization_to_features(features, mask, norm_stats, missing_value=-1000.0):
     """Apply normalization to features (same as in Dataset)"""
-    import numpy as np
-
     feature_mins = norm_stats['feature_mins']
     feature_maxs = norm_stats['feature_maxs']
 
@@ -423,29 +424,9 @@ def apply_normalization_to_features(features, mask, norm_stats, missing_value=-1
             f"This means the on-the-fly sequence structure doesn't match training data structure."
         )
 
-    invalid_markers = [-9999.0, missing_value]
-    normalized_invalid_marker = -2.0
-
-    features_norm = features.copy()
-
-    # Normalize ALL feature columns (target station + nearby stations)
-    for feat_idx in range(features.shape[1]):
-        feat_min = feature_mins[feat_idx]
-        feat_max = feature_maxs[feat_idx]
-
-        # Handle invalid markers
-        invalid_mask = np.zeros(features.shape[0], dtype=bool)
-        for marker in invalid_markers:
-            invalid_mask |= (features[:, feat_idx] == marker)
-
-        # Normalize valid values to [-1, 1]
-        if feat_max > feat_min:
-            features_norm[:, feat_idx] = 2.0 * (features[:, feat_idx] - feat_min) / (feat_max - feat_min) - 1.0
-
-        # Set invalid markers to -2
-        features_norm[invalid_mask, feat_idx] = normalized_invalid_marker
-
-    return features_norm
+    # Use shared normalization function
+    invalid_markers = [INVALID_MARKER_API, missing_value]
+    return normalize_features(features, feature_mins, feature_maxs, invalid_markers=invalid_markers)
 
 
 def create_virtual_grid_stations(

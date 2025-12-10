@@ -46,6 +46,115 @@ NORMALIZED_INVALID_MARKER = -2.0   # Value used after normalization (outside [-1
 DEFAULT_COVERAGE_THRESHOLD = 0.25  # Minimum data coverage for a parameter to be included
 
 
+def normalize_features(features, feature_mins, feature_maxs,
+                       invalid_markers=None, normalized_invalid_marker=None,
+                       inplace=False):
+    """
+    Normalize features to [-1, 1] range using min-max scaling.
+
+    Vectorized implementation that handles invalid markers.
+
+    Args:
+        features: np.ndarray of shape [..., n_features] - features to normalize
+        feature_mins: np.ndarray of shape [n_features] - minimum values per feature
+        feature_maxs: np.ndarray of shape [n_features] - maximum values per feature
+        invalid_markers: List of values to treat as invalid (default: [-9999.0, -1000.0])
+        normalized_invalid_marker: Value to use for invalid data (default: -2.0)
+        inplace: If True, modify features array in place (default: False)
+
+    Returns:
+        Normalized features array (same shape as input)
+    """
+    if invalid_markers is None:
+        invalid_markers = [INVALID_MARKER_API, INVALID_MARKER_MISSING]
+    if normalized_invalid_marker is None:
+        normalized_invalid_marker = NORMALIZED_INVALID_MARKER
+
+    if not inplace:
+        features = features.copy()
+
+    # Find invalid values before normalization
+    invalid_mask = np.isin(features, invalid_markers)
+
+    # Compute ranges (vectorized)
+    feat_ranges = feature_maxs - feature_mins
+    valid_ranges = feat_ranges > 0
+
+    # Normalize: scale to [-1, 1]
+    # For features with shape [seq_length, n_features] or [batch, seq_length, n_features]
+    # We broadcast mins/maxs along the last axis
+    if features.ndim == 2:
+        features[:] = 2.0 * (features - feature_mins[None, :]) / np.where(
+            valid_ranges[None, :], feat_ranges[None, :], 1.0) - 1.0
+    elif features.ndim == 3:
+        features[:] = 2.0 * (features - feature_mins[None, None, :]) / np.where(
+            valid_ranges[None, None, :], feat_ranges[None, None, :], 1.0) - 1.0
+    else:
+        # Fallback for other shapes - normalize along last axis
+        features[:] = 2.0 * (features - feature_mins) / np.where(valid_ranges, feat_ranges, 1.0) - 1.0
+
+    # Set invalid values to marker
+    features[invalid_mask] = normalized_invalid_marker
+
+    return features
+
+
+def normalize_target(target, target_min, target_max,
+                     invalid_markers=None, normalized_invalid_marker=None):
+    """
+    Normalize a target value to [-1, 1] range using min-max scaling.
+
+    Args:
+        target: Scalar, np.ndarray, or value to normalize
+        target_min: Minimum target value
+        target_max: Maximum target value
+        invalid_markers: List of values to treat as invalid (default: [-9999.0, -1000.0])
+        normalized_invalid_marker: Value to use for invalid data (default: -2.0)
+
+    Returns:
+        Normalized target value (same type as input for scalars, np.float32 for arrays)
+    """
+    if invalid_markers is None:
+        invalid_markers = [INVALID_MARKER_API, INVALID_MARKER_MISSING]
+    if normalized_invalid_marker is None:
+        normalized_invalid_marker = NORMALIZED_INVALID_MARKER
+
+    # Handle array input
+    if isinstance(target, np.ndarray):
+        target_val = target.item() if target.ndim == 0 else target[0]
+    else:
+        target_val = target
+
+    # Check for invalid
+    if target_val in invalid_markers:
+        return normalized_invalid_marker
+
+    # Normalize to [-1, 1]
+    if target_max > target_min:
+        return 2.0 * (target_val - target_min) / (target_max - target_min) - 1.0
+    else:
+        return target_val
+
+
+def denormalize_target(normalized_value, target_min, target_max):
+    """
+    Convert a normalized target value back to original scale.
+
+    Args:
+        normalized_value: Value in [-1, 1] range (or NORMALIZED_INVALID_MARKER for invalid)
+        target_min: Original minimum target value
+        target_max: Original maximum target value
+
+    Returns:
+        Value in original scale, or None if input was invalid marker
+    """
+    if normalized_value == NORMALIZED_INVALID_MARKER:
+        return None
+
+    # Denormalize: [-1, 1] -> [min, max]
+    return (normalized_value + 1.0) / 2.0 * (target_max - target_min) + target_min
+
+
 def expand_canonical_to_augmented_stats(canonical_stats, n_params, n_nearby_in_features,
                                         n_nearby_available=None, augmented=False):
     """
@@ -1969,40 +2078,18 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         Invalid markers are changed to NORMALIZED_INVALID_MARKER (-2.0)
         """
         invalid_markers = [INVALID_MARKER_API, self.missing_value]
-        normalized_invalid_marker = NORMALIZED_INVALID_MARKER
 
-        # Normalize features
-        for feat_idx in range(features.shape[1]):
-            feat_min = self.norm_stats['feature_mins'][feat_idx]
-            feat_max = self.norm_stats['feature_maxs'][feat_idx]
+        # Normalize features using shared function (inplace for efficiency)
+        normalize_features(
+            features, self.norm_stats['feature_mins'], self.norm_stats['feature_maxs'],
+            invalid_markers=invalid_markers, inplace=True
+        )
 
-            # Handle invalid markers
-            invalid_mask = np.zeros(features.shape[0], dtype=bool)
-            for marker in invalid_markers:
-                invalid_mask |= (features[:, feat_idx] == marker)
-
-            # Normalize valid values to [-1, 1]
-            if feat_max > feat_min:
-                features[:, feat_idx] = 2.0 * (features[:, feat_idx] - feat_min) / (feat_max - feat_min) - 1.0
-
-            # Set invalid markers to -2
-            features[invalid_mask, feat_idx] = normalized_invalid_marker
-
-        # Normalize target
+        # Normalize target using shared function
         target_min = self.norm_stats['target_min']
         target_max = self.norm_stats['target_max']
-
-        # Check if target is invalid
-        target_invalid = False
-        for marker in invalid_markers:
-            if np.any(target == marker):
-                target_invalid = True
-                break
-
-        if target_invalid:
-            target[:] = normalized_invalid_marker
-        elif target_max > target_min:
-            target[:] = 2.0 * (target - target_min) / (target_max - target_min) - 1.0
+        normalized_target = normalize_target(target, target_min, target_max, invalid_markers=invalid_markers)
+        target[:] = normalized_target
 
         return features, target
 

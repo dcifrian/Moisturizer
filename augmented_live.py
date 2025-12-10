@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Union
 import os
 
-from Moisturizer import expand_canonical_to_augmented_stats
+from Moisturizer import (
+    expand_canonical_to_augmented_stats,
+    normalize_features,
+    normalize_target,
+    NORMALIZED_INVALID_MARKER,
+)
 
 
 class AugmentedLiveDataset(Dataset):
@@ -499,41 +504,28 @@ class AugmentedLiveDataset(Dataset):
     def _apply_normalization(self, features: np.ndarray, mask: np.ndarray, target: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Apply min-max normalization to features and target.
-        
+
         Args:
             features: [seq_length, n_features] array
             mask: [seq_length, n_features] boolean array
             target: [1] array or scalar
-            
+
         Returns:
             normalized_features, normalized_target
         """
-        invalid_markers = [-9999.0, -1000.0]
-        normalized_invalid_marker = self.normalized_invalid_marker
-        
-        # Find invalid values
-        invalid_mask = np.isin(features, invalid_markers)
-        
-        # Compute ranges (vectorized)
-        feat_ranges = self.feature_maxs - self.feature_mins
-        valid_ranges = feat_ranges > 0
-        
-        # Normalize: scale to [-1, 1]
-        # features = 2 * (features - min) / (max - min) - 1
-        features = 2.0 * (features - self.feature_mins[None, :]) / np.where(valid_ranges[None, :], feat_ranges[None, :], 1.0) - 1.0
-        
-        # Set invalid values to marker
-        features[invalid_mask] = normalized_invalid_marker
-        
-        # Normalize target
-        target_val = target[0] if isinstance(target, np.ndarray) else target
-        if target_val in invalid_markers:
-            normalized_target = np.array([normalized_invalid_marker], dtype=np.float32)
-        elif self.target_max > self.target_min:
-            normalized_target = np.array([2.0 * (target_val - self.target_min) / (self.target_max - self.target_min) - 1.0], dtype=np.float32)
-        else:
-            normalized_target = np.array([target_val], dtype=np.float32)
-        
+        # Normalize features using shared function
+        features = normalize_features(
+            features, self.feature_mins, self.feature_maxs,
+            normalized_invalid_marker=self.normalized_invalid_marker
+        )
+
+        # Normalize target using shared function
+        normalized_val = normalize_target(
+            target, self.target_min, self.target_max,
+            normalized_invalid_marker=self.normalized_invalid_marker
+        )
+        normalized_target = np.array([normalized_val], dtype=np.float32)
+
         return features.astype(np.float32), normalized_target
 
     @staticmethod
