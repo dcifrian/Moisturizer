@@ -1115,7 +1115,7 @@ def debug_find_worst_offenders(
     print(f"Showing top {min(top_n, len(offenders))} worst offenders:\n")
 
     # Feature structure using FeatureLayout
-    layout = FeatureLayout(n_params=len(feature_params), n_nearby=n_nearest)
+    layout = FeatureLayout(n_params=len(feature_params), n_nearby=n_nearby)
     n_target_features = layout.n_target_features
     nearby_features_per_station = layout.nearby_features_per_station
     
