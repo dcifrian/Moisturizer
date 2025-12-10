@@ -108,6 +108,44 @@ class MeteoGaliciaCollector:
         self.nearest_file = self.data_dir / "nearest_stations.csv"
         self.timeseries_file = self.data_dir / "raw_timeseries.csv"
 
+        # Cached DataFrames (lazy loaded)
+        self._stations_df_cache = None
+        self._nearest_df_cache = None
+        self._timeseries_df_cache = None
+
+    def get_stations_df(self, force_reload: bool = False) -> pd.DataFrame:
+        """Get stations DataFrame with caching"""
+        if self._stations_df_cache is None or force_reload:
+            if self.stations_file.exists():
+                self._stations_df_cache = pd.read_csv(self.stations_file)
+            else:
+                return None
+        return self._stations_df_cache
+
+    def get_nearest_df(self, force_reload: bool = False) -> pd.DataFrame:
+        """Get nearest stations DataFrame with caching"""
+        if self._nearest_df_cache is None or force_reload:
+            if self.nearest_file.exists():
+                self._nearest_df_cache = pd.read_csv(self.nearest_file)
+            else:
+                return None
+        return self._nearest_df_cache
+
+    def get_timeseries_df(self, force_reload: bool = False) -> pd.DataFrame:
+        """Get timeseries DataFrame with caching"""
+        if self._timeseries_df_cache is None or force_reload:
+            if self.timeseries_file.exists():
+                self._timeseries_df_cache = pd.read_csv(self.timeseries_file)
+            else:
+                return None
+        return self._timeseries_df_cache
+
+    def clear_cache(self):
+        """Clear all cached DataFrames"""
+        self._stations_df_cache = None
+        self._nearest_df_cache = None
+        self._timeseries_df_cache = None
+
     def get_all_stations(self) -> pd.DataFrame:
         """
         Fetch list of all MeteoGalicia stations
@@ -190,7 +228,7 @@ class MeteoGaliciaCollector:
         """
         if self.stations_file.exists() and not force_refresh:
             print(f"Loading cached stations from {self.stations_file}")
-            return pd.read_csv(self.stations_file)
+            return self.get_stations_df()
 
         print("Discovering all stations...")
         stations_df = self.get_all_stations()
@@ -445,8 +483,8 @@ class MeteoGaliciaCollector:
         all_data = []
         current_date = start_date
         if self.timeseries_file.exists() and not force_refresh:
-            print(f"Loading cached stations from {self.timeseries_file}")
-            return pd.read_csv(self.timeseries_file)
+            print(f"Loading cached timeseries from {self.timeseries_file}")
+            return self.get_timeseries_df()
         print(f"\nFetching historical data from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}")
         print(f"Stations: {len(station_ids)}")
         print(f"Parameters: {parameter_ids}")
@@ -506,10 +544,10 @@ class MeteoGaliciaCollector:
         """
         print("\nCreating ML-ready dataset...")
 
-        # Load necessary data
-        stations_df = pd.read_csv(self.stations_file)
-        nearest_df = pd.read_csv(self.nearest_file)
-        timeseries_df = pd.read_csv(self.timeseries_file)
+        # Load necessary data (using cache)
+        stations_df = self.get_stations_df()
+        nearest_df = self.get_nearest_df()
+        timeseries_df = self.get_timeseries_df()
         timeseries_df['date'] = pd.to_datetime(timeseries_df['date'])
 
         # Filter to target stations with soil moisture
@@ -752,9 +790,9 @@ class MeteoGaliciaCollector:
                 'HR_AVG_1.5m'  # Humidity
             ]
 
-        # Load stations metadata and nearest stations
-        stations_df = pd.read_csv(self.stations_file)
-        nearest_df = pd.read_csv(self.nearest_file)
+        # Load stations metadata and nearest stations (using cache)
+        stations_df = self.get_stations_df()
+        nearest_df = self.get_nearest_df()
 
         # Get target station info
         target_info = stations_df[stations_df['station_id'] == target_station_id].iloc[0]
@@ -1085,37 +1123,34 @@ class SoilMoistureSequenceDataset(_BaseDataset):
             print(f"  Using memory-mapped arrays (dataset will not be loaded into RAM)")
 
             # Validate feature_params match precomputed data
-            if 'feature_params' in self.precomputed_data:
-                precomputed_params = self.precomputed_data['feature_params'].tolist()
-                print(f"  Precomputed with {len(precomputed_params)} feature parameters")
+            if 'feature_params' not in self.precomputed_data:
+                raise ValueError(
+                    "Precomputed dataset is missing 'feature_params' (old format not supported). "
+                    "Regenerate the dataset with buildDataset() to create new format."
+                )
 
-                if feature_params is not None:
-                    # User specified feature_params - must match precomputed
-                    if feature_params != precomputed_params:
-                        raise ValueError(
-                            f"Feature parameters mismatch!\n"
-                            f"  Precomputed dataset was built with {len(precomputed_params)} parameters:\n"
-                            f"    {precomputed_params}\n"
-                            f"  But you requested {len(feature_params)} parameters:\n"
-                            f"    {feature_params}\n"
-                            f"  You must either:\n"
-                            f"    1. Use feature_params=None to load with precomputed parameters, or\n"
-                            f"    2. Rebuild the precomputed dataset with the desired parameters"
-                        )
-                    print(f"  ✓ Feature parameters match precomputed dataset")
-                    self.feature_params = feature_params
-                else:
-                    # User didn't specify - use precomputed params
-                    print(f"  Using precomputed feature parameters")
-                    self.feature_params = precomputed_params
+            precomputed_params = self.precomputed_data['feature_params'].tolist()
+            print(f"  Precomputed with {len(precomputed_params)} feature parameters")
+
+            if feature_params is not None:
+                # User specified feature_params - must match precomputed
+                if feature_params != precomputed_params:
+                    raise ValueError(
+                        f"Feature parameters mismatch!\n"
+                        f"  Precomputed dataset was built with {len(precomputed_params)} parameters:\n"
+                        f"    {precomputed_params}\n"
+                        f"  But you requested {len(feature_params)} parameters:\n"
+                        f"    {feature_params}\n"
+                        f"  You must either:\n"
+                        f"    1. Use feature_params=None to load with precomputed parameters, or\n"
+                        f"    2. Rebuild the precomputed dataset with the desired parameters"
+                    )
+                print(f"  ✓ Feature parameters match precomputed dataset")
+                self.feature_params = feature_params
             else:
-                # No feature_params in precomputed data (old format)
-                if feature_params is None:
-                    # Use all parameters except soil moisture
-                    all_params = self.timeseries_df['parameter_code'].unique()
-                    self.feature_params = [p for p in all_params if p != soil_moisture_param]
-                else:
-                    self.feature_params = feature_params
+                # User didn't specify - use precomputed params
+                print(f"  Using precomputed feature parameters")
+                self.feature_params = precomputed_params
 
             # Check if data is already normalized
             if 'is_normalized' in self.precomputed_data:
@@ -2342,9 +2377,9 @@ class SoilMoistureSequenceDataset(_BaseDataset):
         # Calculate date range
         start_date = end_date - timedelta(days=seq_length - 1)
 
-        # Load stations metadata and nearest stations
-        stations_df = pd.read_csv(self.stations_file)
-        nearest_df = pd.read_csv(self.nearest_file)
+        # Load stations metadata and nearest stations (using cache)
+        stations_df = self.get_stations_df()
+        nearest_df = self.get_nearest_df()
 
         # Get target station info
         target_info = stations_df[stations_df['station_id'] == target_station_id].iloc[0]
@@ -2554,11 +2589,10 @@ def regenerate_nearest_stations(n_nearest: Optional[int] = None, data_dir: str =
     """
     collector = MeteoGaliciaCollector(data_dir=data_dir)
 
-    # Load existing stations
-    if not collector.stations_file.exists():
+    # Load existing stations (using cache)
+    stations_df = collector.get_stations_df()
+    if stations_df is None:
         raise FileNotFoundError(f"stations_metadata.csv not found in {data_dir}")
-
-    stations_df = pd.read_csv(collector.stations_file)
 
     # Calculate max possible neighbors
     n_soil_moisture = len(stations_df[stations_df['has_soil_moisture'] == True])
@@ -2568,8 +2602,8 @@ def regenerate_nearest_stations(n_nearest: Optional[int] = None, data_dir: str =
         n_nearest = max_neighbors
 
     # Check current neighbors
-    if collector.nearest_file.exists():
-        current_nearest = pd.read_csv(collector.nearest_file)
+    current_nearest = collector.get_nearest_df()
+    if current_nearest is not None:
         n_current = len([c for c in current_nearest.columns if c.startswith('nearest_') and c.endswith('_id')])
         print(f"Current nearest_stations.csv has {n_current} neighbors (max possible: {max_neighbors})")
     else:
@@ -2577,7 +2611,7 @@ def regenerate_nearest_stations(n_nearest: Optional[int] = None, data_dir: str =
 
     if n_current >= n_nearest:
         print(f"Already have {n_current} neighbors, no regeneration needed")
-        return pd.read_csv(collector.nearest_file)
+        return current_nearest
 
     print(f"Regenerating nearest_stations.csv with {n_nearest} neighbors...")
     nearest_df = collector.calculate_nearest_stations(stations_df, n_nearest=n_nearest)
@@ -2622,8 +2656,8 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
 
     if not force_refresh and collector.timeseries_file.exists():
         try:
-            # Load CSV and check date range
-            timeseries_df = pd.read_csv(collector.timeseries_file)
+            # Load CSV and check date range (using cache)
+            timeseries_df = collector.get_timeseries_df()
             cached_dates = pd.to_datetime(timeseries_df['date'])
             cached_start = cached_dates.min().strftime('%Y-%m-%d')
             cached_end = cached_dates.max().strftime('%Y-%m-%d')
@@ -2645,9 +2679,9 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
         print("\n" + "=" * 60)
         print("USING CACHED DATA (skipping download)")
         print("=" * 60)
-        # timeseries_df already loaded above
-        stations_df = pd.read_csv(collector.stations_file)
-        nearest_df = pd.read_csv(collector.nearest_file)
+        # timeseries_df already loaded above (using cache)
+        stations_df = collector.get_stations_df()
+        nearest_df = collector.get_nearest_df()
 
         # Calculate max possible neighbors
         n_soil_moisture = len(stations_df[stations_df['has_soil_moisture'] == True])

@@ -1440,46 +1440,45 @@ def generate_all_augmentations_batched(
 
 
 if __name__ == "__main__":
-    import sys
+    import argparse
 
-    # Parse command-line arguments
-    use_sequential = False
-    use_base_stats = False
-    seq_length = 64  # Default
+    parser = argparse.ArgumentParser(
+        description='Pre-compute augmented dataset for soil moisture prediction',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python precompute_augmented.py                          # Batched mode (default, fast)
+  python precompute_augmented.py --sequential             # Sequential mode (low memory)
+  python precompute_augmented.py --use-base-stats         # Use pre-computed normalization stats
+  python precompute_augmented.py --seq-length 32          # Use sequence length of 32
+        """
+    )
+    parser.add_argument('--sequential', action='store_true',
+                       help='Use sequential mode (~5GB RAM, slower but minimal memory)')
+    parser.add_argument('--use-base-stats', action='store_true',
+                       help='Use base dataset normalization stats (saves ~2 hours)')
+    parser.add_argument('--seq-length', type=int, default=64,
+                       help='Sequence length (default: 64)')
+    parser.add_argument('--batch-size', type=int, default=100,
+                       help='Batch size for batched mode (default: 100)')
 
-    i = 1
-    while i < len(sys.argv):
-        arg = sys.argv[i]
-        if arg == "--sequential":
-            use_sequential = True
-        elif arg == "--use-base-stats":
-            use_base_stats = True
-        elif arg == "--seq-length":
-            if i + 1 < len(sys.argv):
-                seq_length = int(sys.argv[i + 1])
-                i += 1
-            else:
-                print("ERROR: --seq-length requires a value")
-                sys.exit(1)
-        i += 1
+    args = parser.parse_args()
 
     # Choose mode based on arguments
-    if use_sequential:
-        # Sequential mode: ~5GB RAM (slow but minimal memory)
+    if args.sequential:
         print("Using SEQUENTIAL mode (minimal memory)")
-        if use_base_stats:
-            print("Using base dataset stats (more accurate method!)")
-        print(f"Sequence length: {seq_length}")
-        print("Tip: Use --use-base-stats for more accurate normalization")
-        print("Tip: Use --seq-length N to change sequence length (default 64)")
-        generate_all_augmentations_sequential(seq_length=seq_length, use_base_stats=use_base_stats)
+        if args.use_base_stats:
+            print("Using base dataset stats")
+        print(f"Sequence length: {args.seq_length}")
+        generate_all_augmentations_sequential(seq_length=args.seq_length, use_base_stats=args.use_base_stats)
     else:
-        # Batched mode: auto-detects CPU cores (faster)
         print("Using BATCHED mode (parallel, auto-detect workers)")
-        if use_base_stats:
+        if args.use_base_stats:
             print("Using base dataset stats (saves ~2 hours!)")
-        print(f"Sequence length: {seq_length}")
-        print("Tip: Use --sequential for systems with <8GB RAM")
-        print("Tip: Use --use-base-stats to skip statistics computation and normalization")
-        print("Tip: Use --seq-length N to change sequence length (default 64)")
-        generate_all_augmentations_batched(batch_size=100, seq_length=seq_length, use_base_stats=use_base_stats)
+        print(f"Sequence length: {args.seq_length}")
+        print(f"Batch size: {args.batch_size}")
+        generate_all_augmentations_batched(
+            batch_size=args.batch_size,
+            seq_length=args.seq_length,
+            use_base_stats=args.use_base_stats
+        )
