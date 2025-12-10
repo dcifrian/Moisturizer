@@ -2803,50 +2803,6 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
     )
     return train_ds, val_ds, test_ds
 
-def precomputeDataset(coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD):
-    """Precompute dataset sequences and save to disk for fast loading"""
-    collector = MeteoGaliciaCollector()
-
-    print("=" * 60)
-    print("PRECOMPUTING DATASET SEQUENCES")
-    print("=" * 60)
-    print("This will take a while but only needs to be done once.")
-    print("Subsequent loads will be MUCH faster!")
-    print("=" * 60)
-
-    # Get filtered parameters
-    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=coverage_threshold)
-
-    if not filtered_params:
-        print("\n✗ No parameters passed the threshold!")
-        return
-
-    print(f"\nUsing {len(filtered_params)} filtered parameters...")
-
-    # Create dataset without precomputed data
-    dataset = SoilMoistureSequenceDataset(
-        timeseries=str(collector.timeseries_file),
-        stations=str(collector.stations_file),
-        nearest=str(collector.nearest_file),
-        seq_length=64,
-        n_nearest=4,
-        feature_params=filtered_params,
-        normalize=False  # Don't normalize yet, we'll compute stats during precomputation
-    )
-
-    # Precompute and save
-    precomputed_path = collector.data_dir / "precomputed_sequences"  # Directory, not .npz
-    norm_stats_path = collector.data_dir / "normalization_stats.npz"
-
-    dataset.precompute_and_save(
-        output_path=str(precomputed_path),
-        norm_stats_path=str(norm_stats_path)
-    )
-
-    print(f"\n✓ Precomputed sequences saved to: {precomputed_path}/")
-    print(f"✓ Normalization stats saved to: {norm_stats_path}")
-    print(f"\nYou can now use loadDataset() for fast loading!")
-
 def loadDataset(use_precomputed=True, normalize=True, precomputed_path=None, norm_stats_path=None,
                 coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD):
     """
@@ -3000,19 +2956,6 @@ Examples:
         buildDataset(coverage_threshold=args.coverage)
 
     if args.train:
-        # Check if precomputed data exists
-        if not features_file.exists():
-            print("\n" + "=" * 60)
-            print("FIRST TIME SETUP: Precomputing dataset sequences")
-            print("=" * 60)
-            print("This will take ~30-60 minutes but only needs to be done once!")
-            print("Subsequent runs will be MUCH faster (10,000+ samples/sec)")
-            print("=" * 60)
-            input("Press Enter to start precomputation (or Ctrl+C to cancel)...")
-            precomputeDataset(coverage_threshold=args.coverage)
-            print("\n" + "=" * 60)
-            print("✓ Precomputation complete! Starting training...")
-            print("=" * 60)
 
         train_ds, val_ds, _ = loadDatasetLiveAugmented(coverage_threshold=args.coverage)
 
