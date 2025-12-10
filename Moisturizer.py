@@ -626,9 +626,10 @@ class MeteoGaliciaCollector:
         if not force_recompute and cache_path.exists():
             try:
                 cache = np.load(cache_path, allow_pickle=True)
-                cached_threshold = float(cache['coverage_threshold'])
-                cached_n_days = int(cache['n_days'])
-                cached_add_coords = bool(cache['add_coordinate_features'])
+                # Use .item() to properly extract scalar from 0-d or 1-d array
+                cached_threshold = float(np.asarray(cache['coverage_threshold']).item())
+                cached_n_days = int(np.asarray(cache['n_days']).item())
+                cached_add_coords = bool(np.asarray(cache['add_coordinate_features']).item())
 
                 # Get current n_days from timeseries
                 if timeseries_df is None:
@@ -2888,6 +2889,10 @@ def loadDatasetLiveAugmented(coverage_threshold: float = DEFAULT_COVERAGE_THRESH
         return
 
     print(f"\nUsing {len(filtered_params)} filtered parameters...")
+
+    # Use canonical normalization stats from buildDataset()
+    norm_stats_path = collector.data_dir / "normalization_stats.npz"
+
     dataset = AugmentedLiveDataset.from_base_dataset(
         timeseries=str(collector.timeseries_file),
         stations=str(collector.stations_file),
@@ -2898,6 +2903,7 @@ def loadDatasetLiveAugmented(coverage_threshold: float = DEFAULT_COVERAGE_THRESH
         n_nearby_available=5,
         n_nearby_in_features=4,
         normalize=True,
+        norm_stats_path=str(norm_stats_path),
     )
     # Train/val/test split
     print("\n" + "=" * 60)
