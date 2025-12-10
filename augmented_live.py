@@ -12,6 +12,7 @@ from Moisturizer import (
     expand_canonical_to_augmented_stats,
     normalize_features,
     normalize_target,
+    FeatureLayout,
     NORMALIZED_INVALID_MARKER,
 )
 
@@ -343,15 +344,14 @@ class AugmentedLiveDataset(Dataset):
 
     def _build_column_indices(self):
         """Precompute column indices for efficient slicing"""
-        n_params = len(self.feature_params)
+        # Use FeatureLayout for consistent dimension calculations
+        layout = FeatureLayout(n_params=len(self.feature_params), n_nearby=self.n_nearby_in_features)
 
-        self.n_target_features = n_params
-        self.nearby_features_per_station = 1 + n_params + 1  # distance + features + soil
+        self.n_target_features = layout.n_target_features
+        self.nearby_features_per_station = layout.nearby_features_per_station
 
         # Output dimensions
-        self.n_output_features = self.n_target_features + (
-            self.nearby_features_per_station * self.n_nearby_in_features
-        )
+        self.n_output_features = layout.n_total_features
 
         # Target columns (unchanged across augmentations)
         self.target_cols = np.arange(self.n_target_features)

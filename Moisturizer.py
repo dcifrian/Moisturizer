@@ -155,6 +155,58 @@ def denormalize_target(normalized_value, target_min, target_max):
     return (normalized_value + 1.0) / 2.0 * (target_max - target_min) + target_min
 
 
+class FeatureLayout:
+    """
+    Calculate and store feature layout dimensions for soil moisture prediction.
+
+    The feature layout consists of:
+    - Target station features: n_params weather/coordinate parameters
+    - For each nearby station: 1 (distance) + n_params (features) + 1 (soil moisture)
+
+    Usage:
+        layout = FeatureLayout(n_params=26, n_nearby=4)
+        print(layout.n_target_features)  # 26
+        print(layout.nearby_features_per_station)  # 28 (1 + 26 + 1)
+        print(layout.n_total_features)  # 138 (26 + 28*4)
+    """
+    __slots__ = ('n_params', 'n_nearby', 'n_target_features',
+                 'nearby_features_per_station', 'n_total_features')
+
+    def __init__(self, n_params: int, n_nearby: int):
+        """
+        Initialize feature layout.
+
+        Args:
+            n_params: Number of weather/coordinate parameters per station
+            n_nearby: Number of nearby stations in the feature vector
+        """
+        self.n_params = n_params
+        self.n_nearby = n_nearby
+
+        # Target station features (just the parameters)
+        self.n_target_features = n_params
+
+        # Nearby station features: distance + params + soil moisture
+        self.nearby_features_per_station = 1 + n_params + 1
+
+        # Total features: target + (nearby features * n_nearby)
+        self.n_total_features = self.n_target_features + (
+            self.nearby_features_per_station * n_nearby
+        )
+
+    def __repr__(self):
+        return (f"FeatureLayout(n_params={self.n_params}, n_nearby={self.n_nearby}, "
+                f"total={self.n_total_features})")
+
+    def nearby_start_idx(self, slot: int) -> int:
+        """Get the starting feature index for a nearby station slot (0-indexed)."""
+        return self.n_target_features + (slot * self.nearby_features_per_station)
+
+    def nearby_end_idx(self, slot: int) -> int:
+        """Get the ending feature index (exclusive) for a nearby station slot."""
+        return self.nearby_start_idx(slot) + self.nearby_features_per_station
+
+
 def expand_canonical_to_augmented_stats(canonical_stats, n_params, n_nearby_in_features,
                                         n_nearby_available=None, augmented=False):
     """

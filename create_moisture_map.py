@@ -28,6 +28,7 @@ from Moisturizer import (
     expand_canonical_to_augmented_stats,
     normalize_features,
     denormalize_target,
+    FeatureLayout,
     INVALID_MARKER_API,
     INVALID_MARKER_MISSING,
     NORMALIZED_INVALID_MARKER,
@@ -326,11 +327,12 @@ def build_sequence_for_any_station(
 
     # Separate coordinate features from timeseries parameters
     coordinate_features = {'altitude', 'utmx', 'utmy'}  # Use set for O(1) lookup
-    
-    # Calculate feature dimensions
-    target_features_per_timestep = len(feature_params)
-    nearby_features_per_timestep = (len(feature_params) + 1 + 1)  # features + soil moisture + distance
-    total_features = target_features_per_timestep + (nearby_features_per_timestep * n_nearest)
+
+    # Calculate feature dimensions using FeatureLayout
+    layout = FeatureLayout(n_params=len(feature_params), n_nearby=n_nearest)
+    target_features_per_timestep = layout.n_target_features
+    nearby_features_per_timestep = layout.nearby_features_per_station
+    total_features = layout.n_total_features
 
     # Initialize arrays
     features = np.full((seq_length, total_features), missing_value, dtype=np.float32)
@@ -830,11 +832,12 @@ def build_sequence_for_virtual_station(
     
     # Coordinate features
     coordinate_features = {'altitude', 'utmx', 'utmy'}
-    
-    # Calculate feature dimensions (same structure as real stations)
-    target_features_per_timestep = len(feature_params)
-    nearby_features_per_timestep = (len(feature_params) + 1 + 1)  # features + soil moisture + distance
-    total_features = target_features_per_timestep + (nearby_features_per_timestep * n_nearest)
+
+    # Calculate feature dimensions using FeatureLayout
+    layout = FeatureLayout(n_params=len(feature_params), n_nearby=n_nearest)
+    target_features_per_timestep = layout.n_target_features
+    nearby_features_per_timestep = layout.nearby_features_per_station
+    total_features = layout.n_total_features
     
     # Initialize arrays
     features = np.full((seq_length, total_features), missing_value, dtype=np.float32)
@@ -1110,10 +1113,11 @@ def debug_find_worst_offenders(
         return
         
     print(f"Showing top {min(top_n, len(offenders))} worst offenders:\n")
-    
-    # Feature structure: target_features + n_nearby * (distance + features + soil_moisture)
-    n_target_features = len(feature_params)
-    nearby_features_per_station = len(feature_params) + 1 + 1  # features + distance + soil_moisture
+
+    # Feature structure using FeatureLayout
+    layout = FeatureLayout(n_params=len(feature_params), n_nearby=n_nearest)
+    n_target_features = layout.n_target_features
+    nearby_features_per_station = layout.nearby_features_per_station
     
     for rank, off in enumerate(offenders[:top_n]):
         vr = off['virtual_result']

@@ -19,6 +19,7 @@ from Moisturizer import (
     MeteoGaliciaCollector,
     SoilMoistureSequenceDataset,
     expand_canonical_to_augmented_stats,
+    FeatureLayout,
 )
 import tempfile
 import shutil
@@ -365,10 +366,11 @@ def generate_all_augmentations_sequential(
     print(f"   Permutations per skip: {len(all_permutations)}")
     print(f"   Total augmentations per base: {total_augmentations}")
 
-    # Calculate dimensions
-    target_features = len(filtered_params)
-    nearby_features_per_station = 1 + len(filtered_params) + 1
-    total_features = target_features + (nearby_features_per_station * n_nearby_in_features)
+    # Calculate dimensions using FeatureLayout
+    layout = FeatureLayout(n_params=len(filtered_params), n_nearby=n_nearby_in_features)
+    target_features = layout.n_target_features
+    nearby_features_per_station = layout.nearby_features_per_station
+    total_features = layout.n_total_features
     total_samples = len(base_dataset.sample_index) * total_augmentations
 
     print(f"   Total augmented samples: {total_samples:,}")
@@ -777,9 +779,10 @@ def generate_all_augmentations_batched(
 
     # Create batch info tuples for all batches
     # Note: No longer passing dataset_params in batch_info since dataset is loaded in initializer
-    target_features = len(filtered_params)
-    nearby_features_per_station = 1 + len(filtered_params) + 1
-    total_features = target_features + (nearby_features_per_station * n_nearby_in_features)
+    layout = FeatureLayout(n_params=len(filtered_params), n_nearby=n_nearby_in_features)
+    target_features = layout.n_target_features
+    nearby_features_per_station = layout.nearby_features_per_station
+    total_features = layout.n_total_features
     aug_params = {
         'dimensions': (seq_length, n_nearby_available, n_nearby_in_features),
         'skip_patterns': skip_patterns,
@@ -812,9 +815,7 @@ def generate_all_augmentations_batched(
         print(f"\n4. Loading normalization stats...")
 
         canonical_stats_path = Path(data_dir) / "normalization_stats.npz"
-        target_features_count = len(filtered_params)
-        nearby_features_per_station = 1 + len(filtered_params) + 1  # distance + features + soil
-        augmented_total_features = target_features_count + (nearby_features_per_station * n_nearby_in_features)
+        # Layout already computed above, reuse total_features
 
         if canonical_stats_path.exists():
             print(f"   Loading from {canonical_stats_path}...")
@@ -1121,9 +1122,11 @@ def generate_all_augmentations_batched(
     validation_indices = np.random.choice(len(base_dataset.sample_index),
                                          size=num_samples_validation, replace=False)
 
-    target_features_count = len(filtered_params)
-    nearby_features_per_station = 1 + len(filtered_params) + 1
-    expected_total_features = target_features_count + (nearby_features_per_station * n_nearby_in_features)
+    # Use FeatureLayout for consistent dimension calculations
+    validation_layout = FeatureLayout(n_params=len(filtered_params), n_nearby=n_nearby_in_features)
+    target_features_count = validation_layout.n_target_features
+    nearby_features_per_station = validation_layout.nearby_features_per_station
+    expected_total_features = validation_layout.n_total_features
 
     expected_feature_mins = np.full(expected_total_features, np.inf, dtype=np.float32)
     expected_feature_maxs = np.full(expected_total_features, -np.inf, dtype=np.float32)
