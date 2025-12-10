@@ -191,11 +191,10 @@ class AugmentedLiveDataset(Dataset):
             # Default path for canonical stats
             canonical_stats_path = norm_stats_path
             if canonical_stats_path is None:
-                # Use a standard location next to base dataset
-                if precomputed_path:
-                    canonical_stats_path = str(Path(precomputed_path).parent / "normalization_stats_canonical.npz")
-                else:
-                    canonical_stats_path = "normalization_stats_canonical.npz"
+                # Use standard location in meteogalicia_data directory
+                # This matches where buildDataset() saves normalization_stats.npz
+                data_dir = Path(dense_array_path).parent
+                canonical_stats_path = str(data_dir / "normalization_stats.npz")
 
             print(f"\n4. Loading/computing normalization stats...")
 
