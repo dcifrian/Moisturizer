@@ -17,7 +17,6 @@ import time
 from pathlib import Path
 import zipfile
 from tqdm import tqdm
-from augmented_live import AugmentedLiveDataset
 
 # Model loader - optional, only needed for inference
 try:
@@ -3151,6 +3150,9 @@ def loadDataset(use_precomputed=True, normalize=True, precomputed_path=None, nor
     return train_ds, val_ds, test_ds
 
 def loadDatasetLiveAugmented(coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD):
+    # Lazy import to avoid circular dependency
+    from augmented_live import AugmentedLiveDataset
+
     collector = MeteoGaliciaCollector()  # Does nothing, just for the paths
     print("\n" + "=" * 60)
     print("STEP 1: Loading PyTorch Dataset")
