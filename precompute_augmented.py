@@ -15,19 +15,16 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from itertools import permutations
-from Moisturizer import MeteoGaliciaCollector, SoilMoistureSequenceDataset
+from Moisturizer import (
+    MeteoGaliciaCollector,
+    SoilMoistureSequenceDataset,
+    expand_canonical_to_augmented_stats,
+)
 import tempfile
 import shutil
 import multiprocessing as mp
 from functools import partial
 from tqdm import tqdm
-
-
-def _safe_scalar_from_array(arr):
-    """Safely extract scalar from numpy array (handles 0-d, 1-d, and scalar)."""
-    if hasattr(arr, 'ndim'):
-        return float(arr.item()) if arr.ndim == 0 else float(arr[0])
-    return float(arr)
 
 
 def _process_batch_direct_write(args):
@@ -389,77 +386,31 @@ def generate_all_augmentations_sequential(
 
         # Try to load canonical stats from file first
         canonical_stats_path = Path(data_dir) / "normalization_stats.npz"
-        target_features_count = len(filtered_params)
-        nearby_features_per_station_calc = 1 + len(filtered_params) + 1  # distance + features + soil
-        augmented_total_features = target_features_count + (nearby_features_per_station_calc * n_nearby_in_features)
 
         if canonical_stats_path.exists():
             print(f"   Loading from {canonical_stats_path}...")
             stats = np.load(canonical_stats_path, allow_pickle=True)
 
             # Check if canonical format is available
-            if 'target_feature_mins' in stats:
-                # Use canonical per-feature-type stats
-                target_feature_mins = stats['target_feature_mins']
-                target_feature_maxs = stats['target_feature_maxs']
-                target_min = _safe_scalar_from_array(stats['target_min'])
-                target_max = _safe_scalar_from_array(stats['target_max'])
-
-                # Check for new per-slot format vs old format
-                if 'nearby_slot_mins' not in stats:
-                    raise ValueError(
-                        "Stats file missing 'nearby_slot_mins' (old format not supported). "
-                        "Regenerate the base dataset with buildDataset() to create new format stats."
-                    )
-
-                # New per-slot format: [n_nearby_slots, nearby_features_per_station]
-                nearby_slot_mins = np.asarray(stats['nearby_slot_mins'])
-                nearby_slot_maxs = np.asarray(stats['nearby_slot_maxs'])
-                n_slots_available = nearby_slot_mins.shape[0]
-
-                if n_nearby_available > n_slots_available:
-                    raise ValueError(
-                        f"n_nearby_available ({n_nearby_available}) > available slots in stats ({n_slots_available}). "
-                        f"Regenerate nearest_stations.csv with more neighbors using regenerate_nearest_stations()."
-                    )
-
-                # For augmented: aggregate stats across available slots
-                nearby_feature_mins = nearby_slot_mins[:n_nearby_available, :].min(axis=0)
-                nearby_feature_maxs = nearby_slot_maxs[:n_nearby_available, :].max(axis=0)
-                print(f"   Using per-slot stats, aggregating {n_nearby_available} slots for augmentation")
-
-                # Expand to augmented layout
-                feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
-                feature_maxs = np.full(augmented_total_features, -np.inf, dtype=np.float32)
-
-                # Target features
-                feature_mins[:len(target_feature_mins)] = target_feature_mins
-                feature_maxs[:len(target_feature_maxs)] = target_feature_maxs
-
-                # Nearby features: replicate aggregated stats to all slots
-                for slot in range(n_nearby_in_features):
-                    start_idx = target_features_count + (slot * nearby_features_per_station_calc)
-                    end_idx = start_idx + nearby_features_per_station_calc
-                    feature_mins[start_idx:end_idx] = nearby_feature_mins
-                    feature_maxs[start_idx:end_idx] = nearby_feature_maxs
-
-                n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
-                print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
-            else:
+            if 'target_feature_mins' not in stats:
                 raise ValueError(
                     "Stats file missing 'target_feature_mins' (old format not supported). "
                     "Regenerate the base dataset with buildDataset() to create new format stats."
                 )
 
-            base_stats = {
-                'feature_mins': feature_mins,
-                'feature_maxs': feature_maxs,
-                'target_min': target_min,
-                'target_max': target_max
-            }
+            # Use the shared function to expand canonical stats
+            base_stats = expand_canonical_to_augmented_stats(
+                canonical_stats=stats,
+                n_params=len(filtered_params),
+                n_nearby_in_features=n_nearby_in_features,
+                n_nearby_available=n_nearby_available,
+                augmented=True
+            )
 
-            print(f"   Feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
-            print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
+            n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
+            print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
+            print(f"   Feature range: [{base_stats['feature_mins'].min():.2f}, {base_stats['feature_maxs'].max():.2f}]")
+            print(f"   Target range: [{base_stats['target_min']:.2f}, {base_stats['target_max']:.2f}]")
             print(f"   → Will normalize during generation")
         else:
             raise FileNotFoundError(
@@ -870,77 +821,33 @@ def generate_all_augmentations_batched(
             stats = np.load(canonical_stats_path, allow_pickle=True)
 
             # Check if canonical format is available
-            if 'target_feature_mins' in stats:
-                # Use canonical per-feature-type stats
-                target_feature_mins = stats['target_feature_mins']
-                target_feature_maxs = stats['target_feature_maxs']
-                target_min = _safe_scalar_from_array(stats['target_min'])
-                target_max = _safe_scalar_from_array(stats['target_max'])
-
-                # Check for new per-slot format vs old format
-                if 'nearby_slot_mins' not in stats:
-                    raise ValueError(
-                        "Stats file missing 'nearby_slot_mins' (old format not supported). "
-                        "Regenerate the base dataset with buildDataset() to create new format stats."
-                    )
-
-                # New per-slot format: [n_nearby_slots, nearby_features_per_station]
-                nearby_slot_mins = np.asarray(stats['nearby_slot_mins'])
-                nearby_slot_maxs = np.asarray(stats['nearby_slot_maxs'])
-                n_slots_available = nearby_slot_mins.shape[0]
-
-                if n_nearby_available > n_slots_available:
-                    raise ValueError(
-                        f"n_nearby_available ({n_nearby_available}) > available slots in stats ({n_slots_available}). "
-                        f"Regenerate nearest_stations.csv with more neighbors using regenerate_nearest_stations()."
-                    )
-
-                # For augmented: aggregate stats across available slots
-                nearby_feature_mins = nearby_slot_mins[:n_nearby_available, :].min(axis=0)
-                nearby_feature_maxs = nearby_slot_maxs[:n_nearby_available, :].max(axis=0)
-                print(f"   Using per-slot stats, aggregating {n_nearby_available} slots for augmentation")
-
-                # Expand to augmented layout
-                feature_mins = np.full(augmented_total_features, np.inf, dtype=np.float32)
-                feature_maxs = np.full(augmented_total_features, -np.inf, dtype=np.float32)
-
-                # Target features
-                feature_mins[:len(target_feature_mins)] = target_feature_mins
-                feature_maxs[:len(target_feature_maxs)] = target_feature_maxs
-
-                # Nearby features: replicate aggregated stats to all slots
-                for slot in range(n_nearby_in_features):
-                    start_idx = target_features_count + (slot * nearby_features_per_station)
-                    end_idx = start_idx + nearby_features_per_station
-                    feature_mins[start_idx:end_idx] = nearby_feature_mins
-                    feature_maxs[start_idx:end_idx] = nearby_feature_maxs
-
-                n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
-                print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
-            else:
+            if 'target_feature_mins' not in stats:
                 raise ValueError(
                     "Stats file missing 'target_feature_mins' (old format not supported). "
                     "Regenerate the base dataset with buildDataset() to create new format stats."
                 )
 
-            print(f"   Feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
-            print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
-            print(f"   → Workers will normalize data during generation (saves ~2 hours!)")
+            # Use the shared function to expand canonical stats
+            base_stats = expand_canonical_to_augmented_stats(
+                canonical_stats=stats,
+                n_params=len(filtered_params),
+                n_nearby_in_features=n_nearby_in_features,
+                n_nearby_available=n_nearby_available,
+                augmented=True
+            )
 
-            # Create stats dict
-            base_stats = {
-                'feature_mins': feature_mins,
-                'feature_maxs': feature_maxs,
-                'target_min': target_min,
-                'target_max': target_max
-            }
+            n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
+            print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
+            print(f"   Feature range: [{base_stats['feature_mins'].min():.2f}, {base_stats['feature_maxs'].max():.2f}]")
+            print(f"   Target range: [{base_stats['target_min']:.2f}, {base_stats['target_max']:.2f}]")
+            print(f"   → Workers will normalize data during generation (saves ~2 hours!)")
 
             # Add stats to aug_params for workers
             aug_params['normalize'] = True
-            aug_params['feature_mins'] = feature_mins
-            aug_params['feature_maxs'] = feature_maxs
-            aug_params['target_min'] = float(target_min)
-            aug_params['target_max'] = float(target_max)
+            aug_params['feature_mins'] = base_stats['feature_mins']
+            aug_params['feature_maxs'] = base_stats['feature_maxs']
+            aug_params['target_min'] = float(base_stats['target_min'])
+            aug_params['target_max'] = float(base_stats['target_max'])
             aug_params['invalid_markers'] = [-9999.0, -1000.0]
         else:
             raise FileNotFoundError(

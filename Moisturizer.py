@@ -46,6 +46,108 @@ NORMALIZED_INVALID_MARKER = -2.0   # Value used after normalization (outside [-1
 DEFAULT_COVERAGE_THRESHOLD = 0.25  # Minimum data coverage for a parameter to be included
 
 
+def expand_canonical_to_augmented_stats(canonical_stats, n_params, n_nearby_in_features,
+                                        n_nearby_available=None, augmented=False):
+    """
+    Expand per-slot canonical stats to the feature layout needed for inference.
+
+    Canonical stats have:
+        - target_feature_mins/maxs: [n_params] for target station features
+        - nearby_slot_mins/maxs: [n_nearby_slots, nearby_features_per_station] per-slot stats
+        - target_min/max: scalar for target (soil moisture prediction target)
+        - n_nearby_slots: number of slots stored in the canonical stats
+
+    Output layout is:
+        - [n_params] target features
+        - For each of n_nearby_in_features stations: [1 + n_params + 1] = (distance, params, soil)
+
+    For non-augmented models: use per-slot stats directly (first n_nearby_in_features slots)
+    For augmented models: compute min/max across n_nearby_available slots for each feature type
+
+    Args:
+        canonical_stats: dict-like with canonical stat arrays
+        n_params: number of weather parameters per station
+        n_nearby_in_features: number of nearby stations in the model's input
+        n_nearby_available: for augmented, how many nearby were available for permutations
+                           (ignored if augmented=False)
+        augmented: whether the model was trained with augmentation
+
+    Returns:
+        dict with 'feature_mins', 'feature_maxs', 'target_min', 'target_max'
+    """
+    target_feat_mins = np.asarray(canonical_stats['target_feature_mins'])
+    target_feat_maxs = np.asarray(canonical_stats['target_feature_maxs'])
+
+    # Handle 0-d arrays for target_min/max
+    target_min_val = canonical_stats['target_min']
+    target_max_val = canonical_stats['target_max']
+    if hasattr(target_min_val, 'ndim'):
+        target_min = float(target_min_val.item()) if target_min_val.ndim == 0 else float(target_min_val[0])
+        target_max = float(target_max_val.item()) if target_max_val.ndim == 0 else float(target_max_val[0])
+    else:
+        target_min = float(target_min_val)
+        target_max = float(target_max_val)
+
+    # Require new per-slot format
+    if 'nearby_slot_mins' not in canonical_stats:
+        raise ValueError(
+            "Stats file missing 'nearby_slot_mins' (old format not supported). "
+            "Regenerate the base dataset with buildDataset() to create new format stats."
+        )
+
+    # New per-slot format
+    nearby_slot_mins = np.asarray(canonical_stats['nearby_slot_mins'])
+    nearby_slot_maxs = np.asarray(canonical_stats['nearby_slot_maxs'])
+    n_slots_available = nearby_slot_mins.shape[0]
+    nearby_features_per_station = nearby_slot_mins.shape[1]
+
+    # Build output layout
+    n_output_features = n_params + n_nearby_in_features * nearby_features_per_station
+
+    feature_mins = np.full(n_output_features, np.inf, dtype=np.float32)
+    feature_maxs = np.full(n_output_features, -np.inf, dtype=np.float32)
+
+    # Target station features (same for any configuration)
+    feature_mins[:n_params] = target_feat_mins[:n_params]
+    feature_maxs[:n_params] = target_feat_maxs[:n_params]
+
+    if augmented:
+        # Augmented: each slot sees data from any of the n_nearby_available stations
+        # So for each feature type, take min across all available slots and max across all
+        if n_nearby_available is None:
+            raise ValueError("n_nearby_available required for augmented=True")
+        if n_nearby_available > n_slots_available:
+            raise ValueError(f"n_nearby_available ({n_nearby_available}) > available slots in stats ({n_slots_available})")
+
+        # Compute aggregated stats across the available slots
+        agg_mins = nearby_slot_mins[:n_nearby_available, :].min(axis=0)
+        agg_maxs = nearby_slot_maxs[:n_nearby_available, :].max(axis=0)
+
+        # Apply to all output slots (they all see the same range due to permutations)
+        for i in range(n_nearby_in_features):
+            start_idx = n_params + i * nearby_features_per_station
+            end_idx = start_idx + nearby_features_per_station
+            feature_mins[start_idx:end_idx] = agg_mins
+            feature_maxs[start_idx:end_idx] = agg_maxs
+    else:
+        # Non-augmented: use per-slot stats directly (full range utilization)
+        if n_nearby_in_features > n_slots_available:
+            raise ValueError(f"n_nearby_in_features ({n_nearby_in_features}) > available slots in stats ({n_slots_available})")
+
+        for i in range(n_nearby_in_features):
+            start_idx = n_params + i * nearby_features_per_station
+            end_idx = start_idx + nearby_features_per_station
+            feature_mins[start_idx:end_idx] = nearby_slot_mins[i]
+            feature_maxs[start_idx:end_idx] = nearby_slot_maxs[i]
+
+    return {
+        'feature_mins': feature_mins,
+        'feature_maxs': feature_maxs,
+        'target_min': target_min,
+        'target_max': target_max,
+    }
+
+
 class MeteoGaliciaCollector:
     """Collector for MeteoGalicia weather station data"""
 

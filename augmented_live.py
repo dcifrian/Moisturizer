@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Union
 import os
 
+from Moisturizer import expand_canonical_to_augmented_stats
+
 
 class AugmentedLiveDataset(Dataset):
     """
@@ -396,60 +398,26 @@ class AugmentedLiveDataset(Dataset):
                 print(f"   Warning: Feature params don't match")
                 return False
 
-            # Load canonical stats
-            target_feature_mins = stats['target_feature_mins']
-            target_feature_maxs = stats['target_feature_maxs']
-
-            # Handle 0-d, 1-d arrays and scalars for target min/max
-            target_min_val = stats['target_min']
-            target_max_val = stats['target_max']
-            if hasattr(target_min_val, 'ndim'):
-                self.target_min = float(target_min_val.item()) if target_min_val.ndim == 0 else float(target_min_val[0])
-                self.target_max = float(target_max_val.item()) if target_max_val.ndim == 0 else float(target_max_val[0])
-            else:
-                self.target_min = float(target_min_val)
-                self.target_max = float(target_max_val)
-
-            # Require new per-slot format
-            if 'nearby_slot_mins' not in stats:
+            # Check if canonical format is available
+            if 'target_feature_mins' not in stats:
                 raise ValueError(
-                    "Stats file missing 'nearby_slot_mins' (old format not supported). "
+                    "Stats file missing 'target_feature_mins' (old format not supported). "
                     "Regenerate the base dataset with buildDataset() to create new format stats."
                 )
 
-            # New per-slot format: [n_nearby_slots, nearby_features_per_station]
-            nearby_slot_mins = np.asarray(stats['nearby_slot_mins'])
-            nearby_slot_maxs = np.asarray(stats['nearby_slot_maxs'])
-            n_slots_available = nearby_slot_mins.shape[0]
+            # Use the shared function to expand canonical stats
+            expanded_stats = expand_canonical_to_augmented_stats(
+                canonical_stats=stats,
+                n_params=len(self.feature_params),
+                n_nearby_in_features=self.n_nearby_in_features,
+                n_nearby_available=self.n_nearby_available,
+                augmented=True
+            )
 
-            if self.n_nearby_available > n_slots_available:
-                raise ValueError(
-                    f"n_nearby_available ({self.n_nearby_available}) > available slots in stats ({n_slots_available}). "
-                    f"Regenerate nearest_stations.csv with more neighbors using regenerate_nearest_stations()."
-                )
-
-            # For augmented: aggregate stats across available slots
-            # (any slot can receive data from any of the available stations)
-            nearby_feature_mins = nearby_slot_mins[:self.n_nearby_available, :].min(axis=0)
-            nearby_feature_maxs = nearby_slot_maxs[:self.n_nearby_available, :].max(axis=0)
-            print(f"   Using per-slot stats, aggregating {self.n_nearby_available} slots for augmentation")
-
-            # Expand to current augmented layout
-            self.feature_mins = np.full(self.n_output_features, np.inf, dtype=np.float32)
-            self.feature_maxs = np.full(self.n_output_features, -np.inf, dtype=np.float32)
-
-            # Target features
-            self.feature_mins[:len(target_feature_mins)] = target_feature_mins
-            self.feature_maxs[:len(target_feature_maxs)] = target_feature_maxs
-
-            # Nearby features: replicate aggregated stats to all output slots
-            # (since all slots can see any available station's data due to permutations)
-            n_params = len(self.feature_params)
-            for slot in range(self.n_nearby_in_features):
-                start_idx = n_params + (slot * self.nearby_features_per_station)
-                end_idx = start_idx + self.nearby_features_per_station
-                self.feature_mins[start_idx:end_idx] = nearby_feature_mins
-                self.feature_maxs[start_idx:end_idx] = nearby_feature_maxs
+            self.feature_mins = expanded_stats['feature_mins']
+            self.feature_maxs = expanded_stats['feature_maxs']
+            self.target_min = expanded_stats['target_min']
+            self.target_max = expanded_stats['target_max']
 
             print(f"   ✓ Loaded stats from {path} ({int(stats['n_base_samples'][0]):,} samples)")
             return True
