@@ -1217,75 +1217,29 @@ def debug_find_worst_offenders(
     print("=" * 80)
 
 
-def create_moisture_map(
-    model_path,
-    target_date=None,
-    output_file='galicia_moisture_map.png',
-    device='cuda',
-    include_weather_maps=False,
-    virtual_grid_size=100,  # Default to 100x100 grid
-    moisture_range=(0.07, 0.40),  # Fixed range tuple or 'auto' for data-based range
-    hide_markers=None,  # Set of markers to hide: {'real', 'predicted', 'virtual'}
-    real_moisture_only=False,  # If True, only use real moisture stations for the map
-    all_maps=False,  # If True, create all map variants efficiently (reuses data)
-    n_nearby=4,  # Number of nearby stations used in the model's input
-    n_nearby_available=None  # For augmented: how many nearby stations were available for permutations
-):
+def _load_map_data(collector, model_path, target_date, device, n_nearby, n_nearby_available, augmented):
     """
-    Create a beautiful moisture map of all Galicia
+    Load all data files, model, and build lookup dictionaries.
 
-    Args:
-        model_path: Path to trained model checkpoint
-        target_date: Date to predict (default: most recent available)
-        output_file: Path to save the visualization
-        device: 'cuda' or 'cpu'
-        include_weather_maps: If True, also create cumulative precipitation and water balance maps
-        virtual_grid_size: If set, create a NxN grid of virtual stations with interpolated
-                          features and model-predicted soil moisture (e.g. 100 for 100 by 100 grid)
-        moisture_range: Tuple (min, max) for colorbar range, or 'auto' for data-based range
-        hide_markers: Set of marker types to hide: 'real', 'predicted', 'virtual'
-        real_moisture_only: If True, only use real moisture stations (skip predictions)
-        all_maps: If True, create all map variants efficiently by reusing data:
-                  - {base}_moisture_map.png (full: real + predicted + virtual)
-                  - {base}_moisture_map_novirtual.png (real + predicted only)
-                  - {base}_moisture_map_realonly.png (real sensor data only)
-                  - {base}_precipitation.png (cumulative precipitation)
-                  - {base}_water_balance.png (cumulative water balance)
-        n_nearby_available: For augmented models, how many nearby stations were available
-                           for permutations during training
+    Returns:
+        dict with keys: stations_df, timeseries_df, nearest_df, stations_lookup,
+                        nearest_lookup, timeseries_lookup, norm_stats, model,
+                        filtered_params, coastline_points, galicia_land, target_date
     """
-    augmented= n_nearby_available > n_nearby
-    if hide_markers is None:
-        hide_markers = set()
-
-    # When all_maps is enabled, ensure we collect all data types
-    if all_maps:
-        real_moisture_only = False  # Need predictions
-        if virtual_grid_size is None:
-            virtual_grid_size = 100  # Need virtual grid
-        include_weather_maps = True  # Will create weather maps too
-
-    print("=" * 60)
-    print("CREATING GALICIA SOIL MOISTURE MAP")
-    print("=" * 60)
-
-    # Initialize collector
-    collector = MeteoGaliciaCollector()
-
     # Load all data files ONCE at the start
     print("\nLoading data files...")
     stations_df = pd.read_csv(collector.stations_file)
     nearest_df = pd.read_csv(collector.nearest_file)
-    
+
     # Load timeseries ONCE with optimized dtypes
     print("  Loading timeseries (this may take a moment)...")
     timeseries_df = pd.read_csv(
         collector.timeseries_file,
-        dtype={'station_id': np.int32, 'value': np.float32}  # Specify dtypes for efficiency
+        dtype={'station_id': np.int32, 'value': np.float32}
     )
     timeseries_df['date'] = pd.to_datetime(timeseries_df['date'])
     print(f"  ✓ Loaded {len(timeseries_df):,} timeseries records")
-    
+
     print(f"\nFound {len(stations_df)} stations total")
     print(f"  - {stations_df['has_soil_moisture'].sum()} with soil moisture sensors")
     print(f"  - {(~stations_df['has_soil_moisture']).sum()} without sensors (will predict)")
@@ -1305,9 +1259,9 @@ def create_moisture_map(
     print(f"\nTarget date: {target_date.strftime('%Y-%m-%d')}")
 
     # Load model
-    model = load_model(model_path, device,compilation=False)
+    model = load_model(model_path, device, compilation=False)
 
-    # Analyze parameter coverage (pass pre-loaded DataFrames to avoid re-reading)
+    # Analyze parameter coverage
     print("\nAnalyzing parameter coverage...")
     _, filtered_params = collector.analyze_parameter_coverage(
         timeseries_df=timeseries_df,
@@ -1317,13 +1271,10 @@ def create_moisture_map(
 
     # Load canonical normalization stats and expand to augmented layout
     n_params = len(filtered_params)
-
     canonical_stats_path = str(collector.data_dir / "normalization_stats.npz")
     canonical_stats = np.load(canonical_stats_path)
 
-    # Check if this is canonical format (has target_feature_mins) or old augmented format
     if 'target_feature_mins' in canonical_stats:
-        # Canonical format - expand to augmented layout
         aug_str = f"augmented (n_nearby_available={n_nearby_available})" if augmented else "non-augmented"
         print(f"  Using canonical stats, expanding to {n_nearby}-nearby {aug_str} layout...")
         norm_stats = expand_canonical_to_augmented_stats(
@@ -1331,19 +1282,14 @@ def create_moisture_map(
             n_nearby_available=n_nearby_available, augmented=augmented
         )
     else:
-        # Old augmented format - use directly (backward compatibility)
         print(f"  Using legacy augmented stats format...")
         norm_stats = canonical_stats
 
-    # Build fast lookup for timeseries data
+    # Build lookup dictionaries
     print("\nBuilding fast timeseries lookup...")
     start_date = target_date - timedelta(days=64 - 1)
 
-    # Collect all station IDs we'll need (all stations + their nearby stations)
-    # OPTIMIZED: Pre-build nearest stations lookup dict to avoid repeated DataFrame filtering
-    all_needed_stations = set(stations_df['station_id'].tolist())
-    
-    # Build nearest lookup dict once - stores full info including distance
+    # Build nearest lookup dict once
     nearest_lookup = {}
     for _, row in nearest_df.iterrows():
         station_id = int(row['station_id'])
@@ -1357,8 +1303,8 @@ def create_moisture_map(
                     'distance': float(row[f'nearest_{i}_distance'])
                 })
         nearest_lookup[station_id] = nearby_with_soil
-    
-    # Build stations lookup dict once - for coordinate features
+
+    # Build stations lookup dict once
     stations_lookup = {}
     for _, row in stations_df.iterrows():
         sid = int(row['station_id'])
@@ -1367,8 +1313,9 @@ def create_moisture_map(
             'utmx': float(row['utmx']) if pd.notna(row['utmx']) else None,
             'utmy': float(row['utmy']) if pd.notna(row['utmy']) else None
         }
-    
-    # Now collect all needed stations efficiently
+
+    # Collect all needed stations
+    all_needed_stations = set(stations_df['station_id'].tolist())
     for station_id in stations_df[~stations_df['has_soil_moisture']]['station_id']:
         if station_id in nearest_lookup:
             for nearby in nearest_lookup[station_id]:
@@ -1380,10 +1327,34 @@ def create_moisture_map(
     )
     print(f"  ✓ Built lookup with {len(timeseries_lookup)} entries for {len(all_needed_stations)} stations")
 
-    # Phase 1: Collect real data and build sequences for predictions
+    return {
+        'stations_df': stations_df,
+        'timeseries_df': timeseries_df,
+        'nearest_df': nearest_df,
+        'stations_lookup': stations_lookup,
+        'nearest_lookup': nearest_lookup,
+        'timeseries_lookup': timeseries_lookup,
+        'norm_stats': norm_stats,
+        'model': model,
+        'filtered_params': filtered_params,
+        'coastline_points': coastline_points,
+        'galicia_land': galicia_land,
+        'target_date': target_date,
+    }
+
+
+def _collect_real_and_build_sequences(stations_df, timeseries_lookup, nearest_lookup,
+                                       stations_lookup, filtered_params, norm_stats,
+                                       target_date, n_nearby, real_moisture_only):
+    """
+    Phase 1: Collect real moisture data and build sequences for stations needing prediction.
+
+    Returns:
+        tuple: (real_results, sequences_to_predict)
+    """
     print("\nPhase 1: Gathering real data and building sequences...")
     real_results = []
-    sequences_to_predict = []  # List of (station_info, features_norm, mask)
+    sequences_to_predict = []
 
     for idx, station in stations_df.iterrows():
         if idx % 20 == 0:
@@ -1395,7 +1366,6 @@ def create_moisture_map(
         has_sensor = station['has_soil_moisture']
 
         if has_sensor:
-            # Get real data - OPTIMIZED: use pre-built lookup instead of re-reading CSV
             moisture = get_real_soil_moisture_from_lookup(timeseries_lookup, station_id, target_date)
             if moisture is not None:
                 real_results.append({
@@ -1407,13 +1377,12 @@ def create_moisture_map(
                     'name': station.get('name', f'Station {station_id}')
                 })
         elif not real_moisture_only:
-            # Build sequence for later batch inference (skip if real_moisture_only)
             sequence_data = build_sequence_for_any_station(
                 station_id=station_id,
                 end_date=target_date,
                 timeseries_lookup=timeseries_lookup,
-                nearest_lookup=nearest_lookup,  # Use pre-built dict
-                stations_lookup=stations_lookup,  # Use pre-built dict
+                nearest_lookup=nearest_lookup,
+                stations_lookup=stations_lookup,
                 feature_params=filtered_params,
                 norm_stats=norm_stats,
                 seq_length=64,
@@ -1431,174 +1400,197 @@ def create_moisture_map(
                 sequences_to_predict.append((station_info, features_norm, mask))
 
     print(f"✓ Phase 1 complete: {len(real_results)} real, {len(sequences_to_predict)} to predict")
+    return real_results, sequences_to_predict
 
-    # Phase 2: Batch inference for all predictions
+
+def _run_batch_inference(sequences_to_predict, model, device, collector):
+    """
+    Phase 2-3: Run batched inference and denormalize predictions.
+
+    Returns:
+        list: predicted_results
+    """
     predicted_results = []
-    if sequences_to_predict:
-        print(f"\nPhase 2: Running batched inference for {len(sequences_to_predict)} stations...")
+    if not sequences_to_predict:
+        return predicted_results
 
-        batch_size = len(sequences_to_predict)
+    print(f"\nPhase 2: Running batched inference for {len(sequences_to_predict)} stations...")
 
-        # Stack all sequences - same as unsqueeze(0) but for multiple items
+    batch_size = len(sequences_to_predict)
+
+    X_batch = torch.stack([
+        torch.from_numpy(features_norm) for _, features_norm, _ in sequences_to_predict
+    ])
+
+    print(f"  Batch shape: {X_batch.shape}")
+
+    x_gpu = torch.zeros([batch_size, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
+                       dtype=torch.float16, device=device)
+    torch._dynamo.config.disable = True
+    with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
+        x_gpu[:batch_size, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
+        x = x_gpu[:batch_size, :, :]
+        predictions_normalized = model(x).cpu()
+
+    print(f"✓ Inference complete")
+
+    # Phase 3: Denormalize and assemble results
+    print(f"\nPhase 3: Denormalizing predictions...")
+    for i, (station_info, _, _) in enumerate(sequences_to_predict):
+        pred_normalized = predictions_normalized[i].item()
+        pred_denorm = denormalize_soil_moisture(
+            pred_normalized,
+            str(collector.data_dir / "normalization_stats.npz")
+        )
+
+        predicted_results.append({
+            'station_id': station_info['station_id'],
+            'latitude': station_info['latitude'],
+            'longitude': station_info['longitude'],
+            'moisture': pred_denorm,
+            'type': 'predicted',
+            'name': station_info['name']
+        })
+
+    return predicted_results
+
+
+def _create_virtual_grid_predictions(virtual_grid_size, galicia_land, stations_df, stations_lookup,
+                                      timeseries_lookup, filtered_params, norm_stats, model,
+                                      device, collector, target_date, n_nearby,
+                                      sequences_to_predict, predicted_results):
+    """
+    Phase 4: Create virtual grid and run predictions.
+
+    Returns:
+        tuple: (virtual_results, virtual_sequences)
+    """
+    virtual_results = []
+    virtual_sequences = []
+
+    if virtual_grid_size is None or virtual_grid_size <= 0:
+        return virtual_results, virtual_sequences
+
+    lon_min, lon_max = stations_df['longitude'].min(), stations_df['longitude'].max()
+    lat_min, lat_max = stations_df['latitude'].min(), stations_df['latitude'].max()
+
+    print(f"\n" + "=" * 60)
+    print(f"Phase 4: Creating {virtual_grid_size}x{virtual_grid_size} virtual grid...")
+    print("=" * 60)
+
+    virtual_stations = create_virtual_grid_stations(
+        lon_min, lon_max, lat_min, lat_max,
+        grid_size=virtual_grid_size,
+        galicia_land=galicia_land
+    )
+    print(f"  Created {len(virtual_stations)} virtual stations (land only)")
+
+    print(f"\n  Building sequences for virtual stations...")
+
+    for i, vs in enumerate(virtual_stations):
+        if i % 500 == 0:
+            print(f"    Processing virtual station {i+1}/{len(virtual_stations)}...")
+
+        nearest_real = find_nearest_real_stations(vs, stations_df, stations_lookup, n_nearest=5)
+        nearest_soil = find_nearest_stations_with_soil_moisture(vs, stations_df, stations_lookup, n_max=10)
+
+        if len(nearest_soil) < 4:
+            continue
+
+        virtual_coords_interp = interpolate_coordinate_features(vs, nearest_real, stations_lookup)
+
+        sequence_data = build_sequence_for_virtual_station(
+            virtual_station=vs,
+            end_date=target_date,
+            timeseries_lookup=timeseries_lookup,
+            nearest_real_stations=nearest_real,
+            nearest_with_soil=nearest_soil,
+            virtual_coords=virtual_coords_interp,
+            stations_lookup=stations_lookup,
+            feature_params=filtered_params,
+            norm_stats=norm_stats,
+            seq_length=64,
+            n_nearest=n_nearby
+        )
+
+        if sequence_data is not None:
+            features_norm, mask = sequence_data
+            station_info = {
+                'grid_id': vs['grid_id'],
+                'latitude': vs['latitude'],
+                'longitude': vs['longitude']
+            }
+            virtual_sequences.append((station_info, features_norm, mask))
+
+    print(f"  ✓ Built {len(virtual_sequences)} valid virtual station sequences")
+
+    # Run batch inference for virtual stations
+    if virtual_sequences:
+        print(f"\n  Running batched inference for virtual grid...")
+
+        batch_size = len(virtual_sequences)
         X_batch = torch.stack([
-            torch.from_numpy(features_norm) for _, features_norm, _ in sequences_to_predict
-        ])  # [batch_size, 64, features]
+            torch.from_numpy(features_norm) for _, features_norm, _ in virtual_sequences
+        ])
 
-        print(f"  Batch shape: {X_batch.shape}")
+        print(f"    Batch shape: {X_batch.shape}")
 
-        # Run batched inference - same pattern as original but batch_size instead of 1
         x_gpu = torch.zeros([batch_size, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
                            dtype=torch.float16, device=device)
-        torch._dynamo.config.disable = True
+
         with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
             x_gpu[:batch_size, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
             x = x_gpu[:batch_size, :, :]
-            predictions_normalized = model(x).cpu()  # [batch_size, 1] or [batch_size]
+            predictions_normalized = model(x).cpu()
 
-        print(f"✓ Inference complete")
+        print(f"  ✓ Virtual grid inference complete")
 
-        # Phase 3: Denormalize and assemble results
-        print(f"\nPhase 3: Denormalizing predictions...")
-        for i, (station_info, _, _) in enumerate(sequences_to_predict):
-            pred_normalized = predictions_normalized[i].item()  # Extract scalar same as original
+        for i, (station_info, _, _) in enumerate(virtual_sequences):
+            pred_normalized = predictions_normalized[i].item()
             pred_denorm = denormalize_soil_moisture(
                 pred_normalized,
                 str(collector.data_dir / "normalization_stats.npz")
             )
 
-            predicted_results.append({
-                'station_id': station_info['station_id'],
+            virtual_results.append({
+                'station_id': f"grid_{station_info['grid_id']}",
                 'latitude': station_info['latitude'],
                 'longitude': station_info['longitude'],
                 'moisture': pred_denorm,
-                'type': 'predicted',
-                'name': station_info['name']
+                'type': 'virtual',
+                'name': f"Virtual {station_info['grid_id']}"
             })
 
-    # Phase 4: Virtual grid predictions (if enabled and not real_moisture_only)
-    virtual_results = []
-    if virtual_grid_size is not None and virtual_grid_size > 0 and not real_moisture_only:
-        print(f"\n" + "=" * 60)
-        print(f"Phase 4: Creating {virtual_grid_size}x{virtual_grid_size} virtual grid...")
-        print("=" * 60)
-        
-        # Create virtual grid stations (land only)
-        virtual_stations = create_virtual_grid_stations(
-            lon_min, lon_max, lat_min, lat_max,
-            grid_size=virtual_grid_size,
-            galicia_land=galicia_land
-        )
-        print(f"  Created {len(virtual_stations)} virtual stations (land only)")
-        
-        # Build sequences for virtual stations
-        print(f"\n  Building sequences for virtual stations...")
-        virtual_sequences = []  # List of (station_info, features_norm, mask)
-        
-        # Pre-compute station coordinates array for fast distance calculations
-        station_coords_array = stations_df[['longitude', 'latitude']].values
-        soil_stations_mask = stations_df['has_soil_moisture'].values
-        soil_stations_df = stations_df[stations_df['has_soil_moisture']]
-        soil_coords_array = soil_stations_df[['longitude', 'latitude']].values
-        
-        for i, vs in enumerate(virtual_stations):
-            if i % 500 == 0:
-                print(f"    Processing virtual station {i+1}/{len(virtual_stations)}...")
+        print(f"  ✓ {len(virtual_results)} virtual grid predictions complete")
 
-            # Find nearest real stations for feature interpolation
-            nearest_real = find_nearest_real_stations(vs, stations_df, stations_lookup, n_nearest=5)
+    # Debug: find worst offenders
+    debug_find_worst_offenders(
+        virtual_sequences=virtual_sequences,
+        predicted_sequences=sequences_to_predict,
+        virtual_results=virtual_results,
+        predicted_results=predicted_results,
+        stations_df=stations_df,
+        stations_lookup=stations_lookup,
+        nearest_lookup={},  # Not used in debug
+        feature_params=filtered_params,
+        norm_stats=norm_stats,
+        n_nearby=n_nearby,
+        top_n=5
+    )
 
-            # Find nearest stations WITH soil moisture for context
-            nearest_soil = find_nearest_stations_with_soil_moisture(vs, stations_df, stations_lookup, n_max=10)
+    return virtual_results, virtual_sequences
 
-            if len(nearest_soil) < 4:
-                continue  # Need at least 4 nearby soil moisture stations
 
-            # Interpolate coordinate features (uses real elevation API for altitude)
-            virtual_coords_interp = interpolate_coordinate_features(vs, nearest_real, stations_lookup)
+def _generate_output_maps(real_results, predicted_results, virtual_results,
+                          coastline_points, galicia_land, target_date, output_file,
+                          moisture_range, hide_markers, all_maps, include_weather_maps,
+                          stations_df, timeseries_lookup):
+    """
+    Generate all output map files.
 
-            # Build sequence
-            sequence_data = build_sequence_for_virtual_station(
-                virtual_station=vs,
-                end_date=target_date,
-                timeseries_lookup=timeseries_lookup,
-                nearest_real_stations=nearest_real,
-                nearest_with_soil=nearest_soil,
-                virtual_coords=virtual_coords_interp,
-                stations_lookup=stations_lookup,
-                feature_params=filtered_params,
-                norm_stats=norm_stats,
-                seq_length=64,
-                n_nearest=n_nearby
-            )
-
-            if sequence_data is not None:
-                features_norm, mask = sequence_data
-                station_info = {
-                    'grid_id': vs['grid_id'],
-                    'latitude': vs['latitude'],
-                    'longitude': vs['longitude']
-                }
-                virtual_sequences.append((station_info, features_norm, mask))
-        
-        print(f"  ✓ Built {len(virtual_sequences)} valid virtual station sequences")
-        
-        # Run batch inference for virtual stations
-        if virtual_sequences:
-            print(f"\n  Running batched inference for virtual grid...")
-            
-            batch_size = len(virtual_sequences)
-            X_batch = torch.stack([
-                torch.from_numpy(features_norm) for _, features_norm, _ in virtual_sequences
-            ])
-            
-            print(f"    Batch shape: {X_batch.shape}")
-            
-            x_gpu = torch.zeros([batch_size, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
-                               dtype=torch.float16, device=device)
-            
-            with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
-                x_gpu[:batch_size, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
-                x = x_gpu[:batch_size, :, :]
-                predictions_normalized = model(x).cpu()
-            
-            print(f"  ✓ Virtual grid inference complete")
-            
-            # Denormalize and store results
-            for i, (station_info, _, _) in enumerate(virtual_sequences):
-                pred_normalized = predictions_normalized[i].item()
-                pred_denorm = denormalize_soil_moisture(
-                    pred_normalized,
-                    str(collector.data_dir / "normalization_stats.npz")
-                )
-                
-                virtual_results.append({
-                    'station_id': f"grid_{station_info['grid_id']}",
-                    'latitude': station_info['latitude'],
-                    'longitude': station_info['longitude'],
-                    'moisture': pred_denorm,
-                    'type': 'virtual',
-                    'name': f"Virtual {station_info['grid_id']}"
-                })
-            
-            print(f"  ✓ {len(virtual_results)} virtual grid predictions complete")
-        
-        # Debug: find worst offenders (virtual stations with large moisture diff from nearby predicted)
-        # Pass the actual normalized sequences so we can compare what went into the model
-        debug_find_worst_offenders(
-            virtual_sequences=virtual_sequences,
-            predicted_sequences=sequences_to_predict,
-            virtual_results=virtual_results,
-            predicted_results=predicted_results,
-            stations_df=stations_df,
-            stations_lookup=stations_lookup,
-            nearest_lookup=nearest_lookup,
-            feature_params=filtered_params,
-            norm_stats=norm_stats,
-            n_nearby=n_nearby,
-            top_n=5
-        )
-
-    # Combine all results
+    Returns:
+        pd.DataFrame: Combined results
+    """
     all_results = real_results + predicted_results + virtual_results
     results_df = pd.DataFrame(all_results)
     print(f"\n✓ Collected data for {len(results_df)} stations")
@@ -1608,19 +1600,17 @@ def create_moisture_map(
         print(f"  - Virtual grid: {(results_df['type'] == 'virtual').sum()}")
 
     # Compute output filenames
-    # If output ends with _moisture_map.png, use that pattern; otherwise append suffixes
     if output_file.endswith('_moisture_map.png'):
         base_name = output_file[:-len('_moisture_map.png')]
     else:
         base_name = output_file.replace('.png', '')
 
     if all_maps:
-        # Create all 3 moisture map variants efficiently (reusing collected data)
         print("\n" + "=" * 60)
         print("CREATING ALL MOISTURE MAP VARIANTS")
         print("=" * 60)
 
-        # 1. Full map (real + predicted + virtual)
+        # 1. Full map
         full_file = f"{base_name}_moisture_map.png"
         print(f"\nCreating full moisture map (real + predicted + virtual)...")
         create_visualization(
@@ -1631,7 +1621,7 @@ def create_moisture_map(
         )
         print(f"✓ Full map saved to {full_file}")
 
-        # 2. No virtual map (real + predicted only)
+        # 2. No virtual map
         novirtual_file = f"{base_name}_moisture_map_novirtual.png"
         print(f"\nCreating no-virtual moisture map (real + predicted)...")
         novirtual_results = real_results + predicted_results
@@ -1644,7 +1634,7 @@ def create_moisture_map(
         )
         print(f"✓ No-virtual map saved to {novirtual_file}")
 
-        # 3. Real only map (only real sensor data)
+        # 3. Real only map
         realonly_file = f"{base_name}_moisture_map_realonly.png"
         print(f"\nCreating real-only moisture map (sensors only)...")
         realonly_df = pd.DataFrame(real_results)
@@ -1656,7 +1646,7 @@ def create_moisture_map(
         )
         print(f"✓ Real-only map saved to {realonly_file}")
 
-        # Weather maps with proper naming (no _moisture_map in name)
+        # Weather maps
         print("\n" + "=" * 60)
         print("CREATING CUMULATIVE WEATHER MAPS")
         print("=" * 60)
@@ -1708,7 +1698,6 @@ def create_moisture_map(
         )
         print(f"\n✓ Map saved to {output_file}")
 
-        # Create optional weather maps if requested
         if include_weather_maps:
             print("\n" + "=" * 60)
             print("CREATING CUMULATIVE WEATHER MAPS")
@@ -1751,6 +1740,98 @@ def create_moisture_map(
                 print("⚠ No weather data available for the selected date range")
 
     print("\n" + "=" * 60)
+    return results_df
+
+
+def create_moisture_map(
+    model_path,
+    target_date=None,
+    output_file='galicia_moisture_map.png',
+    device='cuda',
+    include_weather_maps=False,
+    virtual_grid_size=100,  # Default to 100x100 grid
+    moisture_range=(0.07, 0.40),  # Fixed range tuple or 'auto' for data-based range
+    hide_markers=None,  # Set of markers to hide: {'real', 'predicted', 'virtual'}
+    real_moisture_only=False,  # If True, only use real moisture stations for the map
+    all_maps=False,  # If True, create all map variants efficiently (reuses data)
+    n_nearby=4,  # Number of nearby stations used in the model's input
+    n_nearby_available=None  # For augmented: how many nearby stations were available for permutations
+):
+    """
+    Create a beautiful moisture map of all Galicia
+
+    Args:
+        model_path: Path to trained model checkpoint
+        target_date: Date to predict (default: most recent available)
+        output_file: Path to save the visualization
+        device: 'cuda' or 'cpu'
+        include_weather_maps: If True, also create cumulative precipitation and water balance maps
+        virtual_grid_size: If set, create a NxN grid of virtual stations with interpolated
+                          features and model-predicted soil moisture (e.g. 100 for 100 by 100 grid)
+        moisture_range: Tuple (min, max) for colorbar range, or 'auto' for data-based range
+        hide_markers: Set of marker types to hide: 'real', 'predicted', 'virtual'
+        real_moisture_only: If True, only use real moisture stations (skip predictions)
+        all_maps: If True, create all map variants efficiently by reusing data:
+                  - {base}_moisture_map.png (full: real + predicted + virtual)
+                  - {base}_moisture_map_novirtual.png (real + predicted only)
+                  - {base}_moisture_map_realonly.png (real sensor data only)
+                  - {base}_precipitation.png (cumulative precipitation)
+                  - {base}_water_balance.png (cumulative water balance)
+        n_nearby_available: For augmented models, how many nearby stations were available
+                           for permutations during training
+    """
+    augmented = n_nearby_available is not None and n_nearby_available > n_nearby
+    if hide_markers is None:
+        hide_markers = set()
+
+    # When all_maps is enabled, ensure we collect all data types
+    if all_maps:
+        real_moisture_only = False  # Need predictions
+        if virtual_grid_size is None:
+            virtual_grid_size = 100  # Need virtual grid
+        include_weather_maps = True  # Will create weather maps too
+
+    print("=" * 60)
+    print("CREATING GALICIA SOIL MOISTURE MAP")
+    print("=" * 60)
+
+    # Initialize collector
+    collector = MeteoGaliciaCollector()
+
+    # Step 1: Load all data
+    data = _load_map_data(
+        collector, model_path, target_date, device,
+        n_nearby, n_nearby_available, augmented
+    )
+
+    # Step 2: Collect real data and build sequences for prediction
+    real_results, sequences_to_predict = _collect_real_and_build_sequences(
+        data['stations_df'], data['timeseries_lookup'], data['nearest_lookup'],
+        data['stations_lookup'], data['filtered_params'], data['norm_stats'],
+        data['target_date'], n_nearby, real_moisture_only
+    )
+
+    # Step 3: Run batch inference for predictions
+    predicted_results = _run_batch_inference(
+        sequences_to_predict, data['model'], device, collector
+    )
+
+    # Step 4: Create virtual grid predictions (if enabled)
+    virtual_results, virtual_sequences = _create_virtual_grid_predictions(
+        virtual_grid_size if not real_moisture_only else None,
+        data['galicia_land'], data['stations_df'], data['stations_lookup'],
+        data['timeseries_lookup'], data['filtered_params'], data['norm_stats'],
+        data['model'], device, collector, data['target_date'], n_nearby,
+        sequences_to_predict, predicted_results
+    )
+
+    # Step 5: Generate output maps
+    results_df = _generate_output_maps(
+        real_results, predicted_results, virtual_results,
+        data['coastline_points'], data['galicia_land'], data['target_date'],
+        output_file, moisture_range, hide_markers, all_maps, include_weather_maps,
+        data['stations_df'], data['timeseries_lookup']
+    )
 
     return results_df
 
