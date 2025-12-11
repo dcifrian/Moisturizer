@@ -299,12 +299,12 @@ def generate_all_augmentations_sequential(
     n_nearby_in_features: int = 4,
     coverage_threshold: float = 0.25,
     seq_length: int = 64,
-    use_base_stats: bool = False
 ):
     """
     Pre-compute ALL augmented samples SEQUENTIALLY (minimal memory!)
 
     No multiprocessing, no temp batches - writes directly to memory-mapped arrays.
+    Uses base dataset normalization stats for accurate and fast normalization.
 
     Memory usage: ~5GB (1 dataset + processing buffers)
     Speed: Slower than parallel, but no memory overhead
@@ -315,8 +315,6 @@ def generate_all_augmentations_sequential(
         n_nearby_in_features: Number of nearby stations in augmented samples (4)
         coverage_threshold: Minimum coverage to include a parameter (0.25 = 25%)
         seq_length: Sequence length (default 64)
-        use_base_stats: If True, use base dataset normalization stats and normalize
-                        during generation (more accurate method)
     """
     print("=" * 70)
     print("PRE-COMPUTING AUGMENTED DATASET (SEQUENTIAL - LOW MEMORY)")
@@ -381,47 +379,42 @@ def generate_all_augmentations_sequential(
     masks_size_gb = total_samples * seq_length * total_features * 1 / 1e9
     print(f"   Dataset size: {features_size_gb:.1f}GB features + {masks_size_gb:.1f}GB masks = {features_size_gb + masks_size_gb:.1f}GB total")
 
-    # Load or compute augmented stats from base dataset if requested
-    base_stats = None
-    if use_base_stats:
-        print(f"\n4. Loading normalization stats...")
+    # Load normalization stats from base dataset
+    print(f"\n4. Loading normalization stats...")
+    canonical_stats_path = Path(data_dir) / "normalization_stats.npz"
 
-        # Try to load canonical stats from file first
-        canonical_stats_path = Path(data_dir) / "normalization_stats.npz"
+    if not canonical_stats_path.exists():
+        raise FileNotFoundError(
+            f"Stats file not found: {canonical_stats_path}\n"
+            f"Run dataset build first with buildDataset() to create normalization stats."
+        )
 
-        if canonical_stats_path.exists():
-            print(f"   Loading from {canonical_stats_path}...")
-            stats = np.load(canonical_stats_path, allow_pickle=True)
+    print(f"   Loading from {canonical_stats_path}...")
+    stats = np.load(canonical_stats_path, allow_pickle=True)
 
-            # Check if canonical format is available
-            if 'target_feature_mins' not in stats:
-                raise ValueError(
-                    "Stats file missing 'target_feature_mins' (old format not supported). "
-                    "Regenerate the base dataset with buildDataset() to create new format stats."
-                )
+    # Check if canonical format is available
+    if 'target_feature_mins' not in stats:
+        raise ValueError(
+            "Stats file missing 'target_feature_mins' (old format not supported). "
+            "Regenerate the base dataset with buildDataset() to create new format stats."
+        )
 
-            # Use the shared function to expand canonical stats
-            base_stats = expand_canonical_to_augmented_stats(
-                canonical_stats=stats,
-                n_params=len(filtered_params),
-                n_nearby_in_features=n_nearby_in_features,
-                n_nearby_available=n_nearby_available,
-                augmented=True
-            )
+    # Use the shared function to expand canonical stats
+    base_stats = expand_canonical_to_augmented_stats(
+        canonical_stats=stats,
+        n_params=len(filtered_params),
+        n_nearby_in_features=n_nearby_in_features,
+        n_nearby_available=n_nearby_available,
+        augmented=True
+    )
 
-            n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
-            print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
-            print(f"   Feature range: [{base_stats['feature_mins'].min():.2f}, {base_stats['feature_maxs'].max():.2f}]")
-            print(f"   Target range: [{base_stats['target_min']:.2f}, {base_stats['target_max']:.2f}]")
-            print(f"   → Will normalize during generation")
-        else:
-            raise FileNotFoundError(
-                f"use_base_stats=True but stats file not found: {canonical_stats_path}\n"
-                f"Run dataset build first with buildDataset() to create normalization stats."
-            )
+    n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
+    print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
+    print(f"   Feature range: [{base_stats['feature_mins'].min():.2f}, {base_stats['feature_maxs'].max():.2f}]")
+    print(f"   Target range: [{base_stats['target_min']:.2f}, {base_stats['target_max']:.2f}]")
 
     # Create memory-mapped arrays (write directly, no temp batches!)
-    step_num = 5 if use_base_stats else 4
+    step_num = 5
     print(f"\n{step_num}. Creating memory-mapped arrays...")
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -497,30 +490,29 @@ def generate_all_augmentations_sequential(
                 aug_features = np.concatenate([target_feat, perm_nearby_features], axis=1)
                 aug_mask = np.concatenate([target_mask, perm_nearby_mask], axis=1)
 
-                # Normalize if base_stats provided
-                normalized_target = base_target
-                if use_base_stats:
-                    # Vectorized normalization
-                    invalid_mask = np.isin(aug_features, invalid_markers)
+                # Vectorized normalization using base stats
+                invalid_mask = np.isin(aug_features, invalid_markers)
 
-                    feature_mins_arr = base_stats['feature_mins']
-                    feature_maxs_arr = base_stats['feature_maxs']
-                    feat_ranges = feature_maxs_arr - feature_mins_arr
-                    valid_ranges = feat_ranges > 0
+                feature_mins_arr = base_stats['feature_mins']
+                feature_maxs_arr = base_stats['feature_maxs']
+                feat_ranges = feature_maxs_arr - feature_mins_arr
+                valid_ranges = feat_ranges > 0
 
-                    aug_features = 2.0 * (aug_features - feature_mins_arr[None, :]) / np.where(valid_ranges[None, :], feat_ranges[None, :], 1.0) - 1.0
-                    aug_features[invalid_mask] = normalized_invalid_marker
+                aug_features = 2.0 * (aug_features - feature_mins_arr[None, :]) / np.where(valid_ranges[None, :], feat_ranges[None, :], 1.0) - 1.0
+                aug_features[invalid_mask] = normalized_invalid_marker
 
-                    # Normalize target
-                    if base_target not in invalid_markers:
-                        target_min = base_stats['target_min']
-                        target_max = base_stats['target_max']
-                        if target_max > target_min:
-                            normalized_target = 2.0 * (base_target - target_min) / (target_max - target_min) - 1.0
+                # Normalize target
+                if base_target not in invalid_markers:
+                    target_min = base_stats['target_min']
+                    target_max = base_stats['target_max']
+                    if target_max > target_min:
+                        normalized_target = 2.0 * (base_target - target_min) / (target_max - target_min) - 1.0
                     else:
-                        normalized_target = normalized_invalid_marker
+                        normalized_target = base_target
+                else:
+                    normalized_target = normalized_invalid_marker
 
-                # Write directly to memmap
+                # Write directly to memmap (already normalized)
                 all_features[current_idx] = aug_features
                 all_targets[current_idx] = normalized_target
                 all_masks[current_idx] = aug_mask
@@ -534,133 +526,7 @@ def generate_all_augmentations_sequential(
 
     print(f"   ✓ Generated {current_idx:,} augmented samples")
 
-    # Skip stats computation if using base stats (already normalized!)
-    if use_base_stats:
-        print(f"\n{step_num + 1}. Skipping statistics computation (using base dataset stats)")
-        print(f"   ✓ Data already normalized during generation")
-
-        # Use stats from base_stats
-        feature_mins = base_stats['feature_mins']
-        feature_maxs = base_stats['feature_maxs']
-        target_min = base_stats['target_min']
-        target_max = base_stats['target_max']
-
-        # Save everything and exit early
-        step_num += 2
-        print(f"\n{step_num}. Saving dataset...")
-        all_features.flush()
-        all_targets.flush()
-        all_masks.flush()
-        all_target_stations.flush()
-        all_skip_pattern.flush()
-        all_permutation.flush()
-
-        np.save(output_path / 'end_dates.npy', all_end_dates)
-        np.save(output_path / 'start_dates.npy', all_start_dates)
-        np.save(output_path / 'is_normalized.npy', np.array([True], dtype=bool))
-
-        np.savez(
-            norm_stats_path,
-            feature_mins=feature_mins,
-            feature_maxs=feature_maxs,
-            target_min=target_min,
-            target_max=target_max
-        )
-
-        print(f"\n   ✓ Saved to: {output_path}")
-
-        print("\n" + "=" * 70)
-        print("✓ AUGMENTED DATASET COMPLETE!")
-        print("=" * 70)
-        print(f"Base samples: {len(base_dataset.sample_index):,}")
-        print(f"Augmented samples: {total_samples:,}")
-        print(f"Augmentation factor: {total_samples / len(base_dataset.sample_index):.0f}x")
-        print(f"\nMemory usage:")
-        print(f"  - Peak RAM: ~5 GB (sequential processing)")
-        print(f"  - Disk space: {(features_size_gb + masks_size_gb):.1f} GB")
-        print(f"\nPerformance:")
-        print(f"  - Normalization: Done during generation")
-        print("=" * 70)
-        return
-
-    # Compute normalization statistics
-    step_num += 1
-    print(f"\n{step_num}. Computing normalization statistics...")
-    feature_mins = np.full(total_features, np.inf, dtype=np.float32)
-    feature_maxs = np.full(total_features, -np.inf, dtype=np.float32)
-
-    sample_batch_size = 10000
-    for i in tqdm(range(0, len(all_features), sample_batch_size),
-                  desc="   Computing stats",
-                  unit="batch",
-                  total=(len(all_features) + sample_batch_size - 1) // sample_batch_size):
-        end_i = min(i + sample_batch_size, len(all_features))
-        features_batch = all_features[i:end_i]
-        masks_batch = all_masks[i:end_i]
-
-        for feat_idx in range(total_features):
-            feat_data = features_batch[:, :, feat_idx]
-            feat_mask = masks_batch[:, :, feat_idx]
-
-            valid_mask = feat_mask
-            for marker in invalid_markers:
-                valid_mask &= (feat_data != marker)
-
-            valid_data = feat_data[valid_mask]
-
-            if len(valid_data) > 0:
-                feature_mins[feat_idx] = min(feature_mins[feat_idx], valid_data.min())
-                feature_maxs[feat_idx] = max(feature_maxs[feat_idx], valid_data.max())
-
-    valid_targets = all_targets[~np.isin(all_targets, invalid_markers)]
-    target_min = valid_targets.min() if len(valid_targets) > 0 else 0.0
-    target_max = valid_targets.max() if len(valid_targets) > 0 else 1.0
-
-    print(f"   Feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
-    print(f"   Target range: [{target_min:.2f}, {target_max:.2f}]")
-
-    # Normalize
-    step_num += 1
-    print(f"\n{step_num}. Normalizing augmented samples (vectorized)...")
-    normalized_invalid_marker = -2.0
-
-    for idx in tqdm(range(0, len(all_features), sample_batch_size),
-                    desc="   Normalizing",
-                    unit="batch",
-                    total=(len(all_features) + sample_batch_size - 1) // sample_batch_size):
-        end_idx = min(idx + sample_batch_size, len(all_features))
-
-        features_batch = all_features[idx:end_idx]
-        targets_batch = all_targets[idx:end_idx]
-
-        for feat_idx in range(total_features):
-            feat_min = feature_mins[feat_idx]
-            feat_max = feature_maxs[feat_idx]
-
-            feat_data = features_batch[:, :, feat_idx]
-
-            invalid_mask = np.zeros_like(feat_data, dtype=bool)
-            for marker in invalid_markers:
-                invalid_mask |= (feat_data == marker)
-
-            if feat_max > feat_min:
-                features_batch[:, :, feat_idx] = 2.0 * (feat_data - feat_min) / (feat_max - feat_min) - 1.0
-
-            features_batch[invalid_mask, feat_idx] = normalized_invalid_marker
-
-        target_invalid_mask = np.zeros(len(targets_batch), dtype=bool)
-        for marker in invalid_markers:
-            target_invalid_mask |= (targets_batch == marker).flatten()
-
-        if target_max > target_min:
-            targets_batch[:] = 2.0 * (targets_batch - target_min) / (target_max - target_min) - 1.0
-
-        targets_batch[target_invalid_mask] = normalized_invalid_marker
-
-        all_features[idx:end_idx] = features_batch
-        all_targets[idx:end_idx] = targets_batch
-
-    # Flush and save
+    # Save dataset (data already normalized during generation)
     step_num += 1
     print(f"\n{step_num}. Saving dataset...")
     all_features.flush()
@@ -670,17 +536,16 @@ def generate_all_augmentations_sequential(
     all_skip_pattern.flush()
     all_permutation.flush()
 
-    # Save dates with np.save() (matches non-augmented dataset format)
     np.save(output_path / 'end_dates.npy', all_end_dates)
     np.save(output_path / 'start_dates.npy', all_start_dates)
     np.save(output_path / 'is_normalized.npy', np.array([True], dtype=bool))
 
     np.savez(
         norm_stats_path,
-        feature_mins=feature_mins,
-        feature_maxs=feature_maxs,
-        target_min=target_min,
-        target_max=target_max
+        feature_mins=base_stats['feature_mins'],
+        feature_maxs=base_stats['feature_maxs'],
+        target_min=base_stats['target_min'],
+        target_max=base_stats['target_max']
     )
 
     print(f"\n   ✓ Saved to: {output_path}")
@@ -694,6 +559,8 @@ def generate_all_augmentations_sequential(
     print(f"\nMemory usage:")
     print(f"  - Peak RAM: ~5 GB (sequential processing)")
     print(f"  - Disk space: {(features_size_gb + masks_size_gb):.1f} GB")
+    print(f"\nPerformance:")
+    print(f"  - Normalization: Done during generation using base stats")
     print("=" * 70)
 
 
@@ -705,7 +572,6 @@ def generate_all_augmentations_batched(
     seq_length: int = 64,
     batch_size: int = 1000,
     num_workers: int = None,  # Auto-detect: physical cores (avoids hyperthreading)
-    use_base_stats: bool = False  # Use base dataset stats (saves ~2 hours!)
 ):
     """
     Pre-compute ALL augmented samples with batched processing (memory efficient!)
@@ -714,6 +580,7 @@ def generate_all_augmentations_batched(
     - Each worker loads its own dataset instance (memory-mapped arrays are shared!)
     - Workers fetch samples in parallel (no blocking on main process)
     - Memory usage: ~4GB (shared memmaps) + ~100MB per worker (metadata only)
+    - Uses base dataset normalization stats for accurate and fast normalization
 
     Args:
         data_dir: Directory containing the MeteoGalicia dataset
@@ -723,8 +590,6 @@ def generate_all_augmentations_batched(
         seq_length: Sequence length (default 64)
         batch_size: Number of base samples to process per batch
         num_workers: Number of parallel workers (None = auto-detect physical cores)
-        use_base_stats: If True, use base dataset normalization stats and normalize
-                        in workers during generation (saves ~2 hours!)
     """
     print("=" * 70)
     print("PRE-COMPUTING AUGMENTED DATASET (MEMORY EFFICIENT)")
@@ -809,54 +674,49 @@ def generate_all_augmentations_batched(
         num_workers = max(1, (logical_cores // 2) - 1)
         print(f"   Auto-detected {num_workers} workers (physical cores - 1)")
 
-    # Load augmented stats from canonical stats file (saves ~2 hours!)
-    base_stats = None
-    if use_base_stats:
-        print(f"\n4. Loading normalization stats...")
+    # Load normalization stats from base dataset
+    print(f"\n4. Loading normalization stats...")
+    canonical_stats_path = Path(data_dir) / "normalization_stats.npz"
 
-        canonical_stats_path = Path(data_dir) / "normalization_stats.npz"
-        # Layout already computed above, reuse total_features
+    if not canonical_stats_path.exists():
+        raise FileNotFoundError(
+            f"Stats file not found: {canonical_stats_path}\n"
+            f"Run dataset build first with buildDataset() to create normalization stats."
+        )
 
-        if canonical_stats_path.exists():
-            print(f"   Loading from {canonical_stats_path}...")
-            stats = np.load(canonical_stats_path, allow_pickle=True)
+    print(f"   Loading from {canonical_stats_path}...")
+    stats = np.load(canonical_stats_path, allow_pickle=True)
 
-            # Check if canonical format is available
-            if 'target_feature_mins' not in stats:
-                raise ValueError(
-                    "Stats file missing 'target_feature_mins' (old format not supported). "
-                    "Regenerate the base dataset with buildDataset() to create new format stats."
-                )
+    # Check if canonical format is available
+    if 'target_feature_mins' not in stats:
+        raise ValueError(
+            "Stats file missing 'target_feature_mins' (old format not supported). "
+            "Regenerate the base dataset with buildDataset() to create new format stats."
+        )
 
-            # Use the shared function to expand canonical stats
-            base_stats = expand_canonical_to_augmented_stats(
-                canonical_stats=stats,
-                n_params=len(filtered_params),
-                n_nearby_in_features=n_nearby_in_features,
-                n_nearby_available=n_nearby_available,
-                augmented=True
-            )
+    # Use the shared function to expand canonical stats
+    base_stats = expand_canonical_to_augmented_stats(
+        canonical_stats=stats,
+        n_params=len(filtered_params),
+        n_nearby_in_features=n_nearby_in_features,
+        n_nearby_available=n_nearby_available,
+        augmented=True
+    )
 
-            n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
-            print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
-            print(f"   Feature range: [{base_stats['feature_mins'].min():.2f}, {base_stats['feature_maxs'].max():.2f}]")
-            print(f"   Target range: [{base_stats['target_min']:.2f}, {base_stats['target_max']:.2f}]")
-            print(f"   → Workers will normalize data during generation (saves ~2 hours!)")
+    n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
+    print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
+    print(f"   Feature range: [{base_stats['feature_mins'].min():.2f}, {base_stats['feature_maxs'].max():.2f}]")
+    print(f"   Target range: [{base_stats['target_min']:.2f}, {base_stats['target_max']:.2f}]")
 
-            # Add stats to aug_params for workers
-            aug_params['normalize'] = True
-            aug_params['feature_mins'] = base_stats['feature_mins']
-            aug_params['feature_maxs'] = base_stats['feature_maxs']
-            aug_params['target_min'] = float(base_stats['target_min'])
-            aug_params['target_max'] = float(base_stats['target_max'])
-            aug_params['invalid_markers'] = [-9999.0, -1000.0]
-        else:
-            raise FileNotFoundError(
-                f"use_base_stats=True but stats file not found: {canonical_stats_path}\n"
-                f"Run dataset build first with buildDataset() to create normalization stats."
-            )
+    # Add stats to aug_params for workers
+    aug_params['normalize'] = True
+    aug_params['feature_mins'] = base_stats['feature_mins']
+    aug_params['feature_maxs'] = base_stats['feature_maxs']
+    aug_params['target_min'] = float(base_stats['target_min'])
+    aug_params['target_max'] = float(base_stats['target_max'])
+    aug_params['invalid_markers'] = [-9999.0, -1000.0]
 
-    print(f"\n{'5' if use_base_stats else '4'}. Creating memmap files and processing in parallel (direct write, no serialization!)...")
+    print(f"\n5. Creating memmap files and processing in parallel (direct write, no serialization!)...")
     print(f"   Total batches: {num_batches}")
     print(f"   Estimated memory: ~4GB (dataset) + ~{num_workers * 0.5:.1f}GB (workers) = ~{4 + num_workers * 0.5:.1f}GB total")
     print(f"   Estimated speedup: ~{num_workers}x faster than sequential")
@@ -973,367 +833,22 @@ def generate_all_augmentations_batched(
     # Calculate memory requirements (bool masks = 1 byte, float32 = 4 bytes)
     features_size_gb = total_samples * seq_length * total_features * 4 / 1e9
     masks_size_gb = total_samples * seq_length * total_features * 1 / 1e9  # bool = 1 byte!
-    step_num = 6 if use_base_stats else 5
-    print(f"\n{step_num}. Data written to memmap files:")
+    print(f"\n6. Data written to memmap files:")
     print(f"   Dataset size: {features_size_gb:.1f}GB features + {masks_size_gb:.1f}GB masks = {features_size_gb + masks_size_gb:.1f}GB total")
     print(f"   Masks using bool dtype (75% smaller than float32!)")
 
-    # If using base stats, skip statistics computation and normalization (already done in workers!)
-    if use_base_stats:
-        print(f"\n{step_num + 1}. Skipping statistics computation (using base dataset stats)")
-        print(f"   ✓ Data already normalized by workers")
-
-        # Save normalization flag
-        np.save(output_path / "is_normalized.npy", np.array([True], dtype=bool))
-
-        # Save normalization stats in canonical format
-        np.savez(
-            norm_stats_path,
-            # Per-slot stats (for direct use)
-            feature_mins=base_stats['feature_mins'],
-            feature_maxs=base_stats['feature_maxs'],
-            target_min=np.array([base_stats['target_min']]),
-            target_max=np.array([base_stats['target_max']]),
-        )
-        print(f"   ✓ Saved normalization stats")
-        print(f"   ✓ Saved to: {output_path}")
-
-        print("\n" + "=" * 70)
-        print("✓ AUGMENTED DATASET COMPLETE!")
-        print("=" * 70)
-        print(f"Base samples: {len(base_dataset.sample_index):,}")
-        print(f"Augmented samples: {total_samples:,}")
-        print(f"Augmentation factor: {total_samples / len(base_dataset.sample_index):.0f}x")
-        print(f"\nMemory usage:")
-        print(f"  - Dataset (main process): ~4 GB")
-        print(f"  - Workers: ~{num_workers * 0.5:.1f} GB")
-        print(f"  - Total peak RAM: ~{4 + num_workers * 0.5:.1f} GB")
-        print(f"  - Disk space: ~{(features_size_gb + masks_size_gb):.1f} GB")
-        print(f"\nPerformance:")
-        print(f"  - Normalization: Done in workers (SAVED ~2 hours!)")
-        print("=" * 70)
-        return
-
-    # Load memmap files for statistics and normalization
-    print(f"\n{step_num + 1}. Loading memmap files for statistics...")
-    all_features = np.lib.format.open_memmap(
-        str(output_path / "features.npy"), mode='r+'  # Read-write for normalization
-    )
-    all_targets = np.lib.format.open_memmap(
-        str(output_path / "targets.npy"), mode='r+'
-    )
-    all_masks = np.lib.format.open_memmap(
-        str(output_path / "masks.npy"), mode='r'  # Read-only
-    )
-
-    # Try to load base dataset normalization stats for comparison
-    print(f"\n{step_num + 2}. Comparing with base dataset normalization stats...")
-    base_norm_stats_path = Path(data_dir) / "normalization_stats.npz"
-
-    if base_norm_stats_path.exists():
-        print(f"   Found base dataset stats, comparing...")
-        base_stats_for_comparison = np.load(base_norm_stats_path)
-        base_feature_mins = base_stats_for_comparison['feature_mins']
-        base_feature_maxs = base_stats_for_comparison['feature_maxs']
-        base_target_min = float(base_stats_for_comparison['target_min'])
-        base_target_max = float(base_stats_for_comparison['target_max'])
-    else:
-        print(f"   Base dataset stats not found, will compute from scratch")
-        base_feature_mins = None
-        base_feature_maxs = None
-
-    # Compute augmented dataset statistics
-    print(f"\n{step_num + 3}. Computing augmented dataset normalization statistics...")
-
-    n_features = all_features.shape[2]
-    feature_mins = np.full(n_features, np.inf, dtype=np.float32)
-    feature_maxs = np.full(n_features, -np.inf, dtype=np.float32)
-    invalid_markers = [-9999.0, -1000.0]
-
-    # Sample-based statistics computation (memory efficient)
-    sample_batch_size = 10000
-    for i in tqdm(range(0, len(all_features), sample_batch_size),
-                  desc="   Computing stats",
-                  unit="batch",
-                  total=(len(all_features) + sample_batch_size - 1) // sample_batch_size):
-        end_i = min(i + sample_batch_size, len(all_features))
-        features_batch = all_features[i:end_i]
-        masks_batch = all_masks[i:end_i]
-
-        for feat_idx in range(n_features):
-            feat_data = features_batch[:, :, feat_idx]
-            feat_mask = masks_batch[:, :, feat_idx]
-
-            # Create a copy for modification (masks are read-only)
-            valid_mask = feat_mask.copy()
-            for marker in invalid_markers:
-                valid_mask &= (feat_data != marker)
-
-            valid_data = feat_data[valid_mask]
-
-            if len(valid_data) > 0:
-                feature_mins[feat_idx] = min(feature_mins[feat_idx], valid_data.min())
-                feature_maxs[feat_idx] = max(feature_maxs[feat_idx], valid_data.max())
-
-    valid_targets = all_targets[~np.isin(all_targets, invalid_markers)]
-    target_min = valid_targets.min() if len(valid_targets) > 0 else 0.0
-    target_max = valid_targets.max() if len(valid_targets) > 0 else 1.0
-
-    print(f"   Augmented feature range: [{feature_mins.min():.2f}, {feature_maxs.max():.2f}]")
-    print(f"   Augmented target range: [{target_min:.2f}, {target_max:.2f}]")
-
-    # Compare with base dataset stats
-    if base_feature_mins is not None:
-        print(f"\n   Comparing augmented vs base dataset stats:")
-
-        # Calculate differences
-        min_diffs = np.abs(feature_mins - base_feature_mins)
-        max_diffs = np.abs(feature_maxs - base_feature_maxs)
-        target_min_diff = abs(target_min - base_target_min)
-        target_max_diff = abs(target_max - base_target_max)
-
-        # Calculate relative differences (as percentage of range)
-        feature_ranges = feature_maxs - feature_mins
-        rel_min_diffs = np.where(feature_ranges > 0, min_diffs / feature_ranges * 100, 0)
-        rel_max_diffs = np.where(feature_ranges > 0, max_diffs / feature_ranges * 100, 0)
-
-        print(f"   Base feature range: [{base_feature_mins.min():.2f}, {base_feature_maxs.max():.2f}]")
-        print(f"   Base target range: [{base_target_min:.2f}, {base_target_max:.2f}]")
-        print(f"   Feature min diff: max={min_diffs.max():.6f}, mean={min_diffs.mean():.6f}")
-        print(f"   Feature max diff: max={max_diffs.max():.6f}, mean={max_diffs.mean():.6f}")
-        print(f"   Relative diff (%): max_min={rel_min_diffs.max():.3f}%, max_max={rel_max_diffs.max():.3f}%")
-        print(f"   Target min diff: {target_min_diff:.6f}")
-        print(f"   Target max diff: {target_max_diff:.6f}")
-
-        # Check if differences are negligible (< 0.1% of range)
-        if rel_min_diffs.max() < 0.1 and rel_max_diffs.max() < 0.1:
-            print(f"   ✓ Stats are nearly identical! (<0.1% difference)")
-            print(f"   → Could use base stats directly in future runs (would save ~1 hour)")
-        elif rel_min_diffs.max() < 1.0 and rel_max_diffs.max() < 1.0:
-            print(f"   ✓ Stats are very close (<1% difference)")
-            print(f"   → Could potentially use base stats with minor impact")
-        else:
-            print(f"   ⚠ Stats differ significantly (>1% difference)")
-            print(f"   → Should compute augmented stats (current approach)")
-
-    # Also compute the "correct" augmented stats from base dataset for comparison
-    print(f"\n   Computing correct augmented stats from base dataset (5 nearby) for validation...")
-    num_samples_validation = min(1000, len(base_dataset.sample_index))
-    validation_indices = np.random.choice(len(base_dataset.sample_index),
-                                         size=num_samples_validation, replace=False)
-
-    # Use FeatureLayout for consistent dimension calculations
-    validation_layout = FeatureLayout(n_params=len(filtered_params), n_nearby=n_nearby_in_features)
-    target_features_count = validation_layout.n_target_features
-    nearby_features_per_station = validation_layout.nearby_features_per_station
-    expected_total_features = validation_layout.n_total_features
-
-    expected_feature_mins = np.full(expected_total_features, np.inf, dtype=np.float32)
-    expected_feature_maxs = np.full(expected_total_features, -np.inf, dtype=np.float32)
-    expected_target_min = np.inf
-    expected_target_max = -np.inf
-
-    for idx in validation_indices:
-        sample = base_dataset[int(idx)]
-        features = sample['features'].numpy()
-        target = sample['target'].numpy()[0]
-
-        # Target stats
-        if target != -1000.0 and target != -9999.0:
-            expected_target_min = min(expected_target_min, target)
-            expected_target_max = max(expected_target_max, target)
-
-        # Target station features
-        target_feats = features[:, :target_features_count]
-        for feat_idx in range(target_features_count):
-            feat_values = target_feats[:, feat_idx]
-            valid = feat_values[(feat_values != -1000.0) & (feat_values != -9999.0)]
-            if len(valid) > 0:
-                expected_feature_mins[feat_idx] = min(expected_feature_mins[feat_idx], valid.min())
-                expected_feature_maxs[feat_idx] = max(expected_feature_maxs[feat_idx], valid.max())
-
-        # Nearby stations: all 5 stations' data
-        nearby_start = target_features_count
-        nearby_base = features[:, nearby_start:].reshape(seq_length, n_nearby_available,
-                                                        nearby_features_per_station)
-
-        for nearby_feat_idx in range(nearby_features_per_station):
-            feat_across_stations = nearby_base[:, :, nearby_feat_idx]
-            valid = feat_across_stations[(feat_across_stations != -1000.0) &
-                                        (feat_across_stations != -9999.0)]
-
-            if len(valid) > 0:
-                for slot in range(n_nearby_in_features):
-                    aug_feat_idx = target_features_count + (slot * nearby_features_per_station) + nearby_feat_idx
-                    expected_feature_mins[aug_feat_idx] = min(expected_feature_mins[aug_feat_idx], valid.min())
-                    expected_feature_maxs[aug_feat_idx] = max(expected_feature_maxs[aug_feat_idx], valid.max())
-
-    # Compare expected vs actual
-    print(f"\n   Validation: Comparing expected (from base 5 nearby) vs actual augmented stats:")
-
-    # Only compare valid indices (not inf)
-    valid_mask = ~(np.isinf(expected_feature_mins) | np.isinf(expected_feature_maxs) |
-                   np.isinf(feature_mins) | np.isinf(feature_maxs))
-
-    if valid_mask.sum() > 0:
-        expected_min_diffs = np.abs(expected_feature_mins[valid_mask] - feature_mins[valid_mask])
-        expected_max_diffs = np.abs(expected_feature_maxs[valid_mask] - feature_maxs[valid_mask])
-
-        print(f"   Expected feature range: [{expected_feature_mins[valid_mask].min():.2f}, {expected_feature_maxs[valid_mask].max():.2f}]")
-        print(f"   Actual feature range: [{feature_mins[valid_mask].min():.2f}, {feature_maxs[valid_mask].max():.2f}]")
-        print(f"   Feature min diff: max={expected_min_diffs.max():.6f}, mean={expected_min_diffs.mean():.6f}")
-        print(f"   Feature max diff: max={expected_max_diffs.max():.6f}, mean={expected_max_diffs.mean():.6f}")
-
-        if expected_min_diffs.max() < 1.0 and expected_max_diffs.max() < 1.0:
-            print(f"   ✅ EXCELLENT! Actual stats match expected augmented stats (<1.0 absolute diff)")
-            print(f"   → --use-base-stats with correct computation would work perfectly!")
-        else:
-            print(f"   ⚠️  Stats differ - may need more validation samples or check algorithm")
-
-        # Detailed per-feature report
-        print(f"\n   Detailed per-feature comparison (Base vs Expected vs Actual):")
-        print(f"   " + "="*150)
-        print(f"   {'Feature':<50} {'Base Min':>12} {'Exp Min':>12} {'Act Min':>12} {'Base Max':>12} {'Exp Max':>12} {'Act Max':>12} {'Base-Act':>10} {'Exp-Act':>10}")
-        print(f"   " + "-"*150)
-
-        # Build feature names
-        feature_names = []
-
-        # Target station features (26)
-        for param in filtered_params:
-            feature_names.append(f"target_{param}")
-
-        # Nearby stations features (4 stations × 28 features each)
-        nearby_features_per_station = 1 + len(filtered_params) + 1  # distance + features + soil
-        for nearby_idx in range(n_nearby_in_features):
-            # Distance
-            feature_names.append(f"nearby{nearby_idx+1}_distance")
-            # Weather/coordinate features
-            for param in filtered_params:
-                feature_names.append(f"nearby{nearby_idx+1}_{param}")
-            # Soil moisture
-            feature_names.append(f"nearby{nearby_idx+1}_soil")
-
-        # Show target station features
-        print(f"\n   TARGET STATION FEATURES:")
-        print(f"   " + "-"*150)
-        for feat_idx in range(len(filtered_params)):
-            if not (np.isinf(expected_feature_mins[feat_idx]) or np.isinf(feature_mins[feat_idx])):
-                base_min = base_feature_mins[feat_idx] if feat_idx < len(base_feature_mins) else np.inf
-                base_max = base_feature_maxs[feat_idx] if feat_idx < len(base_feature_maxs) else -np.inf
-                exp_min = expected_feature_mins[feat_idx]
-                exp_max = expected_feature_maxs[feat_idx]
-                act_min = feature_mins[feat_idx]
-                act_max = feature_maxs[feat_idx]
-
-                base_act_diff = abs(base_max - act_max) if not np.isinf(base_max) else np.inf
-                exp_act_diff = abs(exp_max - act_max)
-
-                print(f"   {feature_names[feat_idx]:<50} {base_min:12.4f} {exp_min:12.4f} {act_min:12.4f} {base_max:12.4f} {exp_max:12.4f} {act_max:12.4f} {base_act_diff:10.4f} {exp_act_diff:10.6f}")
-
-        # Show each nearby station's features
-        for nearby_idx in range(n_nearby_in_features):
-            print(f"\n   NEARBY STATION {nearby_idx+1} FEATURES:")
-            print(f"   " + "-"*150)
-
-            offset = len(filtered_params) + (nearby_idx * nearby_features_per_station)
-
-            # Show all 28 features for this nearby station (distance + 26 features + soil)
-            for local_feat_idx in range(nearby_features_per_station):
-                global_feat_idx = offset + local_feat_idx
-
-                if global_feat_idx < len(feature_names) and not (np.isinf(expected_feature_mins[global_feat_idx]) or np.isinf(feature_mins[global_feat_idx])):
-                    base_min = base_feature_mins[global_feat_idx] if global_feat_idx < len(base_feature_mins) else np.inf
-                    base_max = base_feature_maxs[global_feat_idx] if global_feat_idx < len(base_feature_maxs) else -np.inf
-                    exp_min = expected_feature_mins[global_feat_idx]
-                    exp_max = expected_feature_maxs[global_feat_idx]
-                    act_min = feature_mins[global_feat_idx]
-                    act_max = feature_maxs[global_feat_idx]
-
-                    base_act_diff = abs(base_max - act_max) if not np.isinf(base_max) else np.inf
-                    exp_act_diff = abs(exp_max - act_max)
-
-                    print(f"   {feature_names[global_feat_idx]:<50} {base_min:12.4f} {exp_min:12.4f} {act_min:12.4f} {base_max:12.4f} {exp_max:12.4f} {act_max:12.4f} {base_act_diff:10.4f} {exp_act_diff:10.6f}")
-
-        print(f"   " + "="*150)
-        print(f"\n   Legend:")
-        print(f"     Base: Stats from normalization_stats.npz (4 nearby, non-augmented)")
-        print(f"     Exp:  Expected stats computed from base 5 nearby (new algorithm)")
-        print(f"     Act:  Actual stats from augmented dataset")
-        print(f"     Base-Act: Difference between base and actual (shows why base stats don't work)")
-        print(f"     Exp-Act:  Difference between expected and actual (should be ~0 if algorithm correct)")
-
-
-    # Normalize in batches (working with memory-mapped arrays)
-    # VECTORIZED VERSION - much faster than sample-by-sample loops!
-    print(f"\n{step_num + 4}. Normalizing augmented samples (vectorized)...")
-
-    normalized_invalid_marker = -2.0
-
-    for idx in tqdm(range(0, len(all_features), sample_batch_size),
-                    desc="   Normalizing",
-                    unit="batch",
-                    total=(len(all_features) + sample_batch_size - 1) // sample_batch_size):
-        end_idx = min(idx + sample_batch_size, len(all_features))
-
-        # Load batch into memory for fast vectorized operations
-        features_batch = all_features[idx:end_idx]  # Shape: [batch_size, seq_length, n_features]
-        targets_batch = all_targets[idx:end_idx]    # Shape: [batch_size, 1]
-
-        # Normalize features - VECTORIZED across all samples and timesteps for each feature
-        for feat_idx in range(n_features):
-            feat_min = feature_mins[feat_idx]
-            feat_max = feature_maxs[feat_idx]
-
-            # Get all data for this feature across batch
-            feat_data = features_batch[:, :, feat_idx]  # Shape: [batch_size, seq_length]
-
-            # Find invalid markers (vectorized!)
-            invalid_mask = np.zeros_like(feat_data, dtype=bool)
-            for marker in invalid_markers:
-                invalid_mask |= (feat_data == marker)
-
-            # Normalize all valid values at once (vectorized!)
-            if feat_max > feat_min:
-                features_batch[:, :, feat_idx] = 2.0 * (feat_data - feat_min) / (feat_max - feat_min) - 1.0
-
-            # Set invalid values to marker (vectorized!)
-            features_batch[invalid_mask, feat_idx] = normalized_invalid_marker
-
-        # Normalize targets (vectorized across batch!)
-        target_invalid_mask = np.zeros(len(targets_batch), dtype=bool)
-        for marker in invalid_markers:
-            target_invalid_mask |= (targets_batch == marker).flatten()
-
-        # Normalize valid targets
-        if target_max > target_min:
-            targets_batch[:] = 2.0 * (targets_batch - target_min) / (target_max - target_min) - 1.0
-
-        # Set invalid targets
-        targets_batch[target_invalid_mask] = normalized_invalid_marker
-
-        # Write normalized batch back to memmap (this is the only slow part - disk I/O)
-        all_features[idx:end_idx] = features_batch
-        all_targets[idx:end_idx] = targets_batch
-
-    # Save final dataset
-    print(f"\n{step_num + 5}. Flushing all changes to disk...")
-    all_features.flush()
-    all_targets.flush()
-
-    # Save normalization flag
+    # Save normalization flag and stats (data already normalized by workers)
     np.save(output_path / "is_normalized.npy", np.array([True], dtype=bool))
 
-    # Save normalization stats
     np.savez(
         norm_stats_path,
-        feature_mins=feature_mins,
-        feature_maxs=feature_maxs,
-        target_min=target_min,
-        target_max=target_max
+        feature_mins=base_stats['feature_mins'],
+        feature_maxs=base_stats['feature_maxs'],
+        target_min=np.array([base_stats['target_min']]),
+        target_max=np.array([base_stats['target_max']]),
     )
-
-    print(f"\n   ✓ Saved to: {output_path}")
+    print(f"   ✓ Saved normalization stats")
+    print(f"   ✓ Saved to: {output_path}")
 
     print("\n" + "=" * 70)
     print("✓ AUGMENTED DATASET COMPLETE!")
@@ -1346,6 +861,8 @@ def generate_all_augmentations_batched(
     print(f"  - Workers: ~{num_workers * 0.5:.1f} GB")
     print(f"  - Total peak RAM: ~{4 + num_workers * 0.5:.1f} GB")
     print(f"  - Disk space: ~{(features_size_gb + masks_size_gb):.1f} GB")
+    print(f"\nPerformance:")
+    print(f"  - Normalization: Done in workers using base stats")
     print("=" * 70)
 
 
@@ -1359,14 +876,11 @@ if __name__ == "__main__":
 Examples:
   python precompute_augmented.py                          # Batched mode (default, fast)
   python precompute_augmented.py --sequential             # Sequential mode (low memory)
-  python precompute_augmented.py --use-base-stats         # Use pre-computed normalization stats
   python precompute_augmented.py --seq-length 32          # Use sequence length of 32
         """
     )
     parser.add_argument('--sequential', action='store_true',
                        help='Use sequential mode (~5GB RAM, slower but minimal memory)')
-    parser.add_argument('--use-base-stats', action='store_true',
-                       help='Use base dataset normalization stats (saves ~2 hours)')
     parser.add_argument('--seq-length', type=int, default=64,
                        help='Sequence length (default: 64)')
     parser.add_argument('--batch-size', type=int, default=100,
@@ -1377,18 +891,13 @@ Examples:
     # Choose mode based on arguments
     if args.sequential:
         print("Using SEQUENTIAL mode (minimal memory)")
-        if args.use_base_stats:
-            print("Using base dataset stats")
         print(f"Sequence length: {args.seq_length}")
-        generate_all_augmentations_sequential(seq_length=args.seq_length, use_base_stats=args.use_base_stats)
+        generate_all_augmentations_sequential(seq_length=args.seq_length)
     else:
         print("Using BATCHED mode (parallel, auto-detect workers)")
-        if args.use_base_stats:
-            print("Using base dataset stats (saves ~2 hours!)")
         print(f"Sequence length: {args.seq_length}")
         print(f"Batch size: {args.batch_size}")
         generate_all_augmentations_batched(
             batch_size=args.batch_size,
-            seq_length=args.seq_length,
-            use_base_stats=args.use_base_stats
+            seq_length=args.seq_length
         )

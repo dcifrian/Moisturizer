@@ -175,7 +175,6 @@ def test_precomputed_augmented_dataset(collector, filtered_params):
         seq_length=SEQ_LENGTH,
         n_nearby_available=N_NEARBY_AVAILABLE,
         n_nearby_in_features=N_NEARBY_IN_FEATURES,
-        use_base_stats=True,
         coverage_threshold=0.1,  # Lower threshold for test
     )
 

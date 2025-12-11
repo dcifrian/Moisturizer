@@ -10,5 +10,4 @@ generate_all_augmentations_batched(
     seq_length=2,  # Match the tiny dataset!
     batch_size=10,  # Small batches
     num_workers=2,  # Just 2 workers for tiny dataset
-    use_base_stats=False  # Don't use base stats - we want to see the corruption
 )
