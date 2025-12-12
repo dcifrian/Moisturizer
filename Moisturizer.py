@@ -2861,7 +2861,8 @@ def regenerate_nearest_stations(n_nearest: Optional[int] = None, data_dir: str =
 
 
 def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[datetime] = None,
-                 force_refresh: bool = False, n_nearest: Optional[int] = None,
+                 force_refresh: bool = False, n_nearby: int = 4,
+                 precompute_augmented: Union[bool, int] = False,
                  coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD):
     """
     Build the complete dataset with optimizations
@@ -2872,9 +2873,12 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
               maximum range without losing stations with moisture data)
         end_date: End date for data collection (default: None = use current date)
         force_refresh: If True, force re-download even if cached data exists
-        n_nearest: Number of nearest stations to compute. If None, computes ALL available
-                  neighbors (n_soil_moisture_stations - 1). This ensures maximum flexibility
-                  for augmentation and future use cases.
+        n_nearby: Number of nearby stations in the precomputed base dataset (default: 4)
+        precompute_augmented: Whether to also precompute augmented dataset:
+            - False: Only precompute the base dataset (default)
+            - True: Precompute augmented using n_nearby as n_nearby_available (permutations only)
+            - int: Precompute augmented using this value as n_nearby_available (must be >= n_nearby)
+        coverage_threshold: Minimum data coverage for a parameter to be included
 
     Returns:
         Tuple of (train_dataset, val_dataset, test_dataset)
@@ -2927,16 +2931,12 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
         n_soil_moisture = len(stations_df[stations_df['has_soil_moisture'] == True])
         max_neighbors = n_soil_moisture - 1
 
-        # Determine required neighbors
-        required_neighbors = max_neighbors if n_nearest is None else n_nearest
-
-        # Check if nearest_df has enough neighbors
+        # Always ensure nearest_df has ALL possible neighbors (it's fast to compute)
         n_neighbors_in_file = len([c for c in nearest_df.columns if c.startswith('nearest_') and c.endswith('_id')])
-        if n_neighbors_in_file < required_neighbors:
-            print(f"\n⚠ Cached nearest_stations.csv has only {n_neighbors_in_file} neighbors, need {required_neighbors}")
-            print(f"  Regenerating nearest_stations.csv...")
-            nearest_df = collector.calculate_nearest_stations(stations_df, n_nearest=n_nearest)
-            # Update n_neighbors_in_file after regeneration
+        if n_neighbors_in_file < max_neighbors:
+            print(f"\n⚠ Cached nearest_stations.csv has only {n_neighbors_in_file} neighbors, need {max_neighbors}")
+            print(f"  Regenerating nearest_stations.csv with ALL neighbors...")
+            nearest_df = collector.calculate_nearest_stations(stations_df, n_nearest=None)
             n_neighbors_in_file = len([c for c in nearest_df.columns if c.startswith('nearest_') and c.endswith('_id')])
             print(f"  ✓ Regenerated with {n_neighbors_in_file} neighbors")
     else:
@@ -2946,11 +2946,11 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
         print("=" * 60)
         stations_df = collector.discover_stations_with_soil_moisture(force_refresh=force_refresh)
 
-        # Step 2: Calculate nearest stations
+        # Step 2: Calculate nearest stations (always compute ALL neighbors - it's fast)
         print("\n" + "=" * 60)
         print("STEP 2: Calculating nearest stations")
         print("=" * 60)
-        nearest_df = collector.calculate_nearest_stations(stations_df, n_nearest=n_nearest)
+        nearest_df = collector.calculate_nearest_stations(stations_df, n_nearest=None)
 
         # Step 3: Build historical dataset
         print("\n" + "=" * 60)
@@ -2972,9 +2972,9 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
             force_refresh=force_refresh
         )
 
-    # Determine actual number of neighbors in the file (for dataset creation)
+    # Report number of neighbors available in the file
     n_neighbors_in_file = len([c for c in nearest_df.columns if c.startswith('nearest_') and c.endswith('_id')])
-    print(f"\n  nearest_stations.csv has {n_neighbors_in_file} neighbors")
+    print(f"\n  nearest_stations.csv has {n_neighbors_in_file} neighbors (using {n_nearby} for base dataset)")
 
     # Step 4: Analyze parameter coverage from timeseries
     print("\n" + "=" * 60)
@@ -3033,7 +3033,7 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),
         seq_length=seq_length,
-        n_nearest=n_neighbors_in_file,  # Use actual number from file
+        n_nearest=n_nearby,  # Use n_nearby for base dataset
         feature_params=filtered_params,
         dense_array_path=str(dense_array_path)
     )
@@ -3065,6 +3065,35 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
     print(f"\n✓ Precomputed sequences saved to: {precomputed_path}")
     print(f"✓ Normalization stats saved to: {norm_stats_path}")
     print(f"\nYou can now use loadDataset() for fast loading!")
+
+    # Step 7b (optional): Precompute augmented dataset
+    if precompute_augmented:
+        print("\n" + "=" * 60)
+        print("STEP 7b: Precomputing augmented dataset")
+        print("=" * 60)
+
+        # Determine n_nearby_available for augmentation
+        if precompute_augmented is True:
+            n_nearby_available = n_nearby
+            print(f"  Using n_nearby_available={n_nearby_available} (same as n_nearby, permutation-only augmentation)")
+        else:
+            n_nearby_available = int(precompute_augmented)
+            if n_nearby_available < n_nearby:
+                raise ValueError(
+                    f"precompute_augmented={n_nearby_available} must be >= n_nearby={n_nearby}"
+                )
+            print(f"  Using n_nearby_available={n_nearby_available} (skip patterns + permutations)")
+
+        # Import and run augmentation precompute
+        from precompute_augmented import generate_all_augmentations_sequential
+
+        generate_all_augmentations_sequential(
+            data_dir=str(collector.data_dir),
+            n_nearby_available=n_nearby_available,
+            n_nearby_in_features=n_nearby,
+            coverage_threshold=coverage_threshold,
+            seq_length=seq_length,
+        )
 
     # Step 8: Train/val/test split
     print("\n" + "=" * 60)
