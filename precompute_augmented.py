@@ -531,138 +531,33 @@ def generate_all_augmentations_sequential(
     print("PRE-COMPUTING AUGMENTED DATASET (SEQUENTIAL - LOW MEMORY)")
     print("=" * 70)
 
-    collector = MeteoGaliciaCollector(data_dir=data_dir)
-    output_path = Path(data_dir) / "precomputed_sequences_augmented"
-    norm_stats_path = Path(data_dir) / "normalization_stats_augmented.npz"
-
-    # Get filtered parameters
-    print("\n1. Analyzing parameter coverage...")
-    coverage, filtered_params = collector.analyze_parameter_coverage(
-        coverage_threshold=coverage_threshold
-    )
-    print(f"   Selected {len(filtered_params)} parameters")
-
-    # Load base dataset with n_nearest=5
-    print(f"\n2. Loading base dataset with {n_nearby_available} nearby stations...")
-    dense_path = Path(data_dir) / "dense_features.npz"
-
-    base_dataset = SoilMoistureSequenceDataset(
-        timeseries=str(collector.timeseries_file),
-        stations=str(collector.stations_file),
-        nearest=str(collector.nearest_file),
-        seq_length=seq_length,
-        n_nearest=n_nearby_available,
-        feature_params=filtered_params,
-        precomputed_path=None,
-        dense_array_path=str(dense_path) if dense_path.exists() else None,
-        normalize=False
+    # Use shared setup function
+    setup = _setup_augmentation(
+        data_dir, n_nearby_available, n_nearby_in_features,
+        coverage_threshold, seq_length
     )
 
-    print(f"   Base dataset: {len(base_dataset.sample_index)} samples")
+    base_dataset = setup['base_dataset']
+    output_path = setup['output_path']
+    norm_stats_path = setup['norm_stats_path']
+    skip_patterns = setup['skip_patterns']
+    all_permutations = setup['all_permutations']
+    total_augmentations = setup['total_augmentations']
+    layout = setup['layout']
+    total_samples = setup['total_samples']
+    base_stats = setup['base_stats']
+    filtered_params = setup['filtered_params']
 
-    # Generate augmentation combinations
-    print(f"\n3. Generating augmentation combinations...")
-    available_indices = list(range(n_nearby_available))
-    skip_patterns = []
-    for skip_idx in range(n_nearby_available):
-        keep_indices = [i for i in available_indices if i != skip_idx][:n_nearby_in_features]
-        skip_patterns.append(keep_indices)
-
-    all_permutations = list(permutations(range(n_nearby_in_features)))
-    total_augmentations = len(skip_patterns) * len(all_permutations)
-
-    print(f"   Skip patterns: {len(skip_patterns)}")
-    print(f"   Permutations per skip: {len(all_permutations)}")
-    print(f"   Total augmentations per base: {total_augmentations}")
-
-    # Calculate dimensions using FeatureLayout
-    layout = FeatureLayout(n_params=len(filtered_params), n_nearby=n_nearby_in_features)
     target_features = layout.n_target_features
     nearby_features_per_station = layout.nearby_features_per_station
     total_features = layout.n_total_features
-    total_samples = len(base_dataset.sample_index) * total_augmentations
 
-    print(f"   Total augmented samples: {total_samples:,}")
-    print(f"   Sample shape: [{seq_length}, {total_features}]")
-
-    # Calculate memory requirements
-    features_size_gb = total_samples * seq_length * total_features * 4 / 1e9
-    masks_size_gb = total_samples * seq_length * total_features * 1 / 1e9
-    print(f"   Dataset size: {features_size_gb:.1f}GB features + {masks_size_gb:.1f}GB masks = {features_size_gb + masks_size_gb:.1f}GB total")
-
-    # Load normalization stats from base dataset
-    print(f"\n4. Loading normalization stats...")
-    canonical_stats_path = Path(data_dir) / "normalization_stats.npz"
-
-    if not canonical_stats_path.exists():
-        raise FileNotFoundError(
-            f"Stats file not found: {canonical_stats_path}\n"
-            f"Run dataset build first with buildDataset() to create normalization stats."
-        )
-
-    print(f"   Loading from {canonical_stats_path}...")
-    stats = np.load(canonical_stats_path, allow_pickle=True)
-
-    # Check if canonical format is available
-    if 'target_feature_mins' not in stats:
-        raise ValueError(
-            "Stats file missing 'target_feature_mins' (old format not supported). "
-            "Regenerate the base dataset with buildDataset() to create new format stats."
-        )
-
-    # Use the shared function to expand canonical stats
-    base_stats = expand_canonical_to_augmented_stats(
-        canonical_stats=stats,
-        n_params=len(filtered_params),
-        n_nearby_in_features=n_nearby_in_features,
-        n_nearby_available=n_nearby_available,
-        augmented=True
-    )
-
-    n_samples = int(stats['n_base_samples'][0]) if 'n_base_samples' in stats else 0
-    print(f"   ✓ Loaded canonical stats ({n_samples:,} samples)")
-    print(f"   Feature range: [{base_stats['feature_mins'].min():.2f}, {base_stats['feature_maxs'].max():.2f}]")
-    print(f"   Target range: [{base_stats['target_min']:.2f}, {base_stats['target_max']:.2f}]")
-
-    # Create memory-mapped arrays (write directly, no temp batches!)
-    step_num = 5
-    print(f"\n{step_num}. Creating memory-mapped arrays...")
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    # Use np.lib.format.open_memmap() to create proper .npy files with headers
-    # (unlike np.memmap which creates raw binary files)
-    all_features = np.lib.format.open_memmap(
-        str(output_path / "features.npy"), dtype=np.float32, mode='w+',
-        shape=(total_samples, seq_length, total_features)
-    )
-    all_targets = np.lib.format.open_memmap(
-        str(output_path / "targets.npy"), dtype=np.float32, mode='w+',
-        shape=(total_samples, 1)
-    )
-    all_masks = np.lib.format.open_memmap(
-        str(output_path / "masks.npy"), dtype=bool, mode='w+',
-        shape=(total_samples, seq_length, total_features)
-    )
-    all_target_stations = np.lib.format.open_memmap(
-        str(output_path / "target_stations.npy"), dtype=np.int32, mode='w+',
-        shape=(total_samples,)
-    )
-    all_skip_pattern = np.lib.format.open_memmap(
-        str(output_path / "skip_pattern.npy"), dtype=np.int32, mode='w+',
-        shape=(total_samples,)
-    )
-    all_permutation = np.lib.format.open_memmap(
-        str(output_path / "permutation.npy"), dtype=np.int32, mode='w+',
-        shape=(total_samples,)
-    )
-
-    # Use regular arrays for dates (small enough, will save with np.save later)
-    all_end_dates = np.zeros(total_samples, dtype=np.float64)
-    all_start_dates = np.zeros(total_samples, dtype=np.float64)
+    # Create memory-mapped arrays
+    print(f"\n5. Creating memory-mapped arrays...")
+    arrays = _create_memmap_arrays(output_path, total_samples, seq_length, total_features)
 
     # Process samples sequentially
-    step_num += 1
-    print(f"\n{step_num}. Generating augmentations (sequential)...")
+    print(f"\n6. Generating augmentations (sequential)...")
     current_idx = 0
 
     # Normalization params if using base stats
@@ -724,55 +619,29 @@ def generate_all_augmentations_sequential(
                     normalized_target = normalized_invalid_marker
 
                 # Write directly to memmap (already normalized)
-                all_features[current_idx] = aug_features
-                all_targets[current_idx] = normalized_target
-                all_masks[current_idx] = aug_mask
-                all_target_stations[current_idx] = sample_info['target_station']
-                all_end_dates[current_idx] = sample_info['end_date'].timestamp()
-                all_start_dates[current_idx] = sample_info['start_date'].timestamp()
-                all_skip_pattern[current_idx] = skip_idx
-                all_permutation[current_idx] = perm_idx
+                arrays['features'][current_idx] = aug_features
+                arrays['targets'][current_idx] = normalized_target
+                arrays['masks'][current_idx] = aug_mask
+                arrays['target_stations'][current_idx] = sample_info['target_station']
+                arrays['end_dates'][current_idx] = sample_info['end_date'].timestamp()
+                arrays['start_dates'][current_idx] = sample_info['start_date'].timestamp()
+                arrays['skip_pattern'][current_idx] = skip_idx
+                arrays['permutation'][current_idx] = perm_idx
 
                 current_idx += 1
 
     print(f"   ✓ Generated {current_idx:,} augmented samples")
 
-    # Save dataset (data already normalized during generation)
-    step_num += 1
-    print(f"\n{step_num}. Saving dataset...")
-    all_features.flush()
-    all_targets.flush()
-    all_masks.flush()
-    all_target_stations.flush()
-    all_skip_pattern.flush()
-    all_permutation.flush()
+    # Save dataset using helper function
+    print(f"\n7. Saving dataset...")
+    _save_augmented_dataset(arrays, output_path, norm_stats_path, base_stats)
+    print(f"   ✓ Saved to: {output_path}")
 
-    np.save(output_path / 'end_dates.npy', all_end_dates)
-    np.save(output_path / 'start_dates.npy', all_start_dates)
-    np.save(output_path / 'is_normalized.npy', np.array([True], dtype=bool))
-
-    np.savez(
-        norm_stats_path,
-        feature_mins=base_stats['feature_mins'],
-        feature_maxs=base_stats['feature_maxs'],
-        target_min=base_stats['target_min'],
-        target_max=base_stats['target_max']
-    )
-
-    print(f"\n   ✓ Saved to: {output_path}")
-
-    print("\n" + "=" * 70)
-    print("✓ AUGMENTED DATASET COMPLETE!")
-    print("=" * 70)
-    print(f"Base samples: {len(base_dataset.sample_index):,}")
-    print(f"Augmented samples: {total_samples:,}")
-    print(f"Augmentation factor: {total_samples / len(base_dataset.sample_index):.0f}x")
-    print(f"\nMemory usage:")
-    print(f"  - Peak RAM: ~5 GB (sequential processing)")
-    print(f"  - Disk space: {(features_size_gb + masks_size_gb):.1f} GB")
-    print(f"\nPerformance:")
-    print(f"  - Normalization: Done during generation using base stats")
-    print("=" * 70)
+    # Print completion stats
+    features_size_gb = total_samples * seq_length * total_features * 4 / 1e9
+    masks_size_gb = total_samples * seq_length * total_features * 1 / 1e9
+    _print_completion_stats(base_dataset, total_samples, num_workers=None,
+                           disk_size_gb=features_size_gb + masks_size_gb)
 
 
 def generate_all_augmentations_batched(
