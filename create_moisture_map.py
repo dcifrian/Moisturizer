@@ -286,6 +286,195 @@ def build_fast_timeseries_lookup(timeseries_df, start_date, end_date, station_id
     return lookup
 
 
+# =============================================================================
+# Shared helper functions for building sequences
+# =============================================================================
+
+def _init_sequence_arrays(end_date, seq_length, feature_params, n_nearest, missing_value=-1000.0):
+    """
+    Initialize arrays and compute layout for sequence building.
+
+    Returns:
+        dict with keys: date_strings, layout, features, mask, coordinate_features,
+                        target_features_per_timestep, nearby_features_per_timestep, total_features
+    """
+    start_date = end_date - timedelta(days=seq_length - 1)
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    date_strings = [str(d.date()) for d in date_range]
+
+    coordinate_features = {'altitude', 'utmx', 'utmy'}
+
+    layout = FeatureLayout(n_params=len(feature_params), n_nearby=n_nearest)
+    target_features_per_timestep = layout.n_target_features
+    nearby_features_per_timestep = layout.nearby_features_per_station
+    total_features = layout.n_total_features
+
+    features = np.full((seq_length, total_features), missing_value, dtype=np.float32)
+    mask = np.zeros((seq_length, total_features), dtype=bool)
+
+    return {
+        'date_strings': date_strings,
+        'layout': layout,
+        'features': features,
+        'mask': mask,
+        'coordinate_features': coordinate_features,
+        'target_features_per_timestep': target_features_per_timestep,
+        'nearby_features_per_timestep': nearby_features_per_timestep,
+        'total_features': total_features,
+    }
+
+
+def _fill_target_coordinate_features(features, mask, target_coords, feature_params, coordinate_features):
+    """
+    Fill coordinate features for the target station (constant across all timesteps).
+    Modifies features and mask in-place.
+    """
+    for f_idx, param in enumerate(feature_params):
+        if param in coordinate_features:
+            coord_value = target_coords.get(param)
+            if coord_value is not None:
+                features[:, f_idx] = coord_value
+                mask[:, f_idx] = True
+
+
+def _fill_nearby_coordinates_and_distances(features, mask, nearby_stations, stations_lookup,
+                                           feature_params, coordinate_features,
+                                           target_features_per_timestep, nearby_features_per_timestep,
+                                           n_nearest):
+    """
+    Fill coordinate features and distances for nearby stations (constant across all timesteps).
+    Modifies features and mask in-place.
+    """
+    for n_idx, nearby in enumerate(nearby_stations[:n_nearest]):
+        nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
+
+        # Distance (constant across time)
+        features[:, nearby_offset] = nearby['distance']
+        mask[:, nearby_offset] = True
+
+        # Coordinate features for nearby station
+        nid = nearby['station_id']
+        if nid in stations_lookup:
+            ncoords = stations_lookup[nid]
+            for f_idx_nearby, param in enumerate(feature_params):
+                if param in coordinate_features:
+                    feat_idx = nearby_offset + 1 + f_idx_nearby
+                    coord_value = ncoords.get(param)
+                    if coord_value is not None:
+                        features[:, feat_idx] = coord_value
+                        mask[:, feat_idx] = True
+
+
+def _fill_nearby_timeseries_features(features, mask, date_strings, nearby_stations,
+                                      timeseries_lookup, feature_params, coordinate_features,
+                                      target_features_per_timestep, nearby_features_per_timestep,
+                                      n_nearest):
+    """
+    Fill timeseries features (weather + soil moisture) for nearby stations.
+    Modifies features and mask in-place.
+    """
+    for t, date_str in enumerate(date_strings):
+        for n_idx, nearby in enumerate(nearby_stations[:n_nearest]):
+            nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
+            nid = nearby['station_id']
+
+            # Weather features for this nearby station
+            for f_idx_nearby, param in enumerate(feature_params):
+                if param not in coordinate_features:
+                    feat_idx = nearby_offset + 1 + f_idx_nearby
+                    key = (nid, date_str, param)
+                    if key in timeseries_lookup:
+                        features[t, feat_idx] = timeseries_lookup[key]
+                        mask[t, feat_idx] = True
+
+            # Soil moisture for this nearby station
+            key = (nid, date_str, 'HS_CV_AVG_-0.2m')
+            soil_idx = nearby_offset + 1 + len(feature_params)
+            if key in timeseries_lookup:
+                features[t, soil_idx] = timeseries_lookup[key]
+                mask[t, soil_idx] = True
+
+
+def _fill_target_timeseries_direct(features, mask, date_strings, station_id,
+                                   timeseries_lookup, feature_params, coordinate_features):
+    """
+    Fill target station timeseries features using direct lookup (for real stations).
+    Modifies features and mask in-place.
+    """
+    for t, date_str in enumerate(date_strings):
+        for f_idx, param in enumerate(feature_params):
+            if param not in coordinate_features:
+                key = (station_id, date_str, param)
+                if key in timeseries_lookup:
+                    features[t, f_idx] = timeseries_lookup[key]
+                    mask[t, f_idx] = True
+
+
+def _fill_target_timeseries_interpolated(features, mask, date_strings, interpolation_stations,
+                                          timeseries_lookup, feature_params, coordinate_features):
+    """
+    Fill target station timeseries features using interpolation (for virtual stations).
+    Uses inverse distance weighting from selected interpolation stations.
+    Modifies features and mask in-place.
+    """
+    # Compute interpolation weights
+    interp_distances = np.array([ns['distance'] for ns in interpolation_stations])
+    interp_weights = 1.0 / (interp_distances + 1.0)  # +1 meter epsilon
+    interp_weights = interp_weights / interp_weights.sum()
+
+    nearest_distance = interpolation_stations[0]['distance']
+
+    for t, date_str in enumerate(date_strings):
+        for f_idx, param in enumerate(feature_params):
+            if param not in coordinate_features:
+                # Check nearest station first
+                nearest_key = (interpolation_stations[0]['station_id'], date_str, param)
+                nearest_val = timeseries_lookup.get(nearest_key)
+
+                if nearest_val is not None and nearest_val > -9000:
+                    # Nearest has valid data - interpolate from all stations
+                    values = [nearest_val]
+                    valid_weights = [interp_weights[0]]
+
+                    for i in range(1, len(interpolation_stations)):
+                        key = (interpolation_stations[i]['station_id'], date_str, param)
+                        val = timeseries_lookup.get(key)
+                        if val is not None and val > -9000:
+                            values.append(val)
+                            valid_weights.append(interp_weights[i])
+
+                    # Interpolate
+                    valid_weights = np.array(valid_weights)
+                    valid_weights = valid_weights / valid_weights.sum()
+                    features[t, f_idx] = float(np.sum(np.array(values) * valid_weights))
+                    mask[t, f_idx] = True
+                else:
+                    # Nearest has missing data - check if we should impute from others
+                    allow_impute = False
+                    for i in range(1, len(interpolation_stations)):
+                        if interpolation_stations[i]['distance'] <= nearest_distance * IMPUTE_DISTANCE_THRESHOLD:
+                            allow_impute = True
+                            break
+
+                    if allow_impute:
+                        # Try to get value from other stations
+                        values = []
+                        valid_weights = []
+                        for i in range(1, len(interpolation_stations)):
+                            key = (interpolation_stations[i]['station_id'], date_str, param)
+                            val = timeseries_lookup.get(key)
+                            if val is not None and val > -9000:
+                                values.append(val)
+                                valid_weights.append(interp_weights[i])
+
+                        if values:
+                            valid_weights = np.array(valid_weights)
+                            valid_weights = valid_weights / valid_weights.sum()
+                            features[t, f_idx] = float(np.sum(np.array(values) * valid_weights))
+                            mask[t, f_idx] = True
+                    # else: keep as missing_value (-1000) -> -2 after normalization
+
+
 def build_sequence_for_any_station(
     station_id,
     end_date,
@@ -308,104 +497,53 @@ def build_sequence_for_any_station(
         timeseries_lookup: Pre-built dict from build_fast_timeseries_lookup
         nearest_lookup: Pre-built dict: station_id -> [{'station_id': X, 'distance': Y}, ...]
         stations_lookup: Pre-built dict: station_id -> {'altitude': X, 'utmx': Y, ...}
-    
+
     OPTIMIZED: Uses pre-built dict lookups instead of DataFrame filtering.
     """
-    start_date = end_date - timedelta(days=seq_length - 1)
-    # Pre-generate date strings (faster than converting in loop)
-    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-    date_strings = [str(d.date()) for d in date_range]
-
     # Get nearest stations from pre-built lookup
     if station_id not in nearest_lookup:
         return None
-    
+
     nearby_stations = nearest_lookup[station_id][:n_nearest]
-    
+
     if len(nearby_stations) < n_nearest:
         return None
-
-    # Separate coordinate features from timeseries parameters
-    coordinate_features = {'altitude', 'utmx', 'utmy'}  # Use set for O(1) lookup
-
-    # Calculate feature dimensions using FeatureLayout
-    layout = FeatureLayout(n_params=len(feature_params), n_nearby=n_nearest)
-    target_features_per_timestep = layout.n_target_features
-    nearby_features_per_timestep = layout.nearby_features_per_station
-    total_features = layout.n_total_features
-
-    # Initialize arrays
-    features = np.full((seq_length, total_features), missing_value, dtype=np.float32)
-    mask = np.zeros((seq_length, total_features), dtype=bool)
 
     # Get target station metadata from pre-built lookup
     if station_id not in stations_lookup:
         return None
     target_station_coords = stations_lookup[station_id]
 
-    # Pre-fetch nearby station coords
-    nearby_station_coords = {}
-    for nearby in nearby_stations:
-        nid = nearby['station_id']
-        if nid in stations_lookup:
-            nearby_station_coords[nid] = stations_lookup[nid]
+    # Initialize arrays and layout
+    init = _init_sequence_arrays(end_date, seq_length, feature_params, n_nearest, missing_value)
+    features = init['features']
+    mask = init['mask']
+    date_strings = init['date_strings']
+    coordinate_features = init['coordinate_features']
 
-    # Fill coordinate features ONCE (they're constant across time)
-    for f_idx, param in enumerate(feature_params):
-        if param in coordinate_features:
-            coord_value = target_station_coords.get(param)
-            if coord_value is not None:
-                features[:, f_idx] = coord_value
-                mask[:, f_idx] = True
-    
-    # Fill nearby station coordinate features and distances ONCE
-    for n_idx, nearby in enumerate(nearby_stations):
-        nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
-        
-        # Distance (constant across time)
-        features[:, nearby_offset] = nearby['distance']
-        mask[:, nearby_offset] = True
-        
-        # Coordinate features for nearby station
-        if nearby['station_id'] in nearby_station_coords:
-            ncoords = nearby_station_coords[nearby['station_id']]
-            for f_idx_nearby, param in enumerate(feature_params):
-                if param in coordinate_features:
-                    feat_idx = nearby_offset + 1 + f_idx_nearby
-                    coord_value = ncoords.get(param)
-                    if coord_value is not None:
-                        features[:, feat_idx] = coord_value
-                        mask[:, feat_idx] = True
+    # Fill coordinate features for target station (constant across time)
+    _fill_target_coordinate_features(features, mask, target_station_coords,
+                                     feature_params, coordinate_features)
 
-    # Fill timeseries features for each timestep
-    for t, date_str in enumerate(date_strings):
-        # Target station timeseries features
-        for f_idx, param in enumerate(feature_params):
-            if param not in coordinate_features:
-                key = (station_id, date_str, param)
-                if key in timeseries_lookup:
-                    features[t, f_idx] = timeseries_lookup[key]
-                    mask[t, f_idx] = True
+    # Fill nearby station coordinate features and distances (constant across time)
+    _fill_nearby_coordinates_and_distances(
+        features, mask, nearby_stations, stations_lookup,
+        feature_params, coordinate_features,
+        init['target_features_per_timestep'], init['nearby_features_per_timestep'],
+        n_nearest
+    )
 
-        # Nearby stations timeseries features
-        for n_idx, nearby in enumerate(nearby_stations):
-            nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
-            nid = nearby['station_id']
+    # Fill target station timeseries features (direct lookup)
+    _fill_target_timeseries_direct(features, mask, date_strings, station_id,
+                                   timeseries_lookup, feature_params, coordinate_features)
 
-            for f_idx_nearby, param in enumerate(feature_params):
-                if param not in coordinate_features:
-                    feat_idx = nearby_offset + 1 + f_idx_nearby
-                    key = (nid, date_str, param)
-                    if key in timeseries_lookup:
-                        features[t, feat_idx] = timeseries_lookup[key]
-                        mask[t, feat_idx] = True
-
-            # Soil moisture for nearby station
-            key = (nid, date_str, 'HS_CV_AVG_-0.2m')
-            soil_idx = nearby_offset + 1 + len(feature_params)
-            if key in timeseries_lookup:
-                features[t, soil_idx] = timeseries_lookup[key]
-                mask[t, soil_idx] = True
+    # Fill nearby stations timeseries features (weather + soil moisture)
+    _fill_nearby_timeseries_features(
+        features, mask, date_strings, nearby_stations,
+        timeseries_lookup, feature_params, coordinate_features,
+        init['target_features_per_timestep'], init['nearby_features_per_timestep'],
+        n_nearest
+    )
 
     # Apply normalization
     features_normalized = apply_normalization_to_features(features, mask, norm_stats, missing_value)
@@ -820,157 +958,55 @@ def build_sequence_for_virtual_station(
 ):
     """
     Build a sequence for a virtual grid station by interpolating features from real stations.
-    
+
     For each feature at each timestep:
     - Use inverse distance weighted interpolation from nearest real stations
     - Missing values (-9999, -1000) are excluded from interpolation
     """
-    
-    start_date = end_date - timedelta(days=seq_length - 1)
-    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-    date_strings = [str(d.date()) for d in date_range]
-    
-    # Coordinate features
-    coordinate_features = {'altitude', 'utmx', 'utmy'}
 
-    # Calculate feature dimensions using FeatureLayout
-    layout = FeatureLayout(n_params=len(feature_params), n_nearby=n_nearest)
-    target_features_per_timestep = layout.n_target_features
-    nearby_features_per_timestep = layout.nearby_features_per_station
-    total_features = layout.n_total_features
-    
-    # Initialize arrays
-    features = np.full((seq_length, total_features), missing_value, dtype=np.float32)
-    mask = np.zeros((seq_length, total_features), dtype=bool)
-    
-    # Pre-compute distances and weights for nearest real stations
-    # Distances are now in meters, so use +1m epsilon instead of 1e-9
-    distances = np.array([ns['distance'] for ns in nearest_real_stations])
-    weights = 1.0 / (distances + 1.0)  # +1 meter
-    weights = weights / weights.sum()
-    
+    # Initialize arrays and layout
+    init = _init_sequence_arrays(end_date, seq_length, feature_params, n_nearest, missing_value)
+    features = init['features']
+    mask = init['mask']
+    date_strings = init['date_strings']
+    coordinate_features = init['coordinate_features']
+
     # Fill coordinate features for target (virtual) station - constant across time
-    for f_idx, param in enumerate(feature_params):
-        if param in coordinate_features:
-            coord_value = virtual_coords.get(param)
-            if coord_value is not None:
-                features[:, f_idx] = coord_value
-                mask[:, f_idx] = True
-    
+    _fill_target_coordinate_features(features, mask, virtual_coords,
+                                     feature_params, coordinate_features)
+
     # Fill nearby station (with soil moisture) coordinate features and distances
-    for n_idx, nearby in enumerate(nearest_with_soil[:n_nearest]):
-        nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
-        
-        # Distance
-        features[:, nearby_offset] = nearby['distance']
-        mask[:, nearby_offset] = True
-        
-        # Coordinate features
-        if nearby['station_id'] in stations_lookup:
-            ncoords = stations_lookup[nearby['station_id']]
-            for f_idx_nearby, param in enumerate(feature_params):
-                if param in coordinate_features:
-                    feat_idx = nearby_offset + 1 + f_idx_nearby
-                    coord_value = ncoords.get(param)
-                    if coord_value is not None:
-                        features[:, feat_idx] = coord_value
-                        mask[:, feat_idx] = True
-    
-    # Fill timeseries features by interpolation
-    # Strategy: Use 3 stations forming the smallest triangle containing the virtual station.
-    # If nearest has missing data, only impute if virtual station is close to other stations
-    # (within 15% of nearest distance). Otherwise keep as missing (-2 normalized).
-    
-    # Select which 3 stations to use for interpolation
-    # We need nearest_real_stations to have at least 10 for triangle selection
+    _fill_nearby_coordinates_and_distances(
+        features, mask, nearest_with_soil, stations_lookup,
+        feature_params, coordinate_features,
+        init['target_features_per_timestep'], init['nearby_features_per_timestep'],
+        n_nearest
+    )
+
+    # Select which stations to use for interpolation (triangle selection)
+    # Uses 3 stations forming the smallest triangle containing the virtual station
     interpolation_stations = select_triangle_stations(
         virtual_station, nearest_real_stations, stations_lookup
     )
-    
-    # Recompute weights for the selected stations
-    interp_distances = np.array([ns['distance'] for ns in interpolation_stations])
-    interp_weights = 1.0 / (interp_distances + 1.0)
-    interp_weights = interp_weights / interp_weights.sum()
-    
-    nearest_distance = interpolation_stations[0]['distance']
-    
-    for t, date_str in enumerate(date_strings):
-        # Target station: interpolate each feature from selected stations
-        for f_idx, param in enumerate(feature_params):
-            if param not in coordinate_features:
-                # Check nearest station first
-                nearest_key = (interpolation_stations[0]['station_id'], date_str, param)
-                nearest_val = timeseries_lookup.get(nearest_key)
-                
-                if nearest_val is not None and nearest_val > -9000:
-                    # Nearest has valid data - interpolate from all 3 stations
-                    values = [nearest_val]
-                    valid_weights = [interp_weights[0]]
-                    
-                    for i in range(1, len(interpolation_stations)):
-                        key = (interpolation_stations[i]['station_id'], date_str, param)
-                        val = timeseries_lookup.get(key)
-                        if val is not None and val > -9000:
-                            values.append(val)
-                            valid_weights.append(interp_weights[i])
-                    
-                    # Interpolate
-                    valid_weights = np.array(valid_weights)
-                    valid_weights = valid_weights / valid_weights.sum()
-                    features[t, f_idx] = float(np.sum(np.array(values) * valid_weights))
-                    mask[t, f_idx] = True
-                else:
-                    # Nearest has missing data - check if we should impute from others
-                    # Allow imputation if any other station is within threshold of nearest distance
-                    allow_impute = False
-                    for i in range(1, len(interpolation_stations)):
-                        if interpolation_stations[i]['distance'] <= nearest_distance * IMPUTE_DISTANCE_THRESHOLD:
-                            allow_impute = True
-                            break
-                    
-                    if allow_impute:
-                        # Try to get value from other stations
-                        values = []
-                        valid_weights = []
-                        for i in range(1, len(interpolation_stations)):
-                            key = (interpolation_stations[i]['station_id'], date_str, param)
-                            val = timeseries_lookup.get(key)
-                            if val is not None and val > -9000:
-                                values.append(val)
-                                valid_weights.append(interp_weights[i])
-                        
-                        if values:
-                            valid_weights = np.array(valid_weights)
-                            valid_weights = valid_weights / valid_weights.sum()
-                            features[t, f_idx] = float(np.sum(np.array(values) * valid_weights))
-                            mask[t, f_idx] = True
-                    # else: keep as missing_value (-1000) -> -2 after normalization
-        
-        # Context stations (4 nearest with soil moisture sensors): use their ACTUAL data
-        # These provide real weather + real soil moisture as context for the prediction
-        for n_idx, nearby in enumerate(nearest_with_soil[:n_nearest]):
-            nearby_offset = target_features_per_timestep + (n_idx * nearby_features_per_timestep)
-            nid = nearby['station_id']
-            
-            # Weather features for this context station (actual, not interpolated)
-            for f_idx_nearby, param in enumerate(feature_params):
-                if param not in coordinate_features:
-                    feat_idx = nearby_offset + 1 + f_idx_nearby
-                    key = (nid, date_str, param)
-                    if key in timeseries_lookup:
-                        features[t, feat_idx] = timeseries_lookup[key]
-                        mask[t, feat_idx] = True
-            
-            # Soil moisture for this context station (actual)
-            key = (nid, date_str, 'HS_CV_AVG_-0.2m')
-            soil_idx = nearby_offset + 1 + len(feature_params)
-            if key in timeseries_lookup:
-                features[t, soil_idx] = timeseries_lookup[key]
-                mask[t, soil_idx] = True
-    
+
+    # Fill target station timeseries by interpolation from selected stations
+    _fill_target_timeseries_interpolated(
+        features, mask, date_strings, interpolation_stations,
+        timeseries_lookup, feature_params, coordinate_features
+    )
+
+    # Fill nearby stations (with soil moisture) timeseries features
+    # Context stations use their ACTUAL data (not interpolated)
+    _fill_nearby_timeseries_features(
+        features, mask, date_strings, nearest_with_soil,
+        timeseries_lookup, feature_params, coordinate_features,
+        init['target_features_per_timestep'], init['nearby_features_per_timestep'],
+        n_nearest
+    )
+
     # Apply normalization
     features_normalized = apply_normalization_to_features(features, mask, norm_stats, missing_value)
-    
+
     return features_normalized, mask
 
 
