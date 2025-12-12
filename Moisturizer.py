@@ -3108,38 +3108,101 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
     return train_ds, val_ds, test_ds
 
 def loadDataset(use_precomputed=True, normalize=True, precomputed_path=None, norm_stats_path=None,
-                coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD):
+                coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD,
+                n_nearby: int = 4, seq_length: int = 64,
+                live_augment: Union[bool, int] = False):
     """
     Load PyTorch Dataset
 
     Args:
         use_precomputed: If True, load from precomputed file (much faster)
         normalize: If True, normalize data to [-1, 1] range
+        precomputed_path: Path to precomputed sequences (optional)
+        norm_stats_path: Path to normalization stats (optional)
         coverage_threshold: Minimum data coverage for a parameter to be included
+        n_nearby: Number of nearby stations in features (default: 4)
+        seq_length: Sequence length (default: 64)
+        live_augment: Whether to use live augmentation:
+            - False (default): Load regular dataset
+            - True: Use live augmentation with n_nearby as n_nearby_available (permutations only)
+            - int: Use live augmentation with this value as n_nearby_available (must be >= n_nearby)
+
+    Returns:
+        Tuple of (train_dataset, val_dataset, test_dataset)
     """
     collector = MeteoGaliciaCollector()  # Does nothing, just for the paths
-    print("\n" + "=" * 60)
-    print("STEP 1: Loading PyTorch Dataset")
-    print("=" * 60)
 
     # Get filtered parameters
     _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=coverage_threshold)
 
     if not filtered_params:
         print("\n✗ No parameters passed the threshold!")
-        return
+        return None, None, None
 
     print(f"\nUsing {len(filtered_params)} filtered parameters...")
+
+    # Determine norm_stats_path
+    if norm_stats_path is None:
+        norm_stats_path = collector.data_dir / "normalization_stats.npz"
+
+    # Handle live augmentation case
+    if live_augment:
+        print("\n" + "=" * 60)
+        print("Loading Dataset with LIVE AUGMENTATION")
+        print("=" * 60)
+
+        # Lazy import to avoid circular dependency
+        from augmented_live import AugmentedLiveDataset
+
+        # Determine n_nearby_available
+        if live_augment is True:
+            n_nearby_available = n_nearby
+            print(f"  n_nearby_available={n_nearby_available} (same as n_nearby, permutation-only)")
+        else:
+            n_nearby_available = int(live_augment)
+            if n_nearby_available < n_nearby:
+                raise ValueError(
+                    f"live_augment={n_nearby_available} must be >= n_nearby={n_nearby}"
+                )
+            print(f"  n_nearby_available={n_nearby_available} (skip patterns + permutations)")
+
+        dataset = AugmentedLiveDataset.from_base_dataset(
+            timeseries=str(collector.timeseries_file),
+            stations=str(collector.stations_file),
+            nearest=str(collector.nearest_file),
+            dense_array_path=str(collector.data_dir / "dense_features.npz"),
+            feature_params=filtered_params,
+            seq_length=seq_length,
+            n_nearby_available=n_nearby_available,
+            n_nearby_in_features=n_nearby,
+            normalize=normalize,
+            norm_stats_path=str(norm_stats_path) if normalize else None,
+        )
+
+        # Train/val/test split
+        print("\n" + "=" * 60)
+        print("Creating train/val/test splits")
+        print("=" * 60)
+
+        train_ds, val_ds, test_ds = AugmentedLiveDataset.train_val_test_split(
+            dataset,
+            val_stations_ratio=0.15,
+            test_stations_ratio=0.0
+        )
+        return train_ds, val_ds, test_ds
+
+    # Regular (non-augmented) dataset loading
+    print("\n" + "=" * 60)
+    print("Loading Dataset (no augmentation)")
+    print("=" * 60)
 
     # Check for precomputed data
     if precomputed_path is None:
         precomputed_path = collector.data_dir / "precomputed_sequences"
-    if norm_stats_path is None:
-        norm_stats_path = collector.data_dir / "normalization_stats.npz"
 
-    if use_precomputed and not precomputed_path.exists():
+    if use_precomputed and not Path(precomputed_path).exists():
         print(f"\n⚠ Precomputed data not found at {precomputed_path}")
-        print("  Run precomputeDataset() first for much faster loading!")
+        print("  Run buildDataset() first for much faster loading!")
         print("  Falling back to on-the-fly sequence building (SLOW)...")
         use_precomputed = False
 
@@ -3147,8 +3210,8 @@ def loadDataset(use_precomputed=True, normalize=True, precomputed_path=None, nor
         timeseries=str(collector.timeseries_file),
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),
-        seq_length=64,
-        n_nearest=4,
+        seq_length=seq_length,
+        n_nearest=n_nearby,
         feature_params=filtered_params,
         precomputed_path=str(precomputed_path) if use_precomputed else None,
         normalize=normalize,
@@ -3156,19 +3219,19 @@ def loadDataset(use_precomputed=True, normalize=True, precomputed_path=None, nor
     )
 
     print(f"\nFeature names: {dataset.get_feature_names()}")
-    torch.set_printoptions(threshold=1000000)
+
     # Example sample
-    sample = dataset[10]
-    print(f"\nExample sample:")
-    print(sample)
-    print(f"  Features shape: {sample['features'].shape}")
-    print(f"  Target: {sample['target']}")
-    print(f"  Mask shape: {sample['mask'].shape}")
-    print(f"  Station ID: {sample['target_station_id']}")
+    if len(dataset) > 0:
+        sample = dataset[0]
+        print(f"\nExample sample:")
+        print(f"  Features shape: {sample['features'].shape}")
+        print(f"  Target: {sample['target']}")
+        print(f"  Mask shape: {sample['mask'].shape}")
+        print(f"  Station ID: {sample['target_station_id']}")
 
     # Train/val/test split
     print("\n" + "=" * 60)
-    print("STEP 2: Creating train/val/test splits")
+    print("Creating train/val/test splits")
     print("=" * 60)
 
     train_ds, val_ds, test_ds = SoilMoistureSequenceDataset.train_val_test_split(
@@ -3229,18 +3292,27 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python Moisturizer.py --build                    # Build dataset with default settings
-  python Moisturizer.py --train                    # Train model (builds if needed)
-  python Moisturizer.py --build --coverage 0.3     # Build with 30% coverage threshold
-  python Moisturizer.py --train --epochs 50        # Train for 50 epochs
+  python Moisturizer.py --build                              # Build base dataset (4 nearby)
+  python Moisturizer.py --build --precompute-augmented 5     # Build + precompute 120x augmented
+  python Moisturizer.py --train                              # Train with no augmentation
+  python Moisturizer.py --train --live-augment 5             # Train with 120x live augmentation
+  python Moisturizer.py --build --n-nearby 4 --seq-length 64 # Explicit defaults
         """
     )
     parser.add_argument('--build', action='store_true',
                        help='Build/rebuild the dataset')
     parser.add_argument('--train', action='store_true',
-                       help='Train the model (will build dataset if needed)')
+                       help='Train the model')
     parser.add_argument('--coverage', type=float, default=DEFAULT_COVERAGE_THRESHOLD,
                        help=f'Minimum data coverage threshold for parameters (default: {DEFAULT_COVERAGE_THRESHOLD})')
+    parser.add_argument('--n-nearby', type=int, default=4,
+                       help='Number of nearby stations in features (default: 4)')
+    parser.add_argument('--seq-length', type=int, default=64,
+                       help='Sequence length in days (default: 64)')
+    parser.add_argument('--precompute-augmented', type=int, default=0, metavar='N',
+                       help='Precompute augmented dataset with N nearby available (0=disabled, use with --build)')
+    parser.add_argument('--live-augment', type=int, default=0, metavar='N',
+                       help='Use live augmentation with N nearby available (0=disabled, use with --train)')
     parser.add_argument('--epochs', type=int, default=20,
                        help='Number of training epochs (default: 20)')
     parser.add_argument('--batch-size', type=int, default=512,
@@ -3256,20 +3328,33 @@ Examples:
         print("\nNo action specified. Use --build to build dataset or --train to train model.")
         exit(0)
 
-    collector = MeteoGaliciaCollector()
-    precomputed_path = collector.data_dir / "precomputed_sequences_augmented"
-    features_file = precomputed_path / "features.npy"
-
     if args.build:
         print("\n" + "=" * 60)
         print("BUILDING DATASET")
         print("=" * 60)
         print(f"Coverage threshold: {args.coverage}")
-        buildDataset(coverage_threshold=args.coverage)
+        print(f"n_nearby: {args.n_nearby}")
+        print(f"seq_length: {args.seq_length}")
+        if args.precompute_augmented > 0:
+            print(f"precompute_augmented: {args.precompute_augmented}")
+
+        buildDataset(
+            coverage_threshold=args.coverage,
+            n_nearby=args.n_nearby,
+            seq_length=args.seq_length,
+            precompute_augmented=args.precompute_augmented if args.precompute_augmented > 0 else False,
+        )
 
     if args.train:
+        # Determine live_augment value
+        live_augment_val = args.live_augment if args.live_augment > 0 else False
 
-        train_ds, val_ds, _ = loadDatasetLiveAugmented(coverage_threshold=args.coverage)
+        train_ds, val_ds, _ = loadDataset(
+            coverage_threshold=args.coverage,
+            n_nearby=args.n_nearby,
+            seq_length=args.seq_length,
+            live_augment=live_augment_val,
+        )
 
         # Data leakage check
         sample = train_ds[0]
