@@ -335,9 +335,14 @@ def _setup_augmentation(data_dir: str, n_nearby_available: int, n_nearby_in_feat
     print(f"\n3. Generating augmentation combinations...")
     available_indices = list(range(n_nearby_available))
     skip_patterns = []
-    for skip_idx in range(n_nearby_available):
-        keep_indices = [i for i in available_indices if i != skip_idx][:n_nearby_in_features]
-        skip_patterns.append(keep_indices)
+    if n_nearby_available > n_nearby_in_features:
+        # We can skip one station and still have enough
+        for skip_idx in range(n_nearby_available):
+            keep_indices = [i for i in available_indices if i != skip_idx][:n_nearby_in_features]
+            skip_patterns.append(keep_indices)
+    else:
+        # n_nearby_available == n_nearby_in_features: use all stations (no skipping)
+        skip_patterns.append(list(range(n_nearby_in_features)))
 
     all_permutations = list(permutations(range(n_nearby_in_features)))
     total_augmentations = len(skip_patterns) * len(all_permutations)
@@ -711,9 +716,14 @@ def generate_all_augmentations_batched(
 
     available_indices = list(range(n_nearby_available))
     skip_patterns = []
-    for skip_idx in range(n_nearby_available):
-        keep_indices = [i for i in available_indices if i != skip_idx][:n_nearby_in_features]
-        skip_patterns.append(keep_indices)
+    if n_nearby_available > n_nearby_in_features:
+        # We can skip one station and still have enough
+        for skip_idx in range(n_nearby_available):
+            keep_indices = [i for i in available_indices if i != skip_idx][:n_nearby_in_features]
+            skip_patterns.append(keep_indices)
+    else:
+        # n_nearby_available == n_nearby_in_features: use all stations (no skipping)
+        skip_patterns.append(list(range(n_nearby_in_features)))
 
     all_permutations = list(permutations(range(n_nearby_in_features)))
     total_augmentations = len(skip_patterns) * len(all_permutations)

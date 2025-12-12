@@ -332,10 +332,16 @@ class AugmentedLiveDataset(Dataset):
         available_indices = list(range(self.n_nearby_available))
 
         # Skip patterns: drop 1 of n_nearby_available stations
+        # Only create skip patterns if we have more stations available than needed
         self.skip_patterns = []
-        for skip_idx in range(self.n_nearby_available):
-            keep_indices = [i for i in available_indices if i != skip_idx][:self.n_nearby_in_features]
-            self.skip_patterns.append(keep_indices)
+        if self.n_nearby_available > self.n_nearby_in_features:
+            # We can skip one station and still have enough
+            for skip_idx in range(self.n_nearby_available):
+                keep_indices = [i for i in available_indices if i != skip_idx][:self.n_nearby_in_features]
+                self.skip_patterns.append(keep_indices)
+        else:
+            # n_nearby_available == n_nearby_in_features: use all stations (no skipping)
+            self.skip_patterns.append(list(range(self.n_nearby_in_features)))
 
         # All permutations of kept stations
         self.all_permutations = list(permutations(range(self.n_nearby_in_features)))
