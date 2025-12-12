@@ -299,13 +299,12 @@ def _setup_augmentation(data_dir: str, n_nearby_available: int, n_nearby_in_feat
     Common setup for augmentation generation.
 
     Returns:
-        dict with keys: collector, output_path, norm_stats_path, base_dataset,
+        dict with keys: collector, output_path, base_dataset,
                         filtered_params, skip_patterns, all_permutations,
                         total_augmentations, layout, total_samples, base_stats
     """
     collector = MeteoGaliciaCollector(data_dir=data_dir)
     output_path = Path(data_dir) / "precomputed_sequences_augmented"
-    norm_stats_path = Path(data_dir) / "normalization_stats_augmented.npz"
 
     # Get filtered parameters
     print("\n1. Analyzing parameter coverage...")
@@ -398,7 +397,6 @@ def _setup_augmentation(data_dir: str, n_nearby_available: int, n_nearby_in_feat
     return {
         'collector': collector,
         'output_path': output_path,
-        'norm_stats_path': norm_stats_path,
         'base_dataset': base_dataset,
         'filtered_params': filtered_params,
         'skip_patterns': skip_patterns,
@@ -462,9 +460,12 @@ def _create_memmap_arrays(output_path, total_samples, seq_length, total_features
     }
 
 
-def _save_augmented_dataset(arrays, output_path, norm_stats_path, base_stats):
+def _save_augmented_dataset(arrays, output_path):
     """
     Flush memmap arrays and save dataset metadata.
+
+    Note: Normalization stats are NOT saved here - the augmented dataset uses
+    the canonical stats from normalization_stats.npz which are expanded at load time.
     """
     arrays['features'].flush()
     arrays['targets'].flush()
@@ -476,14 +477,6 @@ def _save_augmented_dataset(arrays, output_path, norm_stats_path, base_stats):
     np.save(output_path / 'end_dates.npy', arrays['end_dates'])
     np.save(output_path / 'start_dates.npy', arrays['start_dates'])
     np.save(output_path / 'is_normalized.npy', np.array([True], dtype=bool))
-
-    np.savez(
-        norm_stats_path,
-        feature_mins=base_stats['feature_mins'],
-        feature_maxs=base_stats['feature_maxs'],
-        target_min=base_stats['target_min'],
-        target_max=base_stats['target_max']
-    )
 
 
 def _print_completion_stats(base_dataset, total_samples, num_workers=None, disk_size_gb=0):
@@ -544,7 +537,6 @@ def generate_all_augmentations_sequential(
 
     base_dataset = setup['base_dataset']
     output_path = setup['output_path']
-    norm_stats_path = setup['norm_stats_path']
     skip_patterns = setup['skip_patterns']
     all_permutations = setup['all_permutations']
     total_augmentations = setup['total_augmentations']
@@ -639,7 +631,7 @@ def generate_all_augmentations_sequential(
 
     # Save dataset using helper function
     print(f"\n7. Saving dataset...")
-    _save_augmented_dataset(arrays, output_path, norm_stats_path, base_stats)
+    _save_augmented_dataset(arrays, output_path)
     print(f"   ✓ Saved to: {output_path}")
 
     # Print completion stats
@@ -683,7 +675,6 @@ def generate_all_augmentations_batched(
     collector = MeteoGaliciaCollector(data_dir=data_dir)
     batch_dir = Path(data_dir) / "augmented_batches"
     output_path = Path(data_dir) / "precomputed_sequences_augmented"
-    norm_stats_path = Path(data_dir) / "normalization_stats_augmented.npz"
 
     # Get filtered parameters
     print("\n1. Analyzing parameter coverage...")
@@ -866,31 +857,15 @@ def generate_all_augmentations_batched(
 
             # Fetch samples for this batch (main process)
             batch_samples_data = []
-            import time
-            if batch_num < 5:  # Time first 5 batches to see pattern
-                batch_start = time.time()
-
             for idx in range(start_idx_base, end_idx_base):
-                if batch_num < 5 and idx == start_idx_base:
-                    sample_start = time.time()
-
                 sample = base_dataset[idx]
                 sample_info = base_dataset.sample_index[idx]
-
-                if batch_num < 5 and idx == start_idx_base:
-                    sample_time = time.time() - sample_start
-                    print(f"      [DEBUG] Batch {batch_num}, first sample took {sample_time*1000:.1f}ms")
-
                 batch_samples_data.append({
                     'features': sample['features'].numpy(),
                     'mask': sample['mask'].numpy(),
                     'target': sample['target'].numpy(),
                     'sample_info': sample_info
                 })
-
-            if batch_num < 5:
-                batch_time = time.time() - batch_start
-                print(f"      [DEBUG] Batch {batch_num} took {batch_time:.2f}s for {len(batch_samples_data)} samples ({batch_time*1000/len(batch_samples_data):.1f}ms/sample)")
 
             # Calculate where this batch will be written in augmented dataset
             start_idx_aug = current_aug_idx
@@ -927,17 +902,10 @@ def generate_all_augmentations_batched(
     print(f"   Dataset size: {features_size_gb:.1f}GB features + {masks_size_gb:.1f}GB masks = {features_size_gb + masks_size_gb:.1f}GB total")
     print(f"   Masks using bool dtype (75% smaller than float32!)")
 
-    # Save normalization flag and stats (data already normalized by workers)
+    # Save normalization flag (data already normalized by workers)
+    # Note: We don't save augmented stats - the canonical stats from normalization_stats.npz
+    # are expanded at load time by expand_canonical_to_augmented_stats()
     np.save(output_path / "is_normalized.npy", np.array([True], dtype=bool))
-
-    np.savez(
-        norm_stats_path,
-        feature_mins=base_stats['feature_mins'],
-        feature_maxs=base_stats['feature_maxs'],
-        target_min=np.array([base_stats['target_min']]),
-        target_max=np.array([base_stats['target_max']]),
-    )
-    print(f"   ✓ Saved normalization stats")
     print(f"   ✓ Saved to: {output_path}")
 
     print("\n" + "=" * 70)
