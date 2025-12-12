@@ -3241,50 +3241,6 @@ def loadDataset(use_precomputed=True, normalize=True, precomputed_path=None, nor
     )
     return train_ds, val_ds, test_ds
 
-def loadDatasetLiveAugmented(coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD):
-    # Lazy import to avoid circular dependency
-    from augmented_live import AugmentedLiveDataset
-
-    collector = MeteoGaliciaCollector()  # Does nothing, just for the paths
-    print("\n" + "=" * 60)
-    print("STEP 1: Loading PyTorch Dataset")
-    print("=" * 60)
-
-    # Get filtered parameters
-    _, filtered_params = collector.analyze_parameter_coverage(coverage_threshold=coverage_threshold)
-
-    if not filtered_params:
-        print("\n✗ No parameters passed the threshold!")
-        return
-
-    print(f"\nUsing {len(filtered_params)} filtered parameters...")
-
-    # Use canonical normalization stats from buildDataset()
-    norm_stats_path = collector.data_dir / "normalization_stats.npz"
-
-    dataset = AugmentedLiveDataset.from_base_dataset(
-        timeseries=str(collector.timeseries_file),
-        stations=str(collector.stations_file),
-        nearest=str(collector.nearest_file),
-        dense_array_path=str(collector.data_dir / "dense_features.npz"),
-        feature_params=filtered_params,
-        seq_length=64,
-        n_nearby_available=5,
-        n_nearby_in_features=4,
-        normalize=True,
-        norm_stats_path=str(norm_stats_path),
-    )
-    # Train/val/test split
-    print("\n" + "=" * 60)
-    print("STEP 2: Creating train/val/test splits")
-    print("=" * 60)
-
-    train_ds, val_ds, test_ds = AugmentedLiveDataset.train_val_test_split(
-        dataset,
-        val_stations_ratio=0.15,
-        test_stations_ratio=0.0
-    )
-    return train_ds, val_ds, test_ds
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
