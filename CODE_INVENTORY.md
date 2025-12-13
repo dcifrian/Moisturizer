@@ -65,7 +65,7 @@ PyTorch Dataset for soil moisture prediction sequences.
 
 ---
 
-## create_moisture_map.py (~2200 lines)
+## create_moisture_map.py (~2300 lines)
 
 Map visualization and virtual station prediction.
 
@@ -85,13 +85,12 @@ Map visualization and virtual station prediction.
 | `interpolate_coordinate_features` | 50 | IDW interpolation for coordinates |
 | `load_srtm_elevation_data` | 68 | Load SRTM elevation raster |
 | `get_elevation_from_srtm` | 33 | Get elevation from SRTM at lat/lon |
-| `get_elevation_from_open_elevation` | 28 | Fallback: get elevation from API |
 | `point_in_triangle` | 15 | Check if point is inside triangle |
 | `triangle_area` | 5 | Calculate triangle area |
 | `select_triangle_stations` | 68 | Select 3 stations forming smallest enclosing triangle |
 | `build_sequence_for_virtual_station` | 65 | Build interpolated sequence for virtual station |
 | `find_nearest_stations_with_soil_moisture` | 58 | Find nearest stations with soil sensors |
-| `debug_find_worst_offenders` | 184 | Debug: find stations with worst prediction errors |
+| `debug_find_worst_offenders` | 184 | Find stations with worst prediction errors |
 | `create_moisture_map` | ~500 | Main: create soil moisture prediction map |
 | `compute_cumulative_weather` | 61 | Compute cumulative rain/sun for visualization |
 | `create_weather_visualization` | 146 | Create weather parameter map |
@@ -99,7 +98,7 @@ Map visualization and virtual station prediction.
 
 ---
 
-## precompute_augmented.py (~1000 lines)
+## precompute_augmented.py (~875 lines)
 
 Precompute augmented dataset with skip patterns and permutations.
 
@@ -107,9 +106,13 @@ Precompute augmented dataset with skip patterns and permutations.
 
 | Function | Lines | Description |
 |----------|-------|-------------|
+| `build_skip_patterns` | 29 | Build skip patterns for augmentation (shared utility) |
 | `_process_batch_direct_write` | 183 | Worker: process batch and write to memmap |
-| `_process_samples_worker_v2` | 97 | Alternative worker for sample processing |
-| `generate_all_augmentations_sequential` | ~450 | Generate augmented dataset sequentially (low memory) |
+| `_setup_augmentation` | ~110 | Common setup for augmentation generation |
+| `_create_memmap_arrays` | 40 | Create memory-mapped arrays for output |
+| `_save_augmented_dataset` | 15 | Flush memmap arrays and save metadata |
+| `_print_completion_stats` | 20 | Print completion statistics |
+| `generate_all_augmentations_sequential` | ~130 | Generate augmented dataset sequentially (low memory) |
 | `generate_all_augmentations_batched` | ~250 | Generate augmented dataset in parallel batches |
 
 Key concepts:
@@ -119,13 +122,13 @@ Key concepts:
 
 ---
 
-## augmented_live.py (~1050 lines)
+## augmented_live.py (~985 lines)
 
-Live (on-the-fly) augmentation during training.
+Live (on-the-fly) augmentation during training. Imports `build_skip_patterns` from precompute_augmented.
 
 ### Classes
 
-**AugmentedLiveDataset** [L12]
+**AugmentedLiveDataset** [L21]
 PyTorch Dataset that augments on-the-fly during training.
 - `n_nearby_available`, `n_nearby_in_features` - Nearby station counts
 - `skip_patterns`, `all_permutations` - Augmentation patterns
@@ -139,18 +142,18 @@ PyTorch Dataset that augments on-the-fly during training.
 | `_from_soil_moisture_dataset` | 59 | Factory: create from existing dataset |
 | `_load_base_dataset` | 26 | Load precomputed base sequences |
 | `_infer_n_params` | 10 | Infer n_params from feature dimensions |
-| `_build_augmentation_patterns` | 15 | Build skip patterns and permutations |
+| `_build_augmentation_patterns` | 5 | Build patterns using build_skip_patterns() |
 | `_build_column_indices` | 37 | Precompute column indices for fast slicing |
-| `_compute_normalization_stats` | 83 | Expand canonical stats to augmented layout |
+| `load_normalization_stats` | 53 | Load and expand canonical stats |
 | `__len__` | 6 | Return total samples (base * augmentations) |
 | `_get_base_and_aug_idx` | 18 | Convert flat index to (base_idx, aug_idx) |
 | `__getitem__` | 45 | Get augmented sample via column indexing |
-| `_apply_normalization` | 41 | Apply normalization with invalid markers |
+| `_apply_normalization` | 26 | Apply normalization with invalid markers |
 | `train_val_test_split` | 61 | Split by station preserving augmentation |
 | `_create_split` | 61 | Create subset for train/val/test |
 | `get_feature_names` | 18 | Return feature names |
 
-**AugmentedPrecomputedDataset** [L699]
+**AugmentedPrecomputedDataset** [L678]
 Dataset for loading precomputed augmented data.
 - `features`, `targets`, `masks` - Memory-mapped arrays
 
@@ -161,12 +164,6 @@ Dataset for loading precomputed augmented data.
 | `__getitem__` | 13 | Get sample from memmap |
 | `train_val_test_split` | 46 | Split by station |
 | `_create_split` | 25 | Create subset |
-
-### Functions
-
-| Function | Lines | Description |
-|----------|-------|-------------|
-| `benchmark_dataset` | 215 | Benchmark dataset loading speed |
 
 ---
 

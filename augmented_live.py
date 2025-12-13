@@ -15,6 +15,7 @@ from Moisturizer import (
     FeatureLayout,
     NORMALIZED_INVALID_MARKER,
 )
+from precompute_augmented import build_skip_patterns
 
 
 class AugmentedLiveDataset(Dataset):
@@ -329,23 +330,8 @@ class AugmentedLiveDataset(Dataset):
 
     def _build_augmentation_patterns(self):
         """Build skip patterns and permutations"""
-        available_indices = list(range(self.n_nearby_available))
-
-        # Skip patterns: drop 1 of n_nearby_available stations
-        # Only create skip patterns if we have more stations available than needed
-        self.skip_patterns = []
-        if self.n_nearby_available > self.n_nearby_in_features:
-            # We can skip one station and still have enough
-            for skip_idx in range(self.n_nearby_available):
-                keep_indices = [i for i in available_indices if i != skip_idx][:self.n_nearby_in_features]
-                self.skip_patterns.append(keep_indices)
-        else:
-            # n_nearby_available == n_nearby_in_features: use all stations (no skipping)
-            self.skip_patterns.append(list(range(self.n_nearby_in_features)))
-
-        # All permutations of kept stations
+        self.skip_patterns = build_skip_patterns(self.n_nearby_available, self.n_nearby_in_features)
         self.all_permutations = list(permutations(range(self.n_nearby_in_features)))
-
         self.total_augmentations = len(self.skip_patterns) * len(self.all_permutations)
 
     def _build_column_indices(self):
@@ -818,44 +804,6 @@ class AugmentedPrecomputedDataset(Dataset):
         split._indices = np.array(indices, dtype=np.int64)
 
         return split
-
-
-def benchmark_dataset(dataset, n_samples: int = 1000, batch_size: int = 64):
-    """Benchmark dataset throughput"""
-    import time
-    from torch.utils.data import DataLoader
-
-    print(f"\nBenchmarking {type(dataset).__name__}...")
-    print(f"  Total samples: {len(dataset):,}")
-
-    # Single sample access
-    start = time.perf_counter()
-    for i in range(n_samples):
-        _ = dataset[i]
-    single_time = time.perf_counter() - start
-    print(f"  Single access: {n_samples / single_time:.0f} samples/sec")
-
-    # DataLoader throughput
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-
-    start = time.perf_counter()
-    n_batches = 0
-    n_total = 0
-    for batch in loader:
-        n_batches += 1
-        n_total += len(batch['features'])
-        if n_total >= n_samples:
-            break
-    loader_time = time.perf_counter() - start
-    print(f"  DataLoader (4 workers): {n_total / loader_time:.0f} samples/sec")
-
-    return single_time, loader_time
 
 
 if __name__ == "__main__":

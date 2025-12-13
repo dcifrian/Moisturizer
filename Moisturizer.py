@@ -471,7 +471,8 @@ class MeteoGaliciaCollector:
 
             # If listDatosDiarios is empty, no soil moisture data
             return len(data.get('listDatosDiarios', [])) > 0
-        except:
+        except (requests.RequestException, KeyError, ValueError) as e:
+            print(f"Warning: soil moisture check failed for station: {e}")
             return False
 
     def discover_stations_with_soil_moisture(

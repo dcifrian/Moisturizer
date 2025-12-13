@@ -26,6 +26,37 @@ import shutil
 import multiprocessing as mp
 from functools import partial
 from tqdm import tqdm
+from typing import List
+
+
+def build_skip_patterns(n_nearby_available: int, n_nearby_in_features: int) -> List[List[int]]:
+    """
+    Build skip patterns for augmentation.
+
+    When n_nearby_available > n_nearby_in_features, we can generate multiple
+    augmentations by dropping one station at a time. Each skip pattern contains
+    the indices of stations to keep.
+
+    Args:
+        n_nearby_available: Number of nearby stations in base dataset (e.g., 5)
+        n_nearby_in_features: Number of nearby stations in output (e.g., 4)
+
+    Returns:
+        List of index lists, where each list contains indices of stations to keep.
+        - If n_nearby_available > n_nearby_in_features: returns n_nearby_available patterns
+        - If n_nearby_available == n_nearby_in_features: returns single pattern with all indices
+    """
+    available_indices = list(range(n_nearby_available))
+    skip_patterns = []
+    if n_nearby_available > n_nearby_in_features:
+        # We can skip one station and still have enough
+        for skip_idx in range(n_nearby_available):
+            keep_indices = [i for i in available_indices if i != skip_idx][:n_nearby_in_features]
+            skip_patterns.append(keep_indices)
+    else:
+        # n_nearby_available == n_nearby_in_features: use all stations (no skipping)
+        skip_patterns.append(list(range(n_nearby_in_features)))
+    return skip_patterns
 
 
 def _process_batch_direct_write(args):
@@ -196,103 +227,6 @@ def _process_batch_direct_write(args):
             np.array(batch_start_dates, dtype=np.float64))
 
 
-def _process_samples_worker_v2(args):
-    """
-    Worker function that receives PRE-FETCHED samples (no dataset loading!)
-
-    Args:
-        args: Tuple of (batch_num, batch_samples_data, aug_params, batch_dir)
-            batch_samples_data: List of dicts with 'features', 'mask', 'target', 'sample_info'
-
-    Returns:
-        Tuple of (batch_file_path, batch_size)
-    """
-    batch_num, batch_samples_data, aug_params, batch_dir = args
-
-    # Unpack parameters
-    seq_length, n_nearby_available, n_nearby_in_features = aug_params['dimensions']
-    skip_patterns = aug_params['skip_patterns']
-    all_permutations = aug_params['permutations']
-    total_augmentations = aug_params['total_augmentations']
-    target_features = aug_params['target_features']
-    nearby_features_per_station = aug_params['nearby_features_per_station']
-    total_features = aug_params['total_features']
-
-    batch_actual_size = len(batch_samples_data)
-    batch_aug_size = batch_actual_size * total_augmentations
-
-    # Allocate arrays for this batch
-    batch_features = np.zeros((batch_aug_size, seq_length, total_features), dtype=np.float32)
-    batch_targets = np.zeros((batch_aug_size, 1), dtype=np.float32)
-    batch_masks = np.zeros((batch_aug_size, seq_length, total_features), dtype=bool)
-    batch_target_stations = []
-    batch_end_dates = []
-    batch_start_dates = []
-    batch_skip_pattern = []
-    batch_permutation = []
-
-    aug_idx = 0
-
-    for sample_data in batch_samples_data:
-        # Unpack pre-fetched sample
-        base_features = sample_data['features']
-        base_mask = sample_data['mask']
-        base_target = sample_data['target']
-        sample_info = sample_data['sample_info']
-
-        # Extract target and nearby features
-        target_feat = base_features[:, :target_features]
-        target_mask = base_mask[:, :target_features]
-
-        nearby_start = target_features
-        nearby_features_5 = base_features[:, nearby_start:].reshape(
-            seq_length, n_nearby_available, nearby_features_per_station
-        )
-        nearby_mask_5 = base_mask[:, nearby_start:].reshape(
-            seq_length, n_nearby_available, nearby_features_per_station
-        )
-
-        # Generate all augmentations for this base sample
-        for skip_idx, keep_indices in enumerate(skip_patterns):
-            nearby_features_4 = nearby_features_5[:, keep_indices, :]
-            nearby_mask_4 = nearby_mask_5[:, keep_indices, :]
-
-            for perm_idx, perm in enumerate(all_permutations):
-                perm_nearby_features = nearby_features_4[:, perm, :].reshape(seq_length, -1)
-                perm_nearby_mask = nearby_mask_4[:, perm, :].reshape(seq_length, -1)
-
-                aug_features = np.concatenate([target_feat, perm_nearby_features], axis=1)
-                aug_mask = np.concatenate([target_mask, perm_nearby_mask], axis=1)
-
-                batch_features[aug_idx] = aug_features
-                batch_targets[aug_idx] = base_target
-                batch_masks[aug_idx] = aug_mask
-
-                batch_target_stations.append(sample_info['target_station'])
-                batch_end_dates.append(sample_info['end_date'].timestamp())
-                batch_start_dates.append(sample_info['start_date'].timestamp())
-                batch_skip_pattern.append(skip_idx)
-                batch_permutation.append(perm_idx)
-
-                aug_idx += 1
-
-    # Save batch to file
-    batch_file = Path(batch_dir) / f"batch_{batch_num:04d}.npz"
-    np.savez_compressed(
-        batch_file,
-        features=batch_features,
-        targets=batch_targets,
-        masks=batch_masks,
-        target_stations=np.array(batch_target_stations, dtype=np.int32),
-        end_dates=np.array(batch_end_dates, dtype=np.float64),
-        start_dates=np.array(batch_start_dates, dtype=np.float64),
-        skip_pattern=np.array(batch_skip_pattern, dtype=np.int32),
-        permutation=np.array(batch_permutation, dtype=np.int32)
-    )
-
-    return (batch_file, batch_aug_size)
-
-
 def _setup_augmentation(data_dir: str, n_nearby_available: int, n_nearby_in_features: int,
                         coverage_threshold: float, seq_length: int):
     """
@@ -332,17 +266,7 @@ def _setup_augmentation(data_dir: str, n_nearby_available: int, n_nearby_in_feat
 
     # Generate augmentation combinations
     print(f"\n3. Generating augmentation combinations...")
-    available_indices = list(range(n_nearby_available))
-    skip_patterns = []
-    if n_nearby_available > n_nearby_in_features:
-        # We can skip one station and still have enough
-        for skip_idx in range(n_nearby_available):
-            keep_indices = [i for i in available_indices if i != skip_idx][:n_nearby_in_features]
-            skip_patterns.append(keep_indices)
-    else:
-        # n_nearby_available == n_nearby_in_features: use all stations (no skipping)
-        skip_patterns.append(list(range(n_nearby_in_features)))
-
+    skip_patterns = build_skip_patterns(n_nearby_available, n_nearby_in_features)
     all_permutations = list(permutations(range(n_nearby_in_features)))
     total_augmentations = len(skip_patterns) * len(all_permutations)
 
@@ -704,18 +628,7 @@ def generate_all_augmentations_batched(
 
     # Generate augmentation combinations
     print(f"\n3. Generating augmentation combinations...")
-
-    available_indices = list(range(n_nearby_available))
-    skip_patterns = []
-    if n_nearby_available > n_nearby_in_features:
-        # We can skip one station and still have enough
-        for skip_idx in range(n_nearby_available):
-            keep_indices = [i for i in available_indices if i != skip_idx][:n_nearby_in_features]
-            skip_patterns.append(keep_indices)
-    else:
-        # n_nearby_available == n_nearby_in_features: use all stations (no skipping)
-        skip_patterns.append(list(range(n_nearby_in_features)))
-
+    skip_patterns = build_skip_patterns(n_nearby_available, n_nearby_in_features)
     all_permutations = list(permutations(range(n_nearby_in_features)))
     total_augmentations = len(skip_patterns) * len(all_permutations)
 

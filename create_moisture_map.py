@@ -825,35 +825,6 @@ def get_elevation_from_srtm(lon, lat, cache_dir=None):
     return None
 
 
-def get_elevation_from_open_elevation(lon, lat):
-    """
-    DEPRECATED: Use get_elevation_from_srtm instead.
-    
-    Get elevation from Open-Elevation API (free, no API key needed).
-    Falls back to None if request fails.
-    
-    Note: Rate limited to 1000 queries/month. Use SRTM data instead.
-    """
-    # Try SRTM first
-    elev = get_elevation_from_srtm(lon, lat)
-    if elev is not None:
-        return elev
-    
-    # Fall back to API (but this is rate-limited)
-    import requests
-    try:
-        url = f"https://api.open-elevation.com/api/v1/lookup?locations={lat},{lon}"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            if 'results' in data and len(data['results']) > 0:
-                return data['results'][0]['elevation']
-    except requests.RequestException:
-        # Network errors are expected for API fallback
-        pass
-    return None
-
-
 def point_in_triangle(px, py, ax, ay, bx, by, cx, cy):
     """Check if point (px, py) is inside triangle ABC using barycentric coordinates."""
     def sign(p1x, p1y, p2x, p2y, p3x, p3y):
