@@ -4,7 +4,7 @@ Quick reference for the main codebase files. Line counts in brackets.
 
 ---
 
-## Moisturizer.py (~3300 lines)
+## Moisturizer.py (~3150 lines)
 
 Main dataset building and loading module.
 
@@ -25,7 +25,6 @@ Handles data collection from MeteoGalicia API.
 | `get_daily_data` | 41 | Fetch daily data for station/parameter |
 | `parse_data_to_dataframe` | 40 | Parse JSON API response to DataFrame |
 | `build_historical_dataset` | 67 | Build multi-year historical timeseries |
-| `create_ml_ready_dataset` | 102 | Create ML-ready sequences (deprecated) |
 | `analyze_parameter_coverage` | 79 | Filter parameters by data coverage threshold |
 | `get_live_prediction_data` | 88 | Fetch recent data for live predictions |
 
@@ -58,7 +57,6 @@ PyTorch Dataset for soil moisture prediction sequences.
 
 | Function | Lines | Description |
 |----------|-------|-------------|
-| `_decompress_npz_if_needed` | 50 | Convert compressed .npz to memory-mappable .npy |
 | `_load_precomputed_data` | 38 | Load precomputed sequences from directory |
 | `build_dense_feature_array` | 138 | Build dense [stations, dates, features] array |
 | `buildDataset` | ~150 | Main entry: download data, build and save dataset |
