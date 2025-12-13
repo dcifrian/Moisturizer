@@ -632,17 +632,18 @@ def build_sequence_for_ensemble(
     nearest_lookup,
     stations_lookup,
     feature_params,
-    norm_stats,
     seq_length=64,
-    n_nearby_output=4,
     n_nearby_available=5,
     missing_value=-1000.0
 ):
     """
     Build a sequence with extra nearby stations for ensemble augmentation.
 
-    Returns (features_norm, mask) with n_nearby_available stations,
-    or None if insufficient data.
+    Returns UNNORMALIZED (features, mask) with n_nearby_available stations.
+    Normalization is applied AFTER column selection in _run_ensemble_inference,
+    using the same stats as regular inference (model-dependent, not data-dependent).
+
+    Returns (features, mask) or None if insufficient data.
     """
     if station_id not in nearest_lookup:
         return None
@@ -655,7 +656,7 @@ def build_sequence_for_ensemble(
         return None
     target_station_coords = stations_lookup[station_id]
 
-    # Initialize with n_nearby_available stations (not n_nearby_output)
+    # Initialize with n_nearby_available stations
     init = _init_sequence_arrays(end_date, seq_length, feature_params, n_nearby_available, missing_value)
     features = init['features']
     mask = init['mask']
@@ -682,18 +683,12 @@ def build_sequence_for_ensemble(
         n_nearby_available
     )
 
-    # Apply normalization using expanded stats for n_nearby_available
-    expanded_stats = expand_canonical_to_augmented_stats(
-        norm_stats,
-        n_slots_needed=n_nearby_available
-    )
-    features_normalized = apply_normalization_to_features(features, mask, expanded_stats, missing_value)
-
-    return features_normalized, mask
+    # Return UNNORMALIZED - normalization happens after column selection
+    return features, mask
 
 
 def _run_ensemble_inference(sequences_to_predict, model, device, collector,
-                            n_nearby_output=4, n_nearby_available=5,
+                            norm_stats, n_nearby_output=4, n_nearby_available=5,
                             use_skip_patterns=True):
     """
     Run ensemble inference using augmentation patterns.
@@ -703,11 +698,12 @@ def _run_ensemble_inference(sequences_to_predict, model, device, collector,
     to avoid memory blowup.
 
     Args:
-        sequences_to_predict: List of (station_info, features_norm, mask)
-                             features_norm has n_nearby_available nearby stations
+        sequences_to_predict: List of (station_info, features_raw, mask)
+                             features_raw is UNNORMALIZED with n_nearby_available nearby stations
         model: Trained model
         device: 'cuda' or 'cpu'
         collector: MeteoGaliciaCollector instance
+        norm_stats: Normalization stats dict (same as used for regular inference)
         n_nearby_output: Number of nearby stations in model input (4)
         n_nearby_available: Number of nearby stations in source data (5)
         use_skip_patterns: If True, use skip patterns + permutations
@@ -719,12 +715,17 @@ def _run_ensemble_inference(sequences_to_predict, model, device, collector,
     if not sequences_to_predict:
         return []
 
-    # Get feature layout
+    # Get feature layout for the MODEL's expected input (n_nearby_output)
     feature_params = np.load(collector.data_dir / "normalization_stats.npz", allow_pickle=True)['feature_params']
     n_params = len(feature_params)
     layout = FeatureLayout(n_params=n_params, n_nearby=n_nearby_output)
 
+    # Get normalization stats for the model's feature layout
+    feature_mins = norm_stats['feature_mins']
+    feature_maxs = norm_stats['feature_maxs']
+
     # Build column indices for all augmentation patterns
+    # These select from 5-nearby layout to produce 4-nearby layout
     aug_col_indices = build_augmentation_column_indices(
         n_target_features=layout.n_target_features,
         nearby_features_per_station=layout.nearby_features_per_station,
@@ -752,10 +753,17 @@ def _run_ensemble_inference(sequences_to_predict, model, device, collector,
 
         # Build batch for this augmentation pattern
         batch_features = []
-        for _, features_norm, _ in sequences_to_predict:
-            # Select columns for this augmentation
-            aug_features = features_norm[:, col_indices]
-            batch_features.append(torch.from_numpy(aug_features))
+        for _, features_raw, mask in sequences_to_predict:
+            # Select columns for this augmentation (now has n_nearby_output stations)
+            aug_features = features_raw[:, col_indices].copy()
+            aug_mask = mask[:, col_indices]
+
+            # Apply normalization (same stats as regular inference)
+            aug_features_norm = normalize_features(
+                aug_features, feature_mins, feature_maxs,
+                invalid_markers=[INVALID_MARKER_API, INVALID_MARKER_MISSING]
+            )
+            batch_features.append(torch.from_numpy(aug_features_norm))
 
         X_batch = torch.stack(batch_features)
 
@@ -1628,9 +1636,7 @@ def _collect_real_and_build_sequences(stations_df, timeseries_lookup, nearest_lo
                     nearest_lookup=nearest_lookup,
                     stations_lookup=stations_lookup,
                     feature_params=filtered_params,
-                    norm_stats=norm_stats,
                     seq_length=64,
-                    n_nearby_output=n_nearby,
                     n_nearby_available=n_nearby_available
                 )
             else:
@@ -2088,6 +2094,7 @@ def create_moisture_map(
     if ensemble_mode:
         predicted_results = _run_ensemble_inference(
             sequences_to_predict, data['model'], device, collector,
+            norm_stats=data['norm_stats'],
             n_nearby_output=n_nearby,
             n_nearby_available=n_nearby_available,
             use_skip_patterns=ensemble_skip_patterns
