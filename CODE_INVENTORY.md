@@ -122,7 +122,7 @@ Key concepts:
 
 ---
 
-## augmented_live.py (~985 lines)
+## augmented_live.py (~660 lines)
 
 Live (on-the-fly) augmentation during training. Imports `build_skip_patterns` from precompute_augmented.
 
@@ -152,18 +152,6 @@ PyTorch Dataset that augments on-the-fly during training.
 | `train_val_test_split` | 61 | Split by station preserving augmentation |
 | `_create_split` | 61 | Create subset for train/val/test |
 | `get_feature_names` | 18 | Return feature names |
-
-**AugmentedPrecomputedDataset** [L678]
-Dataset for loading precomputed augmented data.
-- `features`, `targets`, `masks` - Memory-mapped arrays
-
-| Method | Lines | Description |
-|--------|-------|-------------|
-| `__init__` | 45 | Load precomputed augmented arrays |
-| `__len__` | 5 | Return number of samples |
-| `__getitem__` | 13 | Get sample from memmap |
-| `train_val_test_split` | 46 | Split by station |
-| `_create_split` | 25 | Create subset |
 
 ---
 
