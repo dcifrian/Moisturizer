@@ -537,7 +537,7 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
     Returns:
         Tuple of (train_dataset, val_dataset, test_dataset)
     """
-    from SoilMoistureSequenceDataset import SoilMoistureSequenceDataset
+    from WeatherSequenceDataset import WeatherSequenceDataset
     collector = MeteoGaliciaCollector()
 
     # Determine end date
@@ -683,7 +683,7 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
     print("STEP 6: Creating PyTorch Dataset with dense arrays")
     print("=" * 60)
 
-    dataset = SoilMoistureSequenceDataset(
+    dataset = WeatherSequenceDataset(
         timeseries=str(collector.timeseries_file),
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),
@@ -755,7 +755,7 @@ def buildDataset(seq_length: int = 64, days: int = 3705, end_date: Optional[date
     print("STEP 8: Creating train/val/test splits")
     print("=" * 60)
 
-    train_ds, val_ds, test_ds = SoilMoistureSequenceDataset.train_val_test_split(
+    train_ds, val_ds, test_ds = WeatherSequenceDataset.train_val_test_split(
         dataset,
         val_stations_ratio=0.15,
         test_stations_ratio=0.0
@@ -785,7 +785,7 @@ def loadDataset(use_precomputed=True, normalize=True, precomputed_path=None, nor
     Returns:
         Tuple of (train_dataset, val_dataset, test_dataset)
     """
-    from SoilMoistureSequenceDataset import SoilMoistureSequenceDataset
+    from WeatherSequenceDataset import WeatherSequenceDataset
     collector = MeteoGaliciaCollector()  # Does nothing, just for the paths
 
     # Get filtered parameters
@@ -862,7 +862,7 @@ def loadDataset(use_precomputed=True, normalize=True, precomputed_path=None, nor
         print("  Falling back to on-the-fly sequence building (SLOW)...")
         use_precomputed = False
 
-    dataset = SoilMoistureSequenceDataset(
+    dataset = WeatherSequenceDataset(
         timeseries=str(collector.timeseries_file),
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),
@@ -890,7 +890,7 @@ def loadDataset(use_precomputed=True, normalize=True, precomputed_path=None, nor
     print("Creating train/val/test splits")
     print("=" * 60)
 
-    train_ds, val_ds, test_ds = SoilMoistureSequenceDataset.train_val_test_split(
+    train_ds, val_ds, test_ds = WeatherSequenceDataset.train_val_test_split(
         dataset,
         val_stations_ratio=0.15,
         test_stations_ratio=0.0

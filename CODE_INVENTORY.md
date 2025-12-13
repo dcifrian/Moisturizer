@@ -4,20 +4,57 @@ Quick reference for the main codebase files. Line counts in brackets.
 
 ---
 
-## Moisturizer.py (~3150 lines)
+## Moisturizer.py (~1000 lines)
 
-Main dataset building and loading module.
+Main entry point module with utility functions and constants.
+
+### Constants
+
+- `INVALID_MARKER_API = -9999.0` - API missing value marker
+- `INVALID_MARKER_MISSING = -1000.0` - Internal missing value marker
+- `NORMALIZED_INVALID_MARKER = -2.0` - Normalized missing value (outside [-1,1])
+- `DEFAULT_COVERAGE_THRESHOLD = 0.25` - 25% data coverage required
 
 ### Classes
 
-**MeteoGaliciaCollector** [L32]
+**FeatureLayout** [L142]
+Calculate feature layout dimensions for sequences.
+- `n_params`, `n_nearby` - Configuration
+- `n_target_features`, `nearby_features_per_station`, `n_total_features` - Computed dimensions
+
+### Functions
+
+| Function | Lines | Description |
+|----------|-------|-------------|
+| `normalize_features` | 50 | Normalize features to [-1, 1] with invalid marker handling |
+| `normalize_target` | 35 | Normalize target value to [-1, 1] |
+| `denormalize_target` | 15 | Convert normalized value back to original scale |
+| `expand_canonical_to_augmented_stats` | 100 | Expand per-slot stats to full feature layout |
+| `_load_precomputed_data` | 38 | Load precomputed sequences from directory |
+| `build_dense_feature_array` | 138 | Build dense [stations, dates, features] array |
+| `regenerate_nearest_stations` | 45 | Regenerate nearest_stations.csv with more neighbors |
+| `buildDataset` | ~250 | Main entry: download data, build and save dataset |
+| `loadDataset` | ~135 | Load dataset with optional live augmentation |
+
+---
+
+## MeteoGaliciaCollector.py (~706 lines)
+
 Handles data collection from MeteoGalicia API.
+
+### Classes
+
+**MeteoGaliciaCollector** [L35]
 - `data_dir`, `timeseries_file`, `stations_file`, `nearest_file` - Path attributes
 - `ALL_SENSORS` - List of all 42 sensor parameter IDs
+- `_timeseries_df`, `_stations_df`, `_nearest_df` - Cached DataFrames
 
 | Method | Lines | Description |
 |--------|-------|-------------|
-| `__init__` | 9 | Initialize paths for data storage |
+| `__init__` | 25 | Initialize paths for data storage |
+| `get_timeseries_df` | 10 | Get cached timeseries DataFrame |
+| `get_stations_df` | 10 | Get cached stations DataFrame |
+| `get_nearest_df` | 10 | Get cached nearest DataFrame |
 | `get_all_stations` | 31 | Fetch all weather stations from API |
 | `check_soil_moisture_availability` | 35 | Check if station has soil moisture sensor |
 | `discover_stations_with_soil_moisture` | 57 | Find and cache stations with soil moisture |
@@ -25,11 +62,19 @@ Handles data collection from MeteoGalicia API.
 | `get_daily_data` | 41 | Fetch daily data for station/parameter |
 | `parse_data_to_dataframe` | 40 | Parse JSON API response to DataFrame |
 | `build_historical_dataset` | 67 | Build multi-year historical timeseries |
-| `analyze_parameter_coverage` | 79 | Filter parameters by data coverage threshold |
+| `analyze_parameter_coverage` | 115 | Filter parameters by data coverage threshold |
 | `get_live_prediction_data` | 88 | Fetch recent data for live predictions |
+| `get_sequence_data` | 90 | Get raw sequence for station/date |
 
-**SoilMoistureSequenceDataset** [L815, extends _BaseDataset]
-PyTorch Dataset for soil moisture prediction sequences.
+---
+
+## WeatherSequenceDataset.py (~1483 lines)
+
+PyTorch Dataset for weather parameter prediction sequences (default: soil moisture).
+
+### Classes
+
+**WeatherSequenceDataset** [L13, extends Dataset]
 - `n_nearest`, `seq_length`, `feature_params` - Configuration
 - `sample_index` - List of (station, date_range) samples
 - `dense_arrays` - Optional fast-access dense feature arrays
@@ -39,33 +84,22 @@ PyTorch Dataset for soil moisture prediction sequences.
 |--------|-------|-------------|
 | `__init__` | 260 | Initialize dataset, load data, build index |
 | `_build_sample_index` | 62 | Create list of valid samples |
-| `_get_nearest_stations` | 8 | Get nearest neighbors for station |
+| `_get_nearest_stations` | 25 | Get nearest neighbors for station |
 | `_build_sequence_tensor` | 102 | Build sequence via dict lookup (slow) |
-| `_build_sequence_from_dense` | 106 | Build sequence via dense array slicing (fast) |
-| `_compute_norm_stats_from_precomputed` | 53 | Compute min/max from precomputed data |
+| `_build_sequence_from_dense` | 180 | Build sequence via dense array slicing (fast) |
+| `_compute_norm_stats_from_precomputed` | 130 | Compute min/max from precomputed data |
 | `_apply_normalization` | 43 | Normalize features to [-1, 1] |
-| `precompute_and_save` | 120 | Precompute all sequences and save |
-| `__len__` | 3 | Return number of samples |
+| `precompute_and_save` | 235 | Precompute all sequences and save |
+| `__len__` | 6 | Return number of samples |
 | `__getitem__` | 83 | Get single sample |
-| `get_feature_names` | 17 | Return list of feature names |
+| `get_feature_names` | 20 | Return list of feature names |
 | `_split_precomputed` | 36 | Split precomputed data by stations |
-| `_create_split_dataset` | 43 | Create dataset subset |
-| `train_val_test_split` | 91 | Split into train/val/test by stations |
-| `get_sequence_data` | 90 | Get raw sequence for station/date |
-
-### Functions
-
-| Function | Lines | Description |
-|----------|-------|-------------|
-| `_load_precomputed_data` | 38 | Load precomputed sequences from directory |
-| `build_dense_feature_array` | 138 | Build dense [stations, dates, features] array |
-| `buildDataset` | ~150 | Main entry: download data, build and save dataset |
-| `precomputeDataset` | 44 | Precompute sequences for existing dataset |
-| `loadDataset` | ~120 | Load dataset with optional live augmentation |
+| `_create_split_dataset` | 50 | Create dataset subset |
+| `train_val_test_split` | 100 | Split into train/val/test by stations |
 
 ---
 
-## create_moisture_map.py (~2300 lines)
+## create_moisture_map.py (~2317 lines)
 
 Map visualization and virtual station prediction.
 
@@ -98,7 +132,7 @@ Map visualization and virtual station prediction.
 
 ---
 
-## precompute_augmented.py (~875 lines)
+## precompute_augmented.py (~867 lines)
 
 Precompute augmented dataset with skip patterns and permutations.
 
@@ -107,7 +141,7 @@ Precompute augmented dataset with skip patterns and permutations.
 | Function | Lines | Description |
 |----------|-------|-------------|
 | `build_skip_patterns` | 29 | Build skip patterns for augmentation (shared utility) |
-| `_process_batch_direct_write` | 183 | Worker: process batch and write to memmap |
+| `_process_batch_direct_write` | 135 | Worker: process batch and write to memmap |
 | `_setup_augmentation` | ~110 | Common setup for augmentation generation |
 | `_create_memmap_arrays` | 40 | Create memory-mapped arrays for output |
 | `_save_augmented_dataset` | 15 | Flush memmap arrays and save metadata |
@@ -122,7 +156,7 @@ Key concepts:
 
 ---
 
-## augmented_live.py (~660 lines)
+## augmented_live.py (~661 lines)
 
 Live (on-the-fly) augmentation during training. Imports `build_skip_patterns` from precompute_augmented.
 
@@ -155,18 +189,29 @@ PyTorch Dataset that augments on-the-fly during training.
 
 ---
 
-## Key Constants
+## tests.py (~439 lines)
 
-- `INVALID_MARKER_API = -9999.0` - API missing value marker
-- `INVALID_MARKER_MISSING = -1000.0` - Internal missing value marker
-- `NORMALIZED_INVALID = -2.0` - Normalized missing value (outside [-1,1])
-- `DEFAULT_COVERAGE_THRESHOLD = 0.25` - 25% data coverage required
+Comprehensive test suite for the dataset pipeline.
 
-## Feature Layout (FeatureLayout class in Moisturizer.py)
+### Functions
+
+| Function | Lines | Description |
+|----------|-------|-------------|
+| `test_feature_layout` | 30 | Test FeatureLayout class calculations |
+| `test_normalize_functions` | 50 | Test normalization edge cases |
+| `test_dataset_build` | 70 | Test buildDataset() and dataset creation |
+| `test_normalization_stats` | 60 | Test canonical stats computation |
+| `test_live_augmented_dataset` | 80 | Test AugmentedLiveDataset |
+| `test_precomputed_augmented_dataset` | 80 | Test precompute_augmented |
+| `main` | 50 | Run all tests and report results |
+
+---
+
+## Feature Layout
 
 For n_params weather parameters and n_nearby nearby stations:
 - Target features: n_params (weather for target station)
-- Per nearby station: 1 (distance) + n_params (weather) + 1 (soil moisture)
+- Per nearby station: 1 (distance) + n_params (weather) + 1 (target param value)
 - Total: n_params + n_nearby * (n_params + 2)
 
 Example with n_params=23, n_nearby=4:

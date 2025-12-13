@@ -10,10 +10,13 @@ from torch.utils.data import Dataset
 from Moisturizer import INVALID_MARKER_API, INVALID_MARKER_MISSING, NORMALIZED_INVALID_MARKER, DEFAULT_COVERAGE_THRESHOLD, _load_precomputed_data, normalize_target, normalize_features
 
 
-class SoilMoistureSequenceDataset(Dataset):
+class WeatherSequenceDataset(Dataset):
     """
-    PyTorch Dataset for soil moisture prediction with temporal sequences
-    Suitable for transformer models
+    PyTorch Dataset for weather parameter prediction with temporal sequences.
+    Suitable for transformer models.
+
+    Can predict any weather parameter (default: soil moisture).
+    Uses nearby stations' data including distance, weather features, and target parameter.
 
     Note: Requires PyTorch to be installed. If PyTorch is not available,
     this class can still be instantiated but PyTorch-specific functionality
@@ -34,7 +37,7 @@ class SoilMoistureSequenceDataset(Dataset):
             n_nearest: int = 4,
             target_stations: Optional[List[int]] = None,
             feature_params: Optional[List[str]] = None,
-            soil_moisture_param: str = "HS_CV_AVG_-0.2m",
+            target_param: str = "HS_CV_AVG_-0.2m",
             missing_value: float = INVALID_MARKER_MISSING,
             precomputed_path: Optional[str] = None,
             normalize: bool = True,
@@ -50,11 +53,11 @@ class SoilMoistureSequenceDataset(Dataset):
             nearest: Path to nearest_stations.csv or DataFrame
             seq_length: Number of days in each sequence
             n_nearest: Number of nearest stations to include
-            target_stations: List of station IDs to use (if None, use all with soil moisture)
+            target_stations: List of station IDs to use (if None, use all with target param data)
             feature_params: List of parameter codes to include as features
-                           (if None, uses all except soil moisture for target station)
+                           (if None, uses all except target_param for target station)
                            Tip: Use analyze_parameter_coverage() to get filtered params
-            soil_moisture_param: Parameter code for soil moisture (target variable)
+            target_param: Parameter code for the prediction target (default: soil moisture)
             missing_value: Value to use for missing data
             precomputed_path: Path to precomputed data directory (.npy files) or .npz file
                              RECOMMENDED: Use .npy directory for true memory-mapping
@@ -65,7 +68,7 @@ class SoilMoistureSequenceDataset(Dataset):
         """
         self.seq_length = seq_length
         self.n_nearest = n_nearest
-        self.soil_moisture_param = soil_moisture_param
+        self.target_param = target_param
         self.missing_value = missing_value
         self.normalize = normalize
         self.precomputed_path = precomputed_path
@@ -249,7 +252,7 @@ class SoilMoistureSequenceDataset(Dataset):
             if feature_params is None:
                 # Use all parameters except soil moisture
                 all_params = self.timeseries_df['parameter_code'].unique()
-                self.feature_params = [p for p in all_params if p != soil_moisture_param]
+                self.feature_params = [p for p in all_params if p != target_param]
             else:
                 self.feature_params = feature_params
 
@@ -258,12 +261,12 @@ class SoilMoistureSequenceDataset(Dataset):
             self._indices = None
 
         # Check if soil moisture is in feature_params (data leakage!)
-        self.soil_in_features = self.soil_moisture_param in self.feature_params
+        self.soil_in_features = self.target_param in self.feature_params
         if self.soil_in_features:
-            print(f"⚠ WARNING: Soil moisture ({self.soil_moisture_param}) found in feature_params!")
+            print(f"⚠ WARNING: Soil moisture ({self.target_param}) found in feature_params!")
             print(f"  This will be filtered out from target station features to prevent data leakage.")
             print(f"  Nearby stations will still have soil moisture as context.")
-            self.soil_feature_idx = self.feature_params.index(self.soil_moisture_param)
+            self.soil_feature_idx = self.feature_params.index(self.target_param)
         else:
             self.soil_feature_idx = None
 
@@ -305,7 +308,7 @@ class SoilMoistureSequenceDataset(Dataset):
 
         # Pre-filter soil moisture data once (HUGE SPEEDUP!)
         soil_moisture_df = self.timeseries_df[
-            self.timeseries_df['parameter_code'] == self.soil_moisture_param
+            self.timeseries_df['parameter_code'] == self.target_param
         ].copy()
 
         # Build a lookup dict for fast value access
@@ -448,7 +451,7 @@ class SoilMoistureSequenceDataset(Dataset):
                             mask[t, feat_idx] = True
 
                 # Soil moisture for nearby station
-                key = (nearby_station_id, date, self.soil_moisture_param)
+                key = (nearby_station_id, date, self.target_param)
                 soil_idx = nearby_offset + 1 + len(self.feature_params)
                 if key in self.timeseries_index:
                     features[t, soil_idx] = self.timeseries_index[key]
@@ -456,7 +459,7 @@ class SoilMoistureSequenceDataset(Dataset):
 
         # Get target (soil moisture at end_date for target station)
         # Use the last date from date_range (already at midnight)
-        target_key = (target_station_id, date_range[-1], self.soil_moisture_param)
+        target_key = (target_station_id, date_range[-1], self.target_param)
         target = self.timeseries_index.get(target_key, self.missing_value)
 
         return (
@@ -544,8 +547,8 @@ class SoilMoistureSequenceDataset(Dataset):
 
             # Soil moisture (if available in dense array)
             soil_idx_in_dense = None
-            if self.soil_moisture_param in self.dense_arrays['feature_params']:
-                soil_idx_in_dense = self.dense_arrays['feature_params'].index(self.soil_moisture_param)
+            if self.target_param in self.dense_arrays['feature_params']:
+                soil_idx_in_dense = self.dense_arrays['feature_params'].index(self.target_param)
                 soil_idx = feat_end
                 features[:, soil_idx] = nearby_slice[:, soil_idx_in_dense]
                 mask[:, soil_idx] = nearby_mask_slice[:, soil_idx_in_dense]
@@ -562,7 +565,7 @@ class SoilMoistureSequenceDataset(Dataset):
         else:
             # Fall back to dict lookup for soil moisture if not in dense array
             print(f"  DEBUG: soil_idx_in_dense is None - falling back to dict lookup")
-            target_key = (target_station_id, end_date, self.soil_moisture_param)
+            target_key = (target_station_id, end_date, self.target_param)
             target = self.timeseries_index.get(target_key, self.missing_value) if self.timeseries_index else self.missing_value
 
         return (
@@ -780,8 +783,8 @@ class SoilMoistureSequenceDataset(Dataset):
 
         # Get soil moisture feature index in dense array
         soil_idx_in_dense = None
-        if self.soil_moisture_param in self.dense_arrays['feature_params']:
-            soil_idx_in_dense = self.dense_arrays['feature_params'].index(self.soil_moisture_param)
+        if self.target_param in self.dense_arrays['feature_params']:
+            soil_idx_in_dense = self.dense_arrays['feature_params'].index(self.target_param)
 
         # Feature indices in dense array (weather params only, not soil)
         feature_indices = []
@@ -1218,16 +1221,21 @@ class SoilMoistureSequenceDataset(Dataset):
             feature_names.append(f'nearby{n_idx + 1}_distance')
             for param in self.feature_params:
                 feature_names.append(f'nearby{n_idx + 1}_{param}')
-            feature_names.append(f'nearby{n_idx + 1}_{self.soil_moisture_param}')
+            feature_names.append(f'nearby{n_idx + 1}_{self.target_param}')
 
         return feature_names
+
+    @property
+    def soil_moisture_param(self) -> str:
+        """Backwards compatibility: alias for target_param"""
+        return self.target_param
 
     def _split_precomputed(
             self,
             train_stations: List[int],
             val_stations: List[int],
             test_stations: List[int]
-    ) -> Tuple['SoilMoistureSequenceDataset', 'SoilMoistureSequenceDataset', 'SoilMoistureSequenceDataset']:
+    ) -> Tuple['WeatherSequenceDataset', 'WeatherSequenceDataset', 'WeatherSequenceDataset']:
         """
         Efficiently split precomputed data by filtering arrays
 
@@ -1262,15 +1270,15 @@ class SoilMoistureSequenceDataset(Dataset):
             self,
             target_stations: List[int],
             indices: List[int]
-    ) -> 'SoilMoistureSequenceDataset':
+    ) -> 'WeatherSequenceDataset':
         """Create a dataset from filtered precomputed data"""
         # Create new dataset instance
-        split_dataset = SoilMoistureSequenceDataset.__new__(SoilMoistureSequenceDataset)
+        split_dataset = WeatherSequenceDataset.__new__(WeatherSequenceDataset)
 
         # Copy basic attributes
         split_dataset.seq_length = self.seq_length
         split_dataset.n_nearest = self.n_nearest
-        split_dataset.soil_moisture_param = self.soil_moisture_param
+        split_dataset.target_param = self.target_param
         split_dataset.missing_value = self.missing_value
         split_dataset.normalize = self.normalize
         split_dataset.is_prenormalized = self.is_prenormalized
@@ -1302,11 +1310,11 @@ class SoilMoistureSequenceDataset(Dataset):
 
     @staticmethod
     def train_val_test_split(
-            dataset: 'SoilMoistureSequenceDataset',
+            dataset: 'WeatherSequenceDataset',
             val_stations_ratio: float = 0.15,
             test_stations_ratio: float = 0.0,
             random_seed: int = 42
-    ) -> Tuple['SoilMoistureSequenceDataset', 'SoilMoistureSequenceDataset', 'SoilMoistureSequenceDataset']:
+    ) -> Tuple['WeatherSequenceDataset', 'WeatherSequenceDataset', 'WeatherSequenceDataset']:
         """
         Split dataset by stations (not by time) for better generalization testing
 
@@ -1350,7 +1358,7 @@ class SoilMoistureSequenceDataset(Dataset):
         else:
             # Fallback to creating new datasets (slow)
             print("Warning: No precomputed data, splitting will be slow...")
-            train_dataset = SoilMoistureSequenceDataset(
+            train_dataset = WeatherSequenceDataset(
                 timeseries=dataset.timeseries_df,
                 stations=dataset.stations_df,
                 nearest=dataset.nearest_df,
@@ -1358,13 +1366,13 @@ class SoilMoistureSequenceDataset(Dataset):
                 n_nearest=dataset.n_nearest,
                 target_stations=train_stations,
                 feature_params=dataset.feature_params,
-                soil_moisture_param=dataset.soil_moisture_param,
+                target_param=dataset.target_param,
                 missing_value=dataset.missing_value,
                 normalize=dataset.normalize
             )
             val_dataset = None
             if val_stations_ratio > 0:
-                val_dataset = SoilMoistureSequenceDataset(
+                val_dataset = WeatherSequenceDataset(
                     timeseries=dataset.timeseries_df,
                     stations=dataset.stations_df,
                     nearest=dataset.nearest_df,
@@ -1372,13 +1380,13 @@ class SoilMoistureSequenceDataset(Dataset):
                     n_nearest=dataset.n_nearest,
                     target_stations=val_stations,
                     feature_params=dataset.feature_params,
-                    soil_moisture_param=dataset.soil_moisture_param,
+                    target_param=dataset.target_param,
                     missing_value=dataset.missing_value,
                     normalize=dataset.normalize
                 )
             test_dataset = None
             if test_stations_ratio > 0:
-                test_dataset = SoilMoistureSequenceDataset(
+                test_dataset = WeatherSequenceDataset(
                     timeseries=dataset.timeseries_df,
                     stations=dataset.stations_df,
                     nearest=dataset.nearest_df,
@@ -1386,7 +1394,7 @@ class SoilMoistureSequenceDataset(Dataset):
                     n_nearest=dataset.n_nearest,
                     target_stations=test_stations,
                     feature_params=dataset.feature_params,
-                    soil_moisture_param=dataset.soil_moisture_param,
+                    target_param=dataset.target_param,
                     missing_value=dataset.missing_value,
                     normalize=dataset.normalize
                 )
@@ -1481,3 +1489,8 @@ class SoilMoistureSequenceDataset(Dataset):
             'nearby_stations': nearby_with_soil,
             'nearby_data': nearby_df
         }
+
+
+# Backwards compatibility alias
+SoilMoistureSequenceDataset = WeatherSequenceDataset
+

@@ -32,7 +32,7 @@ from Moisturizer import (
     NORMALIZED_INVALID_MARKER,
 )
 from MeteoGaliciaCollector import MeteoGaliciaCollector
-from SoilMoistureSequenceDataset import SoilMoistureSequenceDataset
+from WeatherSequenceDataset import WeatherSequenceDataset
 from model_loader import load_model
 
 # Constants for distance calculations
@@ -187,7 +187,7 @@ def predict_for_station(model, dataset, station_id, end_date, device='cuda'):
 
     Args:
         model: Trained TROLOLO model
-        dataset: SoilMoistureSequenceDataset
+        dataset: WeatherSequenceDataset
         station_id: Station ID to predict for
         end_date: Date to predict (as pandas Timestamp)
         device: 'cuda' or 'cpu'

@@ -16,7 +16,7 @@ from pathlib import Path
 from itertools import permutations
 from Moisturizer import expand_canonical_to_augmented_stats, FeatureLayout
 from MeteoGaliciaCollector import MeteoGaliciaCollector
-from SoilMoistureSequenceDataset import SoilMoistureSequenceDataset
+from WeatherSequenceDataset import WeatherSequenceDataset
 import multiprocessing as mp
 from tqdm import tqdm
 from typing import List
@@ -244,7 +244,7 @@ def _setup_augmentation(data_dir: str, n_nearby_available: int, n_nearby_in_feat
     print(f"\n2. Loading base dataset with {n_nearby_available} nearby stations...")
     dense_path = Path(data_dir) / "dense_features.npz"
 
-    base_dataset = SoilMoistureSequenceDataset(
+    base_dataset = WeatherSequenceDataset(
         timeseries=str(collector.timeseries_file),
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),
@@ -605,7 +605,7 @@ def generate_all_augmentations_batched(
     print(f"\n2. Loading base dataset with {n_nearby_available} nearby stations...")
     dense_path = Path(data_dir) / "dense_features.npz"
 
-    base_dataset = SoilMoistureSequenceDataset(
+    base_dataset = WeatherSequenceDataset(
         timeseries=str(collector.timeseries_file),
         stations=str(collector.stations_file),
         nearest=str(collector.nearest_file),

@@ -178,7 +178,7 @@ def test_precomputed_augmented_dataset(collector, filtered_params):
         coverage_threshold=0.1,  # Lower threshold for test
     )
 
-    output_path = collector.data_dir / "augmented"
+    output_path = collector.data_dir / "precomputed_sequences_augmented"
 
     print(f"\n  ✓ Generated precomputed augmented dataset at {output_path}")
 
@@ -200,7 +200,7 @@ def test_precomputed_augmented_dataset(collector, filtered_params):
 
             print(f"  ✓ Sample 0:")
             print(f"    Features range: [{sample_features.min():.3f}, {sample_features.max():.3f}]")
-            print(f"    Target value: {sample_target:.3f}")
+            print(f"    Target value: {float(sample_target):.3f}")
 
             # Check normalization
             valid_mask = sample_features != -2.0

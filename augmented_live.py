@@ -27,7 +27,7 @@ class AugmentedLiveDataset(Dataset):
 
     There are two ways to create this dataset:
 
-    Option 1: From SoilMoistureSequenceDataset (uses dense arrays, no precompute needed)
+    Option 1: From WeatherSequenceDataset (uses dense arrays, no precompute needed)
         dataset = AugmentedLiveDataset.from_base_dataset(
             timeseries="meteogalicia_data/raw_timeseries.csv",
             stations="meteogalicia_data/stations.csv",
@@ -126,7 +126,7 @@ class AugmentedLiveDataset(Dataset):
         precomputed_path: Optional[str] = None,
     ) -> 'AugmentedLiveDataset':
         """
-        Create dataset from raw data files using SoilMoistureSequenceDataset.
+        Create dataset from raw data files using WeatherSequenceDataset.
 
         This approach doesn't require a precomputed 5-nearby dataset, but it will
         build the base dataset on initialization (which can take a few minutes).
@@ -148,7 +148,7 @@ class AugmentedLiveDataset(Dataset):
             precomputed_path: Path to precomputed base dataset (n+1 nearby) - Faster
         """
         # Import here to avoid circular dependency
-        from SoilMoistureSequenceDataset import SoilMoistureSequenceDataset
+        from WeatherSequenceDataset import WeatherSequenceDataset
 
         print("=" * 70)
         print("AUGMENTED LIVE DATASET V2 - Building from base dataset")
@@ -158,7 +158,7 @@ class AugmentedLiveDataset(Dataset):
         if precomputed_path and Path(precomputed_path).exists():
             print(f"\n1. Loading PRECOMPUTED base dataset from {precomputed_path}...")
             print("   (This is the fast path!)")
-            base_dataset = SoilMoistureSequenceDataset(
+            base_dataset = WeatherSequenceDataset(
                 timeseries=timeseries,
                 stations=stations,
                 nearest=nearest,
@@ -175,7 +175,7 @@ class AugmentedLiveDataset(Dataset):
             print("   WARNING: Using dense arrays (slower than precomputed)")
             print(f"   Consider precomputing with n_nearest={n_nearby_available} for 10x speedup")
             
-            base_dataset = SoilMoistureSequenceDataset(
+            base_dataset = WeatherSequenceDataset(
                 timeseries=timeseries,
                 stations=stations,
                 nearest=nearest,
@@ -235,11 +235,11 @@ class AugmentedLiveDataset(Dataset):
     @classmethod
     def _from_soil_moisture_dataset(
         cls,
-        base_dataset: 'SoilMoistureSequenceDataset',
+        base_dataset: 'WeatherSequenceDataset',
         n_nearby_available: int = 5,
         n_nearby_in_features: int = 4,
     ) -> 'AugmentedLiveDataset':
-        """Create from an existing SoilMoistureSequenceDataset"""
+        """Create from an existing WeatherSequenceDataset"""
         instance = cls.__new__(cls)
 
         instance.seq_length = base_dataset.seq_length
