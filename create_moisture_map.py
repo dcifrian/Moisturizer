@@ -569,6 +569,235 @@ def apply_normalization_to_features(features, mask, norm_stats, missing_value=-1
     return normalize_features(features, feature_mins, feature_maxs, invalid_markers=invalid_markers)
 
 
+# =============================================================================
+# Ensemble prediction with live augmentation
+# =============================================================================
+
+def build_augmentation_column_indices(n_target_features, nearby_features_per_station,
+                                       n_nearby_available, n_nearby_output,
+                                       use_skip_patterns=True):
+    """
+    Build column indices for all augmentation patterns.
+
+    Args:
+        n_target_features: Number of target station features
+        nearby_features_per_station: Features per nearby station (including distance, soil moisture)
+        n_nearby_available: How many nearby stations are in the source data
+        n_nearby_output: How many nearby stations should be in the output
+        use_skip_patterns: If True, also generate skip patterns (drop one station at a time)
+                          If False, only generate permutations (n_nearby_available must equal n_nearby_output)
+
+    Returns:
+        List of numpy arrays, each containing column indices for one augmentation
+    """
+    from itertools import permutations
+
+    # Build skip patterns
+    if use_skip_patterns and n_nearby_available > n_nearby_output:
+        skip_patterns = []
+        for skip_idx in range(n_nearby_available):
+            keep_indices = [i for i in range(n_nearby_available) if i != skip_idx][:n_nearby_output]
+            skip_patterns.append(keep_indices)
+    else:
+        # No skipping - use all stations
+        skip_patterns = [list(range(n_nearby_output))]
+
+    # Generate all permutations
+    all_perms = list(permutations(range(n_nearby_output)))
+
+    # Build column indices for each skip pattern + permutation combo
+    column_indices = []
+    target_cols = list(range(n_target_features))
+
+    for skip_pattern in skip_patterns:
+        for perm in all_perms:
+            cols = target_cols.copy()
+            # Apply skip pattern then permutation
+            permuted_stations = [skip_pattern[p] for p in perm]
+
+            for source_station in permuted_stations:
+                source_start = n_target_features + (source_station * nearby_features_per_station)
+                source_end = source_start + nearby_features_per_station
+                cols.extend(range(source_start, source_end))
+
+            column_indices.append(np.array(cols, dtype=np.int64))
+
+    return column_indices
+
+
+def build_sequence_for_ensemble(
+    station_id,
+    end_date,
+    timeseries_lookup,
+    nearest_lookup,
+    stations_lookup,
+    feature_params,
+    norm_stats,
+    seq_length=64,
+    n_nearby_output=4,
+    n_nearby_available=5,
+    missing_value=-1000.0
+):
+    """
+    Build a sequence with extra nearby stations for ensemble augmentation.
+
+    Returns (features_norm, mask) with n_nearby_available stations,
+    or None if insufficient data.
+    """
+    if station_id not in nearest_lookup:
+        return None
+
+    nearby_stations = nearest_lookup[station_id][:n_nearby_available]
+    if len(nearby_stations) < n_nearby_available:
+        return None
+
+    if station_id not in stations_lookup:
+        return None
+    target_station_coords = stations_lookup[station_id]
+
+    # Initialize with n_nearby_available stations (not n_nearby_output)
+    init = _init_sequence_arrays(end_date, seq_length, feature_params, n_nearby_available, missing_value)
+    features = init['features']
+    mask = init['mask']
+    date_strings = init['date_strings']
+    coordinate_features = init['coordinate_features']
+
+    _fill_target_coordinate_features(features, mask, target_station_coords,
+                                     feature_params, coordinate_features)
+
+    _fill_nearby_coordinates_and_distances(
+        features, mask, nearby_stations, stations_lookup,
+        feature_params, coordinate_features,
+        init['target_features_per_timestep'], init['nearby_features_per_timestep'],
+        n_nearby_available
+    )
+
+    _fill_target_timeseries_direct(features, mask, date_strings, station_id,
+                                   timeseries_lookup, feature_params, coordinate_features)
+
+    _fill_nearby_timeseries_features(
+        features, mask, date_strings, nearby_stations,
+        timeseries_lookup, feature_params, coordinate_features,
+        init['target_features_per_timestep'], init['nearby_features_per_timestep'],
+        n_nearby_available
+    )
+
+    # Apply normalization using expanded stats for n_nearby_available
+    expanded_stats = expand_canonical_to_augmented_stats(
+        norm_stats,
+        n_slots_needed=n_nearby_available
+    )
+    features_normalized = apply_normalization_to_features(features, mask, expanded_stats, missing_value)
+
+    return features_normalized, mask
+
+
+def _run_ensemble_inference(sequences_to_predict, model, device, collector,
+                            n_nearby_output=4, n_nearby_available=5,
+                            use_skip_patterns=True):
+    """
+    Run ensemble inference using augmentation patterns.
+
+    Each station gets multiple predictions (one per augmentation pattern),
+    which are then averaged. Processes one augmentation pattern per batch
+    to avoid memory blowup.
+
+    Args:
+        sequences_to_predict: List of (station_info, features_norm, mask)
+                             features_norm has n_nearby_available nearby stations
+        model: Trained model
+        device: 'cuda' or 'cpu'
+        collector: MeteoGaliciaCollector instance
+        n_nearby_output: Number of nearby stations in model input (4)
+        n_nearby_available: Number of nearby stations in source data (5)
+        use_skip_patterns: If True, use skip patterns + permutations
+                          If False, use permutations only
+
+    Returns:
+        list: predicted_results with averaged predictions
+    """
+    if not sequences_to_predict:
+        return []
+
+    # Get feature layout
+    feature_params = np.load(collector.data_dir / "normalization_stats.npz", allow_pickle=True)['feature_params']
+    n_params = len(feature_params)
+    layout = FeatureLayout(n_params=n_params, n_nearby=n_nearby_output)
+
+    # Build column indices for all augmentation patterns
+    aug_col_indices = build_augmentation_column_indices(
+        n_target_features=layout.n_target_features,
+        nearby_features_per_station=layout.nearby_features_per_station,
+        n_nearby_available=n_nearby_available,
+        n_nearby_output=n_nearby_output,
+        use_skip_patterns=use_skip_patterns
+    )
+
+    n_augmentations = len(aug_col_indices)
+    n_stations = len(sequences_to_predict)
+
+    print(f"\nPhase 2: Running ensemble inference...")
+    print(f"  Stations: {n_stations}")
+    print(f"  Augmentations per station: {n_augmentations}")
+    print(f"  Skip patterns: {'enabled' if use_skip_patterns else 'disabled (permutations only)'}")
+
+    # Accumulate predictions for each station
+    prediction_sums = np.zeros(n_stations, dtype=np.float64)
+    prediction_counts = np.zeros(n_stations, dtype=np.int32)
+
+    # Process one augmentation pattern at a time to avoid memory blowup
+    for aug_idx, col_indices in enumerate(aug_col_indices):
+        if aug_idx % 24 == 0:  # Report every 24 augmentations (one skip pattern worth)
+            print(f"  Processing augmentation {aug_idx + 1}/{n_augmentations}...")
+
+        # Build batch for this augmentation pattern
+        batch_features = []
+        for _, features_norm, _ in sequences_to_predict:
+            # Select columns for this augmentation
+            aug_features = features_norm[:, col_indices]
+            batch_features.append(torch.from_numpy(aug_features))
+
+        X_batch = torch.stack(batch_features)
+
+        # Run inference
+        x_gpu = torch.zeros([n_stations, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
+                           dtype=torch.float16, device=device)
+
+        with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True,
+                                                     cache_enabled=True, dtype=torch.bfloat16):
+            x_gpu[:n_stations, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
+            predictions = model(x_gpu[:n_stations]).cpu().numpy().flatten()
+
+        # Accumulate predictions
+        prediction_sums += predictions
+        prediction_counts += 1
+
+    print(f"✓ Ensemble inference complete ({n_augmentations} augmentations per station)")
+
+    # Average predictions and denormalize
+    print(f"\nPhase 3: Averaging and denormalizing predictions...")
+    predicted_results = []
+
+    for i, (station_info, _, _) in enumerate(sequences_to_predict):
+        avg_pred_normalized = prediction_sums[i] / prediction_counts[i]
+        pred_denorm = denormalize_soil_moisture(
+            avg_pred_normalized,
+            str(collector.data_dir / "normalization_stats.npz")
+        )
+
+        predicted_results.append({
+            'station_id': station_info['station_id'],
+            'latitude': station_info['latitude'],
+            'longitude': station_info['longitude'],
+            'moisture': pred_denorm,
+            'type': 'predicted',
+            'name': station_info['name'],
+            'n_augmentations': int(prediction_counts[i])
+        })
+
+    return predicted_results
+
+
 def create_virtual_grid_stations(
     lon_min, lon_max, lat_min, lat_max,
     grid_size=100,
@@ -1352,14 +1581,21 @@ def _load_map_data(collector, model_path, target_date, device, n_nearby, n_nearb
 
 def _collect_real_and_build_sequences(stations_df, timeseries_lookup, nearest_lookup,
                                        stations_lookup, filtered_params, norm_stats,
-                                       target_date, n_nearby, real_moisture_only):
+                                       target_date, n_nearby, real_moisture_only,
+                                       ensemble_mode=False, n_nearby_available=5):
     """
     Phase 1: Collect real moisture data and build sequences for stations needing prediction.
+
+    Args:
+        ensemble_mode: If True, build sequences with extra nearby stations for ensemble prediction
+        n_nearby_available: Number of nearby stations to include when ensemble_mode=True
 
     Returns:
         tuple: (real_results, sequences_to_predict)
     """
     print("\nPhase 1: Gathering real data and building sequences...")
+    if ensemble_mode:
+        print(f"  Ensemble mode: building with {n_nearby_available} nearby stations")
     real_results = []
     sequences_to_predict = []
 
@@ -1384,17 +1620,31 @@ def _collect_real_and_build_sequences(stations_df, timeseries_lookup, nearest_lo
                     'name': station.get('name', f'Station {station_id}')
                 })
         elif not real_moisture_only:
-            sequence_data = build_sequence_for_any_station(
-                station_id=station_id,
-                end_date=target_date,
-                timeseries_lookup=timeseries_lookup,
-                nearest_lookup=nearest_lookup,
-                stations_lookup=stations_lookup,
-                feature_params=filtered_params,
-                norm_stats=norm_stats,
-                seq_length=64,
-                n_nearest=n_nearby
-            )
+            if ensemble_mode:
+                sequence_data = build_sequence_for_ensemble(
+                    station_id=station_id,
+                    end_date=target_date,
+                    timeseries_lookup=timeseries_lookup,
+                    nearest_lookup=nearest_lookup,
+                    stations_lookup=stations_lookup,
+                    feature_params=filtered_params,
+                    norm_stats=norm_stats,
+                    seq_length=64,
+                    n_nearby_output=n_nearby,
+                    n_nearby_available=n_nearby_available
+                )
+            else:
+                sequence_data = build_sequence_for_any_station(
+                    station_id=station_id,
+                    end_date=target_date,
+                    timeseries_lookup=timeseries_lookup,
+                    nearest_lookup=nearest_lookup,
+                    stations_lookup=stations_lookup,
+                    feature_params=filtered_params,
+                    norm_stats=norm_stats,
+                    seq_length=64,
+                    n_nearest=n_nearby
+                )
 
             if sequence_data is not None:
                 features_norm, mask = sequence_data
@@ -1762,7 +2012,9 @@ def create_moisture_map(
     real_moisture_only=False,  # If True, only use real moisture stations for the map
     all_maps=False,  # If True, create all map variants efficiently (reuses data)
     n_nearby=4,  # Number of nearby stations used in the model's input
-    n_nearby_available=None  # For augmented: how many nearby stations were available for permutations
+    n_nearby_available=None,  # For augmented: how many nearby stations were available for permutations
+    ensemble_mode=False,  # If True, use ensemble prediction with augmentations
+    ensemble_skip_patterns=True  # If True, use skip patterns + permutations; if False, permutations only
 ):
     """
     Create a beautiful moisture map of all Galicia
@@ -1786,8 +2038,20 @@ def create_moisture_map(
                   - {base}_water_balance.png (cumulative water balance)
         n_nearby_available: For augmented models, how many nearby stations were available
                            for permutations during training
+        ensemble_mode: If True, run multiple predictions with augmented inputs and average them.
+                      This uses live augmentation (permutations and optionally skip patterns)
+                      to create a "single model ensemble" effect.
+        ensemble_skip_patterns: When ensemble_mode=True, if True use skip patterns + permutations
+                               (120 augmentations with 5 available / 4 output), if False use
+                               permutations only (24 augmentations)
     """
     augmented = n_nearby_available is not None and n_nearby_available > n_nearby
+
+    # Ensemble mode requires n_nearby_available to be set
+    if ensemble_mode and n_nearby_available is None:
+        n_nearby_available = n_nearby + 1  # Default: one extra station for skip patterns
+        print(f"  Ensemble mode: defaulting to n_nearby_available={n_nearby_available}")
+
     if hide_markers is None:
         hide_markers = set()
 
@@ -1815,13 +2079,23 @@ def create_moisture_map(
     real_results, sequences_to_predict = _collect_real_and_build_sequences(
         data['stations_df'], data['timeseries_lookup'], data['nearest_lookup'],
         data['stations_lookup'], data['filtered_params'], data['norm_stats'],
-        data['target_date'], n_nearby, real_moisture_only
+        data['target_date'], n_nearby, real_moisture_only,
+        ensemble_mode=ensemble_mode,
+        n_nearby_available=n_nearby_available if ensemble_mode else n_nearby
     )
 
     # Step 3: Run batch inference for predictions
-    predicted_results = _run_batch_inference(
-        sequences_to_predict, data['model'], device, collector
-    )
+    if ensemble_mode:
+        predicted_results = _run_ensemble_inference(
+            sequences_to_predict, data['model'], device, collector,
+            n_nearby_output=n_nearby,
+            n_nearby_available=n_nearby_available,
+            use_skip_patterns=ensemble_skip_patterns
+        )
+    else:
+        predicted_results = _run_batch_inference(
+            sequences_to_predict, data['model'], device, collector
+        )
 
     # Step 4: Create virtual grid predictions (if enabled)
     virtual_results, virtual_sequences = _create_virtual_grid_predictions(
@@ -2282,6 +2556,10 @@ if __name__ == "__main__":
                        help='Number of nearby stations used in model input (default: 4)')
     parser.add_argument('--n-nearby-available', type=int, default=5,
                        help='For augmented models: how many nearby stations were available for permutations')
+    parser.add_argument('--ensemble', action='store_true',
+                       help='Use ensemble prediction: average multiple predictions with augmented inputs')
+    parser.add_argument('--ensemble-permutations-only', action='store_true',
+                       help='When using --ensemble, only use permutations (24) instead of skip patterns + permutations (120)')
 
     args = parser.parse_args()
 
@@ -2313,5 +2591,7 @@ if __name__ == "__main__":
         real_moisture_only=args.real_moisture_only,
         all_maps=args.all_maps,
         n_nearby=args.n_nearby,
-        n_nearby_available=args.n_nearby_available
+        n_nearby_available=args.n_nearby_available,
+        ensemble_mode=args.ensemble,
+        ensemble_skip_patterns=not args.ensemble_permutations_only
     )
