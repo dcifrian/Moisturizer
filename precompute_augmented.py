@@ -12,19 +12,12 @@ Memory usage: Only ~1-2GB instead of 360GB!
 """
 
 import numpy as np
-import pandas as pd
 from pathlib import Path
 from itertools import permutations
-from Moisturizer import (
-    MeteoGaliciaCollector,
-    SoilMoistureSequenceDataset,
-    expand_canonical_to_augmented_stats,
-    FeatureLayout,
-)
-import tempfile
-import shutil
+from Moisturizer import expand_canonical_to_augmented_stats, FeatureLayout
+from MeteoGaliciaCollector import MeteoGaliciaCollector
+from SoilMoistureSequenceDataset import SoilMoistureSequenceDataset
 import multiprocessing as mp
-from functools import partial
 from tqdm import tqdm
 from typing import List
 

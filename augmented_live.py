@@ -148,7 +148,7 @@ class AugmentedLiveDataset(Dataset):
             precomputed_path: Path to precomputed base dataset (n+1 nearby) - Faster
         """
         # Import here to avoid circular dependency
-        from Moisturizer import SoilMoistureSequenceDataset
+        from SoilMoistureSequenceDataset import SoilMoistureSequenceDataset
 
         print("=" * 70)
         print("AUGMENTED LIVE DATASET V2 - Building from base dataset")

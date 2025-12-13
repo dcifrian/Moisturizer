@@ -23,8 +23,6 @@ import torch
 from pathlib import Path
 
 from Moisturizer import (
-    MeteoGaliciaCollector,
-    SoilMoistureSequenceDataset,
     expand_canonical_to_augmented_stats,
     normalize_features,
     denormalize_target,
@@ -33,6 +31,8 @@ from Moisturizer import (
     INVALID_MARKER_MISSING,
     NORMALIZED_INVALID_MARKER,
 )
+from MeteoGaliciaCollector import MeteoGaliciaCollector
+from SoilMoistureSequenceDataset import SoilMoistureSequenceDataset
 from model_loader import load_model
 
 # Constants for distance calculations

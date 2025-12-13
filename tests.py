@@ -10,6 +10,9 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta
 import traceback
+from Moisturizer import buildDataset
+from MeteoGaliciaCollector import MeteoGaliciaCollector
+
 
 # Test parameters - tiny dataset for quick testing
 SEQ_LENGTH = 2
@@ -23,9 +26,6 @@ def test_dataset_build():
     print("\n" + "=" * 70)
     print("TEST 1: Building Base Dataset")
     print("=" * 70)
-
-    from Moisturizer import MeteoGaliciaCollector, buildDataset
-    from datetime import datetime, timedelta
 
     # Use buildDataset with minimal parameters
     # This will download data, build dense arrays, etc.

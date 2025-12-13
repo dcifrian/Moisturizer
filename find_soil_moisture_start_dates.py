@@ -7,7 +7,7 @@ Uses binary search to efficiently find the boundary between no-data and data.
 
 import pandas as pd
 from datetime import datetime, timedelta
-from Moisturizer import MeteoGaliciaCollector
+from MeteoGaliciaCollector import MeteoGaliciaCollector
 import time
 
 

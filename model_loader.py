@@ -27,7 +27,7 @@ def load_model(model_path=None, device='cuda',compilation=True):
                       )
     """
     trololo = TROLOLO(seq_length=64,
-                      num_layers=16,
+                      num_layers=8,
                       num_heads=48,
                       embed_dim=192,
                       mlp_dim=192,
