@@ -774,7 +774,7 @@ def _run_ensemble_inference(sequences_to_predict, model, device, collector,
         with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True,
                                                      cache_enabled=True, dtype=torch.bfloat16):
             x_gpu[:n_stations, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
-            predictions = model(x_gpu[:n_stations]).cpu().numpy().flatten()
+            predictions = model(x_gpu[:n_stations]).to(device="cpu", dtype=torch.float32).numpy(force=True).flatten()
 
         # Accumulate predictions
         prediction_sums += predictions
@@ -1216,6 +1216,67 @@ def build_sequence_for_virtual_station(
     features_normalized = apply_normalization_to_features(features, mask, norm_stats, missing_value)
 
     return features_normalized, mask
+
+
+def build_sequence_for_virtual_station_ensemble(
+    virtual_station,
+    end_date,
+    timeseries_lookup,
+    nearest_real_stations,
+    nearest_with_soil,
+    virtual_coords,
+    stations_lookup,
+    feature_params,
+    seq_length=64,
+    n_nearby_available=5,
+    missing_value=-1000.0
+):
+    """
+    Build a sequence for a virtual grid station for ensemble augmentation.
+
+    Returns UNNORMALIZED (features, mask) with n_nearby_available nearby stations.
+    Normalization is applied AFTER column selection in ensemble inference.
+    """
+    # Initialize with n_nearby_available stations
+    init = _init_sequence_arrays(end_date, seq_length, feature_params, n_nearby_available, missing_value)
+    features = init['features']
+    mask = init['mask']
+    date_strings = init['date_strings']
+    coordinate_features = init['coordinate_features']
+
+    # Fill coordinate features for target (virtual) station
+    _fill_target_coordinate_features(features, mask, virtual_coords,
+                                     feature_params, coordinate_features)
+
+    # Fill nearby station coordinate features and distances
+    _fill_nearby_coordinates_and_distances(
+        features, mask, nearest_with_soil, stations_lookup,
+        feature_params, coordinate_features,
+        init['target_features_per_timestep'], init['nearby_features_per_timestep'],
+        n_nearby_available
+    )
+
+    # Select stations for interpolation
+    interpolation_stations = select_triangle_stations(
+        virtual_station, nearest_real_stations, stations_lookup
+    )
+
+    # Fill target station timeseries by interpolation
+    _fill_target_timeseries_interpolated(
+        features, mask, date_strings, interpolation_stations,
+        timeseries_lookup, feature_params, coordinate_features
+    )
+
+    # Fill nearby stations timeseries features
+    _fill_nearby_timeseries_features(
+        features, mask, date_strings, nearest_with_soil,
+        timeseries_lookup, feature_params, coordinate_features,
+        init['target_features_per_timestep'], init['nearby_features_per_timestep'],
+        n_nearby_available
+    )
+
+    # Return UNNORMALIZED - normalization happens after column selection
+    return features, mask
 
 
 def find_nearest_stations_with_soil_moisture(virtual_station, stations_df, stations_lookup, n_max=10):
@@ -1721,9 +1782,16 @@ def _run_batch_inference(sequences_to_predict, model, device, collector):
 def _create_virtual_grid_predictions(virtual_grid_size, galicia_land, stations_df, stations_lookup,
                                       timeseries_lookup, filtered_params, norm_stats, model,
                                       device, collector, target_date, n_nearby,
-                                      sequences_to_predict, predicted_results):
+                                      sequences_to_predict, predicted_results,
+                                      ensemble_mode=False, n_nearby_available=5,
+                                      ensemble_skip_patterns=True):
     """
     Phase 4: Create virtual grid and run predictions.
+
+    Args:
+        ensemble_mode: If True, use ensemble prediction with augmentations
+        n_nearby_available: Number of nearby stations for ensemble augmentation
+        ensemble_skip_patterns: If True, use skip patterns + permutations
 
     Returns:
         tuple: (virtual_results, virtual_sequences)
@@ -1739,6 +1807,8 @@ def _create_virtual_grid_predictions(virtual_grid_size, galicia_land, stations_d
 
     print(f"\n" + "=" * 60)
     print(f"Phase 4: Creating {virtual_grid_size}x{virtual_grid_size} virtual grid...")
+    if ensemble_mode:
+        print(f"  Ensemble mode: building with {n_nearby_available} nearby stations")
     print("=" * 60)
 
     virtual_stations = create_virtual_grid_stations(
@@ -1750,6 +1820,9 @@ def _create_virtual_grid_predictions(virtual_grid_size, galicia_land, stations_d
 
     print(f"\n  Building sequences for virtual stations...")
 
+    # Need more nearby stations for ensemble mode
+    n_soil_needed = n_nearby_available if ensemble_mode else n_nearby
+
     for i, vs in enumerate(virtual_stations):
         if i % 500 == 0:
             print(f"    Processing virtual station {i+1}/{len(virtual_stations)}...")
@@ -1757,74 +1830,104 @@ def _create_virtual_grid_predictions(virtual_grid_size, galicia_land, stations_d
         nearest_real = find_nearest_real_stations(vs, stations_df, stations_lookup, n_nearest=5)
         nearest_soil = find_nearest_stations_with_soil_moisture(vs, stations_df, stations_lookup, n_max=10)
 
-        if len(nearest_soil) < 4:
+        if len(nearest_soil) < n_soil_needed:
             continue
 
         virtual_coords_interp = interpolate_coordinate_features(vs, nearest_real, stations_lookup)
 
-        sequence_data = build_sequence_for_virtual_station(
-            virtual_station=vs,
-            end_date=target_date,
-            timeseries_lookup=timeseries_lookup,
-            nearest_real_stations=nearest_real,
-            nearest_with_soil=nearest_soil,
-            virtual_coords=virtual_coords_interp,
-            stations_lookup=stations_lookup,
-            feature_params=filtered_params,
-            norm_stats=norm_stats,
-            seq_length=64,
-            n_nearest=n_nearby
-        )
+        if ensemble_mode:
+            sequence_data = build_sequence_for_virtual_station_ensemble(
+                virtual_station=vs,
+                end_date=target_date,
+                timeseries_lookup=timeseries_lookup,
+                nearest_real_stations=nearest_real,
+                nearest_with_soil=nearest_soil[:n_nearby_available],
+                virtual_coords=virtual_coords_interp,
+                stations_lookup=stations_lookup,
+                feature_params=filtered_params,
+                seq_length=64,
+                n_nearby_available=n_nearby_available
+            )
+        else:
+            sequence_data = build_sequence_for_virtual_station(
+                virtual_station=vs,
+                end_date=target_date,
+                timeseries_lookup=timeseries_lookup,
+                nearest_real_stations=nearest_real,
+                nearest_with_soil=nearest_soil,
+                virtual_coords=virtual_coords_interp,
+                stations_lookup=stations_lookup,
+                feature_params=filtered_params,
+                norm_stats=norm_stats,
+                seq_length=64,
+                n_nearest=n_nearby
+            )
 
         if sequence_data is not None:
-            features_norm, mask = sequence_data
+            features, mask = sequence_data
             station_info = {
                 'grid_id': vs['grid_id'],
                 'latitude': vs['latitude'],
-                'longitude': vs['longitude']
+                'longitude': vs['longitude'],
+                'station_id': f"grid_{vs['grid_id']}",
+                'name': f"Virtual {vs['grid_id']}"
             }
-            virtual_sequences.append((station_info, features_norm, mask))
+            virtual_sequences.append((station_info, features, mask))
 
     print(f"  ✓ Built {len(virtual_sequences)} valid virtual station sequences")
 
-    # Run batch inference for virtual stations
+    # Run inference for virtual stations
     if virtual_sequences:
-        print(f"\n  Running batched inference for virtual grid...")
-
-        batch_size = len(virtual_sequences)
-        X_batch = torch.stack([
-            torch.from_numpy(features_norm) for _, features_norm, _ in virtual_sequences
-        ])
-
-        print(f"    Batch shape: {X_batch.shape}")
-
-        x_gpu = torch.zeros([batch_size, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
-                           dtype=torch.float16, device=device)
-
-        with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
-            x_gpu[:batch_size, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
-            x = x_gpu[:batch_size, :, :]
-            predictions_normalized = model(x).cpu()
-
-        print(f"  ✓ Virtual grid inference complete")
-
-        for i, (station_info, _, _) in enumerate(virtual_sequences):
-            pred_normalized = predictions_normalized[i].item()
-            pred_denorm = denormalize_soil_moisture(
-                pred_normalized,
-                str(collector.data_dir / "normalization_stats.npz")
+        if ensemble_mode:
+            # Use ensemble inference
+            virtual_results = _run_ensemble_inference(
+                virtual_sequences, model, device, collector,
+                norm_stats=norm_stats,
+                n_nearby_output=n_nearby,
+                n_nearby_available=n_nearby_available,
+                use_skip_patterns=ensemble_skip_patterns
             )
+            # Fix type for virtual results
+            for r in virtual_results:
+                r['type'] = 'virtual'
+        else:
+            # Regular batch inference
+            print(f"\n  Running batched inference for virtual grid...")
 
-            virtual_results.append({
-                'station_id': f"grid_{station_info['grid_id']}",
-                'latitude': station_info['latitude'],
-                'longitude': station_info['longitude'],
-                'moisture': pred_denorm,
-                'type': 'virtual',
-                'name': f"Virtual {station_info['grid_id']}"
-            })
+            batch_size = len(virtual_sequences)
+            X_batch = torch.stack([
+                torch.from_numpy(features_norm) for _, features_norm, _ in virtual_sequences
+            ])
 
-        print(f"  ✓ {len(virtual_results)} virtual grid predictions complete")
+            print(f"    Batch shape: {X_batch.shape}")
+
+            x_gpu = torch.zeros([batch_size, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
+                               dtype=torch.float16, device=device)
+
+            with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
+                x_gpu[:batch_size, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
+                x = x_gpu[:batch_size, :, :]
+                predictions_normalized = model(x).cpu()
+
+            print(f"  ✓ Virtual grid inference complete")
+
+            for i, (station_info, _, _) in enumerate(virtual_sequences):
+                pred_normalized = predictions_normalized[i].item()
+                pred_denorm = denormalize_soil_moisture(
+                    pred_normalized,
+                    str(collector.data_dir / "normalization_stats.npz")
+                )
+
+                virtual_results.append({
+                    'station_id': f"grid_{station_info['grid_id']}",
+                    'latitude': station_info['latitude'],
+                    'longitude': station_info['longitude'],
+                    'moisture': pred_denorm,
+                    'type': 'virtual',
+                    'name': f"Virtual {station_info['grid_id']}"
+                })
+
+            print(f"  ✓ {len(virtual_results)} virtual grid predictions complete")
 
     # Debug: find worst offenders
     debug_find_worst_offenders(
@@ -2110,7 +2213,10 @@ def create_moisture_map(
         data['galicia_land'], data['stations_df'], data['stations_lookup'],
         data['timeseries_lookup'], data['filtered_params'], data['norm_stats'],
         data['model'], device, collector, data['target_date'], n_nearby,
-        sequences_to_predict, predicted_results
+        sequences_to_predict, predicted_results,
+        ensemble_mode=ensemble_mode,
+        n_nearby_available=n_nearby_available,
+        ensemble_skip_patterns=ensemble_skip_patterns
     )
 
     # Step 5: Generate output maps
