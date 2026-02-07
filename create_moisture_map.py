@@ -208,7 +208,7 @@ def predict_for_station(model, dataset, station_id, end_date, device='cuda'):
     sample_idx = matching_samples[0]
     sample = dataset[sample_idx]
 
-    x_gpu = torch.zeros([1, model.embed_dim - 2, model.seq_length - model.n_class_tokens], dtype=torch.float16, device="cuda")
+    x_gpu = torch.zeros([1, model.embed_dim - model.reserved_dims, model.seq_length - model.n_class_tokens], dtype=torch.float16, device="cuda")
     with (torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16)):
             data = sample["features"]
             X_batch = data
@@ -768,7 +768,7 @@ def _run_ensemble_inference(sequences_to_predict, model, device, collector,
         X_batch = torch.stack(batch_features)
 
         # Run inference
-        x_gpu = torch.zeros([n_stations, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
+        x_gpu = torch.zeros([n_stations, model.embed_dim - model.reserved_dims, model.seq_length - model.n_class_tokens],
                            dtype=torch.float16, device=device)
 
         with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True,
@@ -1748,7 +1748,7 @@ def _run_batch_inference(sequences_to_predict, model, device, collector):
 
     print(f"  Batch shape: {X_batch.shape}")
 
-    x_gpu = torch.zeros([batch_size, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
+    x_gpu = torch.zeros([batch_size, model.embed_dim - model.reserved_dims, model.seq_length - model.n_class_tokens],
                        dtype=torch.float16, device=device)
     torch._dynamo.config.disable = True
     with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
@@ -1901,7 +1901,7 @@ def _create_virtual_grid_predictions(virtual_grid_size, galicia_land, stations_d
 
             print(f"    Batch shape: {X_batch.shape}")
 
-            x_gpu = torch.zeros([batch_size, model.embed_dim - 2, model.seq_length - model.n_class_tokens],
+            x_gpu = torch.zeros([batch_size, model.embed_dim - model.reserved_dims, model.seq_length - model.n_class_tokens],
                                dtype=torch.float16, device=device)
 
             with torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):

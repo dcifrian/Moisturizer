@@ -1,6 +1,8 @@
-import torch
+from functools import partial
 
-from TROLOLO.TROLOLO_pyramid import TROLOLO
+import torch
+from TROLOLO.TROLOLO import *
+from TROLOLO.TROLOLO_Layers import PosEmbedding1D
 
 def load_model(model_path=None, device='cuda',compilation=True):
     torch._dynamo.config.disable = not compilation
@@ -26,23 +28,25 @@ def load_model(model_path=None, device='cuda',compilation=True):
                       quantize_bits=None if not quantize else 8
                       )
     """
-    trololo = TROLOLO(seq_length=64,
+    trololo = TROLOLO(sequence_length=64,
                       num_layers=8,
                       num_heads=48,
                       embed_dim=192,
+                      attention_dim="ceilheads",
                       mlp_dim=192,
                       n_class_tokens=2,
                       num_classes=1,
                       mlp_rank=0.1,
-                      qkv_rank=0.2,
+                      qkv_rank=0.15,
                       attnproj_rank=0.1,
                       sequence_pyramid=[],
-                      attn_rank_pyramid=[],
+                      attn_rank_pyramid=[(0, 32), (1, 32), (2, 32), (3, 32), (4, 32), (5, 32), (6, 16), (7, 16)],
                       rank_pyramid_begin=2,
                       rank_pyramid_factor=0.8,
                       head_constriction="ONE_CLASS_TOKEN",
                       dropout=0.05,
                       attention_dropout=0.01,
+                      pos_embedding=partial(PosEmbedding1D),
                       quantize_bits=None if not quantize else 8
                       )
     # Load checkpoint

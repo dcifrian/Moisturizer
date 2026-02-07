@@ -14,10 +14,14 @@ from pathlib import Path
 from MeteoGaliciaCollector import MeteoGaliciaCollector
 
 # Model loader - optional, only needed for inference
+from model_loader import load_model
+
+
 try:
     from model_loader import load_model
     MODEL_LOADER_AVAILABLE = True
-except ImportError:
+except ImportError as e:
+    print(e)
     MODEL_LOADER_AVAILABLE = False
     load_model = None  # Will raise error if actually used
 
@@ -925,12 +929,12 @@ Examples:
                        help='Precompute augmented dataset with N nearby available (0=disabled, use with --build)')
     parser.add_argument('--live-augment', type=int, default=5, metavar='N',
                        help='Use live augmentation with N nearby available (0=disabled, use with --train)')
-    parser.add_argument('--epochs', type=int, default=20,
+    parser.add_argument('--epochs', type=int, default=6,
                        help='Number of training epochs (default: 20)')
     parser.add_argument('--batch-size', type=int, default=512,
                        help='Training batch size (default: 512)')
-    parser.add_argument('--lr', type=float, default=4.1e-4,
-                       help='Initial learning rate (default: 4.1e-4)')
+    parser.add_argument('--lr', type=float, default=2.0e-3,
+                       help='Initial learning rate (default: 2.0e-3)')
 
     args = parser.parse_args()
 
@@ -958,6 +962,8 @@ Examples:
         )
 
     if args.train:
+        from TROLOLO.TROLOLOLR_Scheduler import TROLOLOLR_Scheduler
+        from TROLOLO.TROLOLO_Trainer import TROLOLO_Trainer
         # Determine live_augment value
         live_augment_val = args.live_augment if args.live_augment > 0 else False
 
@@ -991,12 +997,13 @@ Examples:
         print(f"Last timestep matches: {last_matches}")
 
         # Train
-        model = load_model()
-        model.training_loop(
+        trololo = load_model(compilation=True)
+        trainer = TROLOLO_Trainer(trololo=trololo, experiment_name="Moisturizer")
+        trainer.training_loop_nocnn(
             train_data=train_ds,
             val_data=val_ds,
-            lr=args.lr,
-            lr_mid=args.lr * 0.975,  # Slightly lower mid-training LR
+            lr=4.0*args.lr,
+            lr_mid=args.lr,
             lr_min=3e-5,
             n_epochs=args.epochs,
             batch_size=args.batch_size,
