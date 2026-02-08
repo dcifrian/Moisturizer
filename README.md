@@ -1,6 +1,6 @@
 # Moisturizer
 
-A weather parameter prediction system for Galicia, Spain, using data from the MeteoGalicia API. Originally developed for soil moisture prediction, the dataset system now supports configurable target parameters.
+A weather parameter imputation system for Galicia, Spain, using data from the MeteoGalicia API. Originally developed for soil moisture prediction, the dataset system now supports configurable target parameters.
 
 ## Overview
 
@@ -45,7 +45,7 @@ When `n_nearby_available > n_nearby_in_features`:
 - **Permutations**: All orderings of selected stations (`n_nearby_in_features!` permutations)
 - **Combined**: `n_nearby_available × n_nearby_in_features!` augmentation factor
 
-Example with 5 available and 4 used: 5 × 24 = **120x augmentation**
+Example with 5 available and 4 used: 5 × 4! =  5 × 24 = **120x augmentation**
 
 > In testing, 4 nearby stations with a 5th for augmentation works well, but optimal values likely depend on the model architecture. Both higher and lower configurations have been tested.
 
@@ -116,13 +116,13 @@ print(f"Augmented samples: {len(train_ds)}")
 # Basic map with model predictions
 python create_moisture_map.py --model path/to/model.pth --date 2025-01-15
 
-# High-resolution virtual grid (100×100 = 10,000 points, runs in ~1 second)
+# High-resolution virtual grid (100×100 = 10,000 points, the ones in the ocean will be skipped, 7052 will render)
 python create_moisture_map.py --model model.pth --date 2025-01-15 \
-    --virtual-grid 100 --all-maps
+    --virtual-grid 100 --all-maps --hide-markers virtual
 
 # Ensemble prediction (averages multiple augmented predictions)
 python create_moisture_map.py --model model.pth --date 2025-01-15 \
-    --ensemble --virtual-grid 100
+    --ensemble --virtual-grid 100 --hide-markers virtual
 ```
 
 ## Project Structure
